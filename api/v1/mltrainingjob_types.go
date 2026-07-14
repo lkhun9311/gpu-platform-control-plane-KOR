@@ -20,64 +20,75 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// 이 파일은 직접 고쳐 가며 채워 넣는 기본 골격이다
+// 참고: json tag는 필수, 새 field를 추가할 때 직렬화되려면 반드시 json tag를 붙일 것
 
-// MLTrainingJobSpec defines the desired state of MLTrainingJob.
+// MLTrainingJob의 원하는 상태 정의
 type MLTrainingJobSpec struct {
-	// queue is the Kueue LocalQueue name (same namespace) this job is admitted through.
+	// 이 job이 admission을 거치는 Kueue LocalQueue 이름 (같은 namespace)
+	//
 	// +required
 	Queue string `json:"queue"`
 
-	// image is the training container image.
+	// 학습 container image
+	//
 	// +required
 	Image string `json:"image"`
 
-	// command overrides the container entrypoint.
+	// container entrypoint 재정의
+	//
 	// +optional
 	Command []string `json:"command,omitempty"`
 
-	// gpuClass is the illustrative GPU class (e.g. "l40s").
-	// Locally this is backed by simulated capacity (see the dev runbook).
+	// 예시용 GPU class (예: "l40s"),
+	// local에서는 시뮬레이션된 용량을 기준으로 동작한다 (개발 runbook 참고).
+	//
 	// +optional
 	GPUClass string `json:"gpuClass,omitempty"`
 
-	// gpuCount is the number of GPUs (nvidia.com/gpu) per pod.
-	// Locally this is backed by simulated capacity, not real hardware.
+	// pod당 GPU 수 (nvidia.com/gpu),
+	// local에서는 실제 hardware가 아니라 시뮬레이션된 용량을 기준으로 한다.
+	//
 	// +kubebuilder:validation:Minimum=0
 	// +required
 	GPUCount int32 `json:"gpuCount"`
 
-	// parallelism is the batch/v1 Job parallelism (concurrent pods).
+	// batch/v1 Job의 parallelism (동시 실행 pod 수)
+	//
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=1
 	// +optional
 	Parallelism int32 `json:"parallelism,omitempty"`
 
-	// completions is the batch/v1 Job completions (successful pods required).
+	// batch/v1 Job의 completions (성공해야 하는 pod 수)
+	//
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=1
 	// +optional
 	Completions int32 `json:"completions,omitempty"`
 }
 
-// MLTrainingJobStatus defines the observed state of MLTrainingJob.
+// MLTrainingJob의 관찰된 상태 정의
 type MLTrainingJobStatus struct {
-	// phase tracks the Kueue admission and run lifecycle.
+	// Kueue admission과 실행 수명주기 추적
+	//
 	// +kubebuilder:validation:Enum=Pending;Admitted;Running;Succeeded;Failed
 	// +optional
 	Phase string `json:"phase,omitempty"`
 
-	// observedGeneration is the most recent generation observed by the controller.
+	// controller가 마지막으로 관찰한 generation
+	//
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// lastTransitionTime is the time the phase last changed.
+	// phase가 마지막으로 바뀐 시각
+	//
 	// +optional
 	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
 
-	// conditions represent the current state of the MLTrainingJob resource.
-	// The status of each condition is one of True, False, or Unknown.
+	// MLTrainingJob resource의 현재 상태 표현,
+	// 각 condition의 status는 True, False, Unknown 중 하나다.
+	//
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -90,26 +101,29 @@ type MLTrainingJobStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// MLTrainingJob is the Schema for the mltrainingjobs API
+// mltrainingjobs API의 schema
 type MLTrainingJob struct {
 	metav1.TypeMeta `json:",inline"`
 
-	// metadata is a standard object metadata
+	// 표준 object metadata
+	//
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-	// spec defines the desired state of MLTrainingJob
+	// MLTrainingJob의 원하는 상태 정의
+	//
 	// +required
 	Spec MLTrainingJobSpec `json:"spec"`
 
-	// status defines the observed state of MLTrainingJob
+	// MLTrainingJob의 관찰된 상태 정의
+	//
 	// +optional
 	Status MLTrainingJobStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
 
-// MLTrainingJobList contains a list of MLTrainingJob
+// MLTrainingJob 목록 포함
 type MLTrainingJobList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`

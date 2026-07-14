@@ -1,77 +1,64 @@
-# gpu-platform-control-plane
+# gpu-platform-control-plane 한국어판
 
-Kubernetes-native control plane that manages GPUs as a platform resource.
+GPU를 단순한 장비가 아니라 Kubernetes 플랫폼 리소스로 다루는 컨트롤 플레인입니다.
 
-## Overview
+## 한 줄 요약
 
-Most GPU setups stop at running a single workload. This project treats the GPU as a shared platform resource, covering node readiness, multi-tenant quota, serving, and training through one Kubernetes-native control plane.
+이 프로젝트는 GPU 노드 상태, 테넌트별 쿼터, 추론 서빙, 학습 잡 입장 제어, 관측성 증거를 하나의 Kubernetes-native 컨트롤 플레인으로 묶습니다. 포트폴리오 관점에서는 "GPU 플랫폼을 운영자가 어떻게 안전하게 공유 자원으로 노출할 것인가"를 보여주는 프로젝트입니다.
 
-## Scope
+## 핵심 범위
 
-The control plane is organized into the following areas:
+| 영역 | 설명 |
+| --- | --- |
+| GPU 노드 상태 | `NodeHealth` CR로 GPU 노드의 준비 상태를 표현하고, 비정상 노드는 스케줄링에서 제외합니다. |
+| 멀티테넌트 쿼터 | `GPUQuotaPolicy`를 기준으로 namespace별 `ResourceQuota`와 격리 정책을 동기화합니다. |
+| 추론 서빙 | `InferenceDeployment`로 모델 서빙 Deployment와 Service를 선언적으로 관리합니다. |
+| 성능 격리 | GPU 공유 상황에서 noisy neighbor가 p99 지연시간에 주는 영향을 측정하고 완화합니다. |
+| 게이트웨이 | API key로 테넌트를 식별하고, 토큰 버킷 기반 rate limit과 모델 라우팅을 수행합니다. |
+| 학습 입장 제어 | `MLTrainingJob`을 Kueue 기반 `Job`/`Workload` 흐름으로 연결합니다. |
+| 운영 증거 | 메트릭, 상태, 이벤트, 운영 로그를 문서와 ledger로 남겨 설계 판단을 검증합니다. |
 
-| Area                   | What it does                                                                                                    |
-|------------------------|-----------------------------------------------------------------------------------------------------------------|
-| GPU node readiness     | Represent node GPU state as a `NodeHealth` CR; block scheduling on degraded nodes                               |
-| Multi-tenant quota     | Sync per-tenant quota and isolation policy from `GPUQuotaPolicy` into namespace objects                         |
-| Inference serving      | Manage serving workloads declaratively via `InferenceDeployment`                                                |
-| Performance isolation  | Measure multi-tenant noisy-neighbor p99 contention under GPU sharing via `GpuSharingBenchmark` (killer feature) |
-| Failure & recovery     | Inject failure scenarios and validate the response path                                                         |
-| Observability & ledger | Metrics, dashboards, and a SQLite ledger that projects CR/status/events                                         |
-| Gateway & CLI          | A lightweight multi-tenant gateway and a `platformctl` CLI                                                      |
-| Training admission     | Translate `MLTrainingJob` into queued `batch/v1` Jobs admitted through Kueue (M6)                               |
+## 아키텍처
 
-Training admission (M6) uses [Kueue](https://kueue.sigs.k8s.io/) as the admission engine — this project does not reimplement a scheduler; it provides the `MLTrainingJob` abstraction and the status translation on top of Kueue. For training GPUs, Kueue owns the admission quota (`GPUQuotaPolicy` syncs to ClusterQueue/ResourceFlavor rather than double-counting the same GPUs in a namespace ResourceQuota).
+컨트롤 플레인은 CRD를 소유하고, 각 CR을 Kubernetes 기본 리소스로 reconcile합니다. 데이터 플레인은 Deployment, Service, Job, ResourceQuota처럼 익숙한 Kubernetes 오브젝트로 유지하며 owner reference로 수명주기를 관리합니다.
 
-## Architecture
+```text
+사용자/플랫폼 팀
+  -> GPUQuotaPolicy / NodeHealth / InferenceDeployment / MLTrainingJob
+  -> Controller Reconcile
+  -> ResourceQuota / Deployment / Service / Job / Kueue Workload
+  -> 메트릭, 상태, 이벤트, 운영 증거
+```
 
-The control plane owns the CRDs and reconciles them into native cluster objects. The data plane is ordinary Kubernetes resources created and garbage-collected through owner references.
+## 마일스톤 상태
 
-## Status
+| 마일스톤 | 범위 | 상태 |
+| --- | --- | --- |
+| M1 | 프로젝트 골격과 핵심 CRD 정의, envtest 검증 | 완료 |
+| M2 | idempotent reconcile, finalizer, drift recovery | 완료 |
+| M3 | 비정상 GPU 노드 taint, 테넌트별 ResourceQuota 동기화 | 완료 |
+| M4-a | `InferenceDeployment` 기반 추론 워크로드 관리 | 완료 |
+| M4-b | 테넌트 인식 서빙 게이트웨이, rate limit, 라우팅, 메트릭 | 진행 중 |
+| M5 | AWS/EKS 배포 설계와 real GPU 성능 격리 실험 | 설계 완료/확장 예정 |
+| M6 | Kueue 기반 학습 잡 입장 제어 | 계획 |
+| M7 | 실패 주입과 운영 증거 기록 | 스케치 |
 
-The project is built milestone by milestone.
+## 기술 스택
 
-| Milestone | Scope                                                                                                                                                                            | Status          |
-|-----------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------|
-| M1        | Set up the project skeleton and define the core CRDs, verified with envtest                                                                                                      | Done            |
-| M2        | Make reconciliation idempotent, with finalizers and drift recovery (NodeHealth reference)                                                                                        | Done            |
-| M3        | Taint unhealthy nodes (NodeHealth enforcement) and sync per-tenant quota into ResourceQuota                                                                                      | Done            |
-| M4-a      | Manage inference workloads: `InferenceDeployment` → Deployment/Service with a phase ladder                                                                                       | Done            |
-| M4-b      | Tenant-aware serving gateway: API key → tenant, token bucket → 429, model routing, proxy, metrics                                                                                | In progress     |
-| M5-a      | AWS hosting: Terraform (state bootstrap, EKS, node groups), GitHub Actions CI (OIDC → ECR), Argo CD GitOps, operator deployed on EKS, slim observability — no GPU yet            | Designed (v3.1) |
-| M5-b      | Real-GPU flagship on that infra: GPU node group (On-Demand, ephemeral), `GpuSharingBenchmark` + KV-cache-aware admission guard, measured noisy-neighbor p99 A/B (killer feature) | Designed        |
-| M5-c      | Depth: cost/fairness frontier (≥3 guard thresholds) + sharing-mode matrix (exclusive / time-slicing / MPS) — hardens the M5-b evidence, no new features                          | Planned         |
-| M5-d      | Technical write-up with the measured numbers (published after M5-c)                                                                                                              | Planned         |
-| M6        | Training admission (promoted from stretch): `MLTrainingJob` → Job + Kueue Workload, 2-tenant fair sharing, preemption evidence on kind; Kueue owns training quota                | Planned         |
-| M7        | Inject failure scenarios and record an operational evidence trail (`WorkloadRun`)                                                                                                | Sketched        |
+- Go, controller-runtime, Kubebuilder
+- kind, envtest, Kubernetes CRD/RBAC/Kustomize
+- Kueue, KEDA, Prometheus 계열 관측성 도구
 
-GPU capacity used in validation is simulated. Real GPU serving, hardware fault detection, the contention benchmark's p99 figures, and AWS deployment are designed but not yet exercised.
-
-**Flagship benchmark:** KV-cache-aware noisy-neighbor p99 protection — a real-GPU benchmark that compares premium tenant latency under baseline, colocated long-context noisy-neighbor, and Gateway admission-guard modes. See `docs/04_GPU_GOVERNANCE_AND_ISOLATION.md` (M5 Flagship Experiment).
-
-## Tech stack
-
-- Go, controller-runtime, scaffolded with [kubebuilder](https://book.kubebuilder.io/)
-- kind for the local cluster, envtest for controller tests
-- Kueue (training admission), KEDA (autoscaling), kube-prometheus-stack (metrics)
-
-## Local development
-
-Requires Docker, Go, kind, kubectl, and kubebuilder.
+## 로컬 개발
 
 ```bash
-# create the local 3-node cluster (control-plane + 2 workers)
 kind create cluster --config hack/kind-config.yaml
-
-# generate manifests and build the controller binary
 make manifests
 make build
-
-# run controller tests (envtest)
 make test
 ```
 
-Simulated GPU capacity on a **kind** worker node, only for end-to-end scheduling/quota-*enforcement* validation (the GPUQuotaPolicy controller itself needs no GPU capacity — it writes a `requests.nvidia.com/gpu` ResourceQuota; capacity matters only when sample pods actually request GPU):
+kind 환경에서는 실제 GPU 없이도 스케줄링과 쿼터 enforcement 흐름을 검증할 수 있도록 노드 상태에 가짜 GPU capacity를 패치합니다.
 
 ```bash
 kubectl patch node platform-worker --subresource=status --type=json \
@@ -79,18 +66,17 @@ kubectl patch node platform-worker --subresource=status --type=json \
        {"op":"add","path":"/status/allocatable/nvidia.com~1gpu","value":"4"}]'
 ```
 
-> This node-status patch holds on kind because no device plugin reconciles GPU capacity there. On a real cluster (e.g. EKS) the kubelet/device plugin owns node status and would overwrite it, so advertise simulated capacity with a device-plugin-style DaemonSet instead.
+## 디렉터리 구조
 
-## Repository layout
-
+```text
+api/      CRD 타입 정의
+cmd/      컨트롤러와 게이트웨이 엔트리포인트
+config/   CRD, RBAC, manager, sample manifest
+docs/     설계 문서와 포트폴리오 설명
+internal/ 컨트롤러와 게이트웨이 구현
+test/     e2e 테스트 골격
 ```
-api/            CRD types
-cmd/            controller manager entrypoint
-config/         kustomize manifests (CRD, RBAC, manager)
-hack/           dev config and scaffolding helpers (kind-config.yaml)
-test/           e2e test scaffolding
-```
 
-## License
+## 라이선스
 
-[Apache 2.0](LICENSE)
+Apache 2.0

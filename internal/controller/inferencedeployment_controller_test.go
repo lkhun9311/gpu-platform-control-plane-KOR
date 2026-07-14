@@ -105,7 +105,7 @@ var _ = Describe("InferenceDeployment Controller", func() {
 			Expect(hasReq).To(BeFalse())
 		})
 
-		// markDeploymentObserved patches the Deployment status as the (absent) Deployment controller would.
+		// 부재중인 Deployment controller를 대신해 Deployment status를 직접 patch
 		markDeploymentObserved := func(ready int32) {
 			dep := &appsv1.Deployment{}
 			Expect(k8sClient.Get(ctx, key, dep)).To(Succeed())
@@ -122,7 +122,7 @@ var _ = Describe("InferenceDeployment Controller", func() {
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Deployment status is stale (observedGeneration 0) -> Progressing.
+			// Deployment status가 아직 반영 전(observedGeneration 0)이라 Progressing
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(mustGet(ctx, key).Status.Phase).To(Equal("Progressing"))
@@ -191,14 +191,14 @@ var _ = Describe("InferenceDeployment Controller", func() {
 		})
 
 		It("reports Progressing (not Ready) when Replicas=3 but desired is 2 (surplus not yet removed)", func() {
-			// Create an InferenceDeployment with 2 desired replicas.
+			// desired replica 2개로 InferenceDeployment 생성
 			Expect(k8sClient.Create(ctx, newInfD(2, 1))).To(Succeed())
 			r := reconciler()
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Simulate a scale-down in flight: Deployment controller reports 3 total replicas
-			// (all updated, all ready) but the surplus old replica has not yet been removed.
+			// scale down 진행 중 상황 재현으로, Deployment controller가 총 replica 3개(모두 updated, 모두 ready)를 보고하지만,
+			// 잉여 old replica는 아직 제거되지 않은 상태.
 			dep := &appsv1.Deployment{}
 			Expect(k8sClient.Get(ctx, key, dep)).To(Succeed())
 			dep.Status.ObservedGeneration = dep.Generation
@@ -209,12 +209,12 @@ var _ = Describe("InferenceDeployment Controller", func() {
 
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			Expect(err).NotTo(HaveOccurred())
-			// Must NOT report Ready: total replica count has not converged to desired=2.
+			// Ready로 올리면 안 됨, 총 replica 수가 아직 desired=2로 수렴하지 않음
 			Expect(mustGet(ctx, key).Status.Phase).To(Equal("Progressing"))
 		})
 
 		It("does not prematurely report Ready when scale-down to zero is not yet observed by the Deployment", func() {
-			// Start with 2 ready replicas.
+			// ready replica 2개로 시작
 			Expect(k8sClient.Create(ctx, newInfD(2, 1))).To(Succeed())
 			r := reconciler()
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
@@ -224,17 +224,17 @@ var _ = Describe("InferenceDeployment Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(mustGet(ctx, key).Status.Phase).To(Equal("Ready"))
 
-			// Scale to zero in the InferenceDeployment spec.
+			// InferenceDeployment spec을 0으로 scale down
 			infd := mustGet(ctx, key)
 			infd.Spec.Replicas = 0
 			Expect(k8sClient.Update(ctx, infd)).To(Succeed())
 
-			// Reconcile: the Deployment now has Replicas=0 in spec but the Deployment
-			// status still shows the old generation (ObservedGeneration < Generation).
+			// Reconcile 시점에 이제 Deployment spec은 Replicas=0이지만,
+			// Deployment status는 아직 이전 generation을 가리킴(ObservedGeneration < Generation).
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Stale gate fires before ScaledToZero: must not report Ready prematurely.
+			// stale gate가 ScaledToZero보다 먼저 걸리므로 성급하게 Ready로 올리면 안 됨
 			dep := &appsv1.Deployment{}
 			Expect(k8sClient.Get(ctx, key, dep)).To(Succeed())
 			dep.Status.ObservedGeneration = dep.Generation - 1
@@ -246,8 +246,8 @@ var _ = Describe("InferenceDeployment Controller", func() {
 		})
 
 		It("is idempotent once steady", func() {
-			// Create with 0 replicas so the reconciler reaches Ready on first pass without
-			// needing a manual Deployment status patch.
+			// replica 0으로 생성해 첫 pass에서 바로 Ready에 도달하도록 하여,
+			// 수동 Deployment status patch 없이도 진행되게 함.
 			Expect(k8sClient.Create(ctx, newInfD(0, 0))).To(Succeed())
 			r := reconciler()
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
@@ -257,7 +257,7 @@ var _ = Describe("InferenceDeployment Controller", func() {
 			Expect(k8sClient.Get(ctx, key, depBefore)).To(Succeed())
 			infdBefore := mustGet(ctx, key)
 
-			// A second reconcile must not write any Deployment or InferenceDeployment update.
+			// 두 번째 reconcile은 Deployment나 InferenceDeployment 어느 것도 갱신하면 안 됨
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			Expect(err).NotTo(HaveOccurred())
 
@@ -273,13 +273,13 @@ var _ = Describe("InferenceDeployment Controller", func() {
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Tamper with the Deployment image directly to simulate drift.
+			// drift 재현을 위해 Deployment image를 직접 변조
 			dep := &appsv1.Deployment{}
 			Expect(k8sClient.Get(ctx, key, dep)).To(Succeed())
 			dep.Spec.Template.Spec.Containers[0].Image = "tampered:bad"
 			Expect(k8sClient.Update(ctx, dep)).To(Succeed())
 
-			// The next reconcile must overwrite the drifted image.
+			// 다음 reconcile에서 변조된 image를 덮어써야 함
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			Expect(err).NotTo(HaveOccurred())
 
@@ -302,10 +302,10 @@ var _ = Describe("InferenceDeployment Controller", func() {
 			_, err := reconciler().Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			Expect(err).NotTo(HaveOccurred())
 
-			// InferenceDeployment must be Degraded; we did not own the Service.
+			// Service를 소유하지 않았으므로 InferenceDeployment는 Degraded여야 함
 			Expect(mustGet(ctx, key).Status.Phase).To(Equal("Degraded"))
 
-			// Service must not have been adopted or overwritten.
+			// Service가 adopt되거나 덮어써지면 안 됨
 			got := &corev1.Service{}
 			Expect(k8sClient.Get(ctx, key, got)).To(Succeed())
 			Expect(got.OwnerReferences).To(BeEmpty())
@@ -313,7 +313,7 @@ var _ = Describe("InferenceDeployment Controller", func() {
 		})
 
 		It("removes the GPU resource when GPUCount changes from 1 to 0", func() {
-			// Create an InferenceDeployment with 1 GPU and verify the resource is set.
+			// GPU 1개로 InferenceDeployment 생성 후 resource가 설정됐는지 확인
 			Expect(k8sClient.Create(ctx, newInfD(1, 1))).To(Succeed())
 			r := reconciler()
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
@@ -324,7 +324,7 @@ var _ = Describe("InferenceDeployment Controller", func() {
 			Expect(dep.Spec.Template.Spec.Containers[0].Resources.Requests).To(HaveKey(nvidiaGPUResource))
 			Expect(dep.Spec.Template.Spec.Containers[0].Resources.Limits).To(HaveKey(nvidiaGPUResource))
 
-			// Update GPUCount to 0 and reconcile; the GPU resource must be removed.
+			// GPUCount를 0으로 바꾸고 reconcile하면 GPU resource가 제거돼야 함
 			infd := mustGet(ctx, key)
 			infd.Spec.GPUCount = 0
 			Expect(k8sClient.Update(ctx, infd)).To(Succeed())

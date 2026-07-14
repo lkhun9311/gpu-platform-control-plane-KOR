@@ -27,7 +27,7 @@ import (
 	platformv1 "github.com/lkhun9311/gpu-mlops-platform-control-plane/api/v1"
 )
 
-// MLTrainingJobReconciler reconciles a MLTrainingJob object
+// MLTrainingJob object를 reconcile
 type MLTrainingJobReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -37,25 +37,22 @@ type MLTrainingJobReconciler struct {
 // +kubebuilder:rbac:groups=platform.lkhun9311.github.io,resources=mltrainingjobs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=platform.lkhun9311.github.io,resources=mltrainingjobs/finalizers,verbs=update
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the MLTrainingJob object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
+// cluster의 현재 상태를 원하는 상태에 가깝게 옮기는 main Kubernetes reconciliation loop의 일부
+// TODO(user): MLTrainingJob object가 지정한 상태와 실제 cluster 상태를 비교하고,
+// 사용자가 지정한 상태를 cluster가 반영하도록 동작을 수행하게끔 Reconcile 함수를 수정할 것
 //
-// For more details, check Reconcile and its Result here:
+// Reconcile과 그 Result에 대한 자세한 내용은 아래 참고
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/reconcile
 func (r *MLTrainingJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	// M1: empty reconciler — log the request only.
-	// batch/v1 Job creation and Kueue admission land in M5.
+	// M1: 빈 reconciler, 요청만 log로 기록
+	// batch/v1 Job 생성과 Kueue admission은 M5에서 다룸
 	log.Info("Reconciling MLTrainingJob", "name", req.Name, "namespace", req.Namespace)
 
 	return ctrl.Result{}, nil
 }
 
-// SetupWithManager sets up the controller with the Manager.
+// controller를 Manager에 등록
 func (r *MLTrainingJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&platformv1.MLTrainingJob{}).

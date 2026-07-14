@@ -20,80 +20,91 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// 이 파일은 직접 고쳐 가며 채워 넣는 기본 골격이다
+// 참고: json tag는 필수, 새 field를 추가할 때 직렬화되려면 반드시 json tag를 붙일 것
 
-// GPUQuotaPolicySpec defines the desired state of GPUQuotaPolicy.
+// GPUQuotaPolicy의 원하는 상태 정의
 type GPUQuotaPolicySpec struct {
-	// tenant is the logical tenant (team/org) this policy applies to.
-	// A tenant may own multiple namespaces, so this is distinct from targetNamespace.
+	// 이 정책이 적용되는 논리적 tenant (팀/조직),
+	// tenant는 여러 namespace를 소유할 수 있어 targetNamespace와는 별개다.
+	//
 	// +required
 	Tenant string `json:"tenant"`
 
-	// targetNamespace is the namespace into which quota objects are synced.
-	// It is immutable: a policy enforces quota in exactly one namespace for its lifetime.
-	// Changing it would orphan the ResourceQuota already synced into the old namespace
-	// (the reconciler only ever reconciles the namespace named here),
-	// so migration is done by deleting and recreating the policy rather than mutating this field.
+	// quota object가 동기화되는 namespace,
+	// 이 값은 불변이며 정책은 수명 동안 정확히 하나의 namespace에만 quota를 강제한다,
+	// 값을 바꾸면 예전 namespace에 이미 동기화된 ResourceQuota가 고아가 된다 (reconciler는 여기 명시된 namespace만 처리한다),
+	// 따라서 migration은 이 field를 바꾸지 않고 정책을 삭제한 뒤 재생성하는 방식으로 처리한다.
+	//
 	// +required
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="targetNamespace is immutable"
 	TargetNamespace string `json:"targetNamespace"`
 
-	// gpuClass records the GPU class (e.g. "l40s") this policy is intended for.
-	// Empty means all classes.
-	// NOTE: per-class quota scoping is not yet enforced.
-	// This milestone caps a single aggregate ceiling (requests.nvidia.com/gpu) regardless of class;
-	// the field is recorded for a later milestone that will enforce per-class resource keys (see the gpuClass note in the reconciler).
+	// 이 정책이 대상으로 하는 GPU class를 기록한다 (예: "l40s"),
+	// 비어 있으면 전체 class를 대상으로 한다,
+	// class별 quota 한정은 아직 강제되지 않으며,
+	// 이 milestone에서는 class와 무관하게 단일 집계 상한(requests.nvidia.com/gpu)만 제한한다,
+	// 이 field는 class별 resource key를 강제할 후속 milestone을 위해 기록해 둔다 (reconciler의 gpuClass 주석 참고).
+	//
 	// +optional
 	GPUClass string `json:"gpuClass,omitempty"`
 
-	// limits is the quota ceiling for this tenant in the target namespace.
+	// 대상 namespace에서 이 tenant에 적용되는 quota 상한
+	//
 	// +required
 	Limits GPUQuotaLimits `json:"limits"`
 
-	// rateLimit caps the per-tenant serving request rate enforced at the gateway (admission Layer 4).
-	// It is optional: a policy without rateLimit means the tenant has no gateway rate limit.
+	// gateway에서 강제하는 tenant별 서빙 요청 속도 상한 (admission Layer 4),
+	// 선택값이며 rateLimit이 없는 정책은 해당 tenant에 gateway 속도 제한이 없다는 뜻이다.
+	//
 	// +optional
 	RateLimit *GPUQuotaRateLimit `json:"rateLimit,omitempty"`
 }
 
-// GPUQuotaRateLimit is the per-tenant token-bucket configuration consumed by the serving gateway.
+// 서빙 gateway가 사용하는 tenant별 token bucket 설정
 type GPUQuotaRateLimit struct {
-	// requestsPerMinute is the sustained request rate allowed for the tenant.
+	// tenant에 허용되는 지속 요청 속도
+	//
 	// +kubebuilder:validation:Minimum=1
 	RequestsPerMinute int32 `json:"requestsPerMinute"`
 
-	// burst is the maximum momentary burst the bucket allows above the sustained rate.
+	// 지속 속도를 넘어 bucket이 순간적으로 허용하는 최대 burst
+	//
 	// +kubebuilder:validation:Minimum=1
 	Burst int32 `json:"burst"`
 }
 
-// GPUQuotaLimits is the quota ceiling for a tenant.
+// tenant의 quota 상한
 type GPUQuotaLimits struct {
-	// gpuCount is the maximum number of GPUs (nvidia.com/gpu) allowed.
-	// Locally this is backed by simulated capacity, not real hardware.
+	// 허용되는 최대 GPU 수 (nvidia.com/gpu),
+	// local에서는 실제 hardware가 아니라 시뮬레이션된 용량을 기준으로 한다.
+	//
 	// +kubebuilder:validation:Minimum=0
 	// +required
 	GPUCount int32 `json:"gpuCount"`
 }
 
-// GPUQuotaPolicyStatus defines the observed state of GPUQuotaPolicy.
+// GPUQuotaPolicy의 관찰된 상태 정의
 type GPUQuotaPolicyStatus struct {
-	// phase is the high-level sync state of the policy.
+	// 정책의 상위 수준 동기화 상태
+	//
 	// +kubebuilder:validation:Enum=Pending;Synced;Degraded
 	// +optional
 	Phase string `json:"phase,omitempty"`
 
-	// observedGeneration is the most recent generation observed by the controller.
+	// controller가 마지막으로 관찰한 generation
+	//
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// lastTransitionTime is the time the phase last changed.
+	// phase가 마지막으로 바뀐 시각
+	//
 	// +optional
 	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
 
-	// conditions represent the current state of the GPUQuotaPolicy resource.
-	// The status of each condition is one of True, False, or Unknown.
+	// GPUQuotaPolicy resource의 현재 상태 표현,
+	// 각 condition의 status는 True, False, Unknown 중 하나다.
+	//
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -108,26 +119,29 @@ type GPUQuotaPolicyStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// GPUQuotaPolicy is the Schema for the gpuquotapolicies API
+// gpuquotapolicies API의 schema
 type GPUQuotaPolicy struct {
 	metav1.TypeMeta `json:",inline"`
 
-	// metadata is a standard object metadata
+	// 표준 object metadata
+	//
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-	// spec defines the desired state of GPUQuotaPolicy
+	// GPUQuotaPolicy의 원하는 상태 정의
+	//
 	// +required
 	Spec GPUQuotaPolicySpec `json:"spec"`
 
-	// status defines the observed state of GPUQuotaPolicy
+	// GPUQuotaPolicy의 관찰된 상태 정의
+	//
 	// +optional
 	Status GPUQuotaPolicyStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
 
-// GPUQuotaPolicyList contains a list of GPUQuotaPolicy
+// GPUQuotaPolicy 목록 포함
 type GPUQuotaPolicyList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`

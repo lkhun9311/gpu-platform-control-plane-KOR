@@ -1,4 +1,4 @@
-# This patch adds the args to allow exposing the metrics endpoint using HTTPS
+# 이 patch는 HTTPS로 metric endpoint를 노출하도록 args를 추가한다.
 - op: add
   path: /spec/template/spec/containers/0/args/0
   value: --metrics-bind-address=:8443

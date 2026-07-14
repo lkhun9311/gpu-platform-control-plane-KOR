@@ -25,7 +25,7 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// TestGateway registers the Ginkgo suite for the gateway package.
+// gateway package의 Ginkgo suite 등록
 func TestGateway(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Gateway Suite")
@@ -36,10 +36,10 @@ var _ = Describe("readiness", func() {
 		s := &Server{}
 		rr := httptest.NewRecorder()
 		s.readyz(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
-		Expect(rr.Code).To(Equal(http.StatusServiceUnavailable))
+		Expect(rr.Code).To(Equal(http.StatusServiceUnavailable)) // cache 동기화 전이라 503
 		s.markReady()
 		rr2 := httptest.NewRecorder()
 		s.readyz(rr2, httptest.NewRequest(http.MethodGet, "/readyz", nil))
-		Expect(rr2.Code).To(Equal(http.StatusOK))
+		Expect(rr2.Code).To(Equal(http.StatusOK)) // markReady 이후 200
 	})
 })

@@ -35,7 +35,7 @@ import (
 	platformv1 "github.com/lkhun9311/gpu-mlops-platform-control-plane/api/v1"
 )
 
-// NodeHealthReconciler reconciles a NodeHealth object
+// NodeHealth object를 재조정하는 reconciler
 type NodeHealthReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -46,9 +46,16 @@ type NodeHealthReconciler struct {
 // +kubebuilder:rbac:groups=platform.lkhun9311.github.io,resources=nodehealths/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
 
-// Reconcile observes the target Node, reflects its readiness into NodeHealth status, and enforces quarantine:
-// a not-ready node is tainted so the scheduler stops placing GPU workloads on it,
-// and the taint is removed when the node recovers or the NodeHealth is deleted.
+// 대상 Node를 관찰해 readiness를 NodeHealth 상태에 반영하고 격리를 적용하는데,
+// not-ready node에는 taint를 걸어 scheduler가 GPU workload를 배치하지 못하게 하고,
+// node가 복구되거나 NodeHealth가 삭제되면 taint를 제거한다.
+//
+// 재조정 흐름:
+//  1. 삭제 중이면 부여한 unhealthy taint를 걷어낸 뒤 finalizer를 떼어 실제 삭제가 진행되게 한다,
+//  2. finalizer가 없으면 붙이고 이번 pass를 끝낸다 (소유 taint를 만들기 전에 정리 약속을 먼저 건다),
+//  3. 대상 Node를 읽어 세 상태 중 하나로 판정한다 — node 없음→Pending, Ready→Ready(격리 해제), not-ready→Quarantine(격리 taint 부여),
+//  4. taint 변경을 Node에 먼저 patch해 반영하지 못한 격리를 status가 주장하지 않게 한다,
+//  5. status가 실제로 바뀐 경우에만 멱등하게 기록한다.
 func (r *NodeHealthReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -57,7 +64,7 @@ func (r *NodeHealthReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Handle deletion: remove our taint from the node, then drop the finalizer.
+	// 삭제 처리: node에서 부여한 taint를 지운 뒤 finalizer 제거
 	if !nh.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&nh, nodeHealthFinalizer) {
 			var node corev1.Node
@@ -71,7 +78,7 @@ func (r *NodeHealthReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 					log.Info("Removed unhealthy taint on deletion", "node", node.Name)
 				}
 			case apierrors.IsNotFound(err):
-				// Node already gone; nothing to clean up.
+				// node가 이미 사라짐, 정리할 것 없음
 			default:
 				return ctrl.Result{}, fmt.Errorf("get node %s on deletion: %w", nh.Spec.NodeName, err)
 			}
@@ -83,7 +90,7 @@ func (r *NodeHealthReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
-	// Ensure the finalizer is present before doing work.
+	// 작업 시작 전 finalizer 존재 보장
 	if !controllerutil.ContainsFinalizer(&nh, nodeHealthFinalizer) {
 		controllerutil.AddFinalizer(&nh, nodeHealthFinalizer)
 		if err := r.Update(ctx, &nh); err != nil {
@@ -92,7 +99,7 @@ func (r *NodeHealthReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
-	// Observe the target Node and compute the desired status + taint enforcement.
+	// 대상 Node를 관찰해 원하는 상태와 taint 적용 여부 계산
 	desired := nh.Status.DeepCopy()
 	desired.ObservedGeneration = nh.Generation
 
@@ -102,7 +109,7 @@ func (r *NodeHealthReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	err := r.Get(ctx, types.NamespacedName{Name: nh.Spec.NodeName}, &node)
 	switch {
 	case apierrors.IsNotFound(err):
-		// No node to manage: report Pending and clear any fault signal.
+		// 관리할 node 없음, Pending 보고 후 결함 신호 clear
 		setPhase(desired, phasePending)
 		desired.FaultSignal = nil
 		setReadyCondition(desired, false, reasonNodeNotFound, "Target node not found", nh.Generation)
@@ -112,18 +119,18 @@ func (r *NodeHealthReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		nodeBase = node.DeepCopy()
 		setPhase(desired, phaseReady)
 		desired.FaultSignal = nil
-		nodeChanged = removeUnhealthyTaint(&node)
+		nodeChanged = removeUnhealthyTaint(&node) // Ready 복귀 시 격리 taint 해제
 		setReadyCondition(desired, true, reasonNodeReady, "Target node is Ready", nh.Generation)
 	default:
 		nodeBase = node.DeepCopy()
 		setPhase(desired, phaseQuarantine)
 		desired.FaultSignal = &platformv1.FaultSignal{Source: faultSourceNodeNotReady}
-		nodeChanged = ensureUnhealthyTaint(&node)
+		nodeChanged = ensureUnhealthyTaint(&node) // not-ready node에 격리 taint 부여
 		setReadyCondition(desired, false, reasonNodeNotReady, "Target node is not Ready", nh.Generation)
 	}
 
-	// Enforce taint changes on the node first, so status never claims a quarantine we failed to apply.
-	// Patch only the taint delta from the pre-mutation base, so concurrent kubelet updates to the hot Node object are not clobbered.
+	// taint 변경을 node에 먼저 반영해 적용하지 못한 격리를 상태가 주장하지 않도록 하고,
+	// 변경 전 base 대비 taint delta만 patch하여 hot한 Node object에 대한 kubelet 동시 갱신을 덮어쓰지 않게 한다.
 	if nodeChanged {
 		if err := r.Patch(ctx, &node, client.MergeFrom(nodeBase)); err != nil {
 			return ctrl.Result{}, fmt.Errorf("update node %s taints: %w", node.Name, err)
@@ -131,7 +138,7 @@ func (r *NodeHealthReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		log.Info("Updated node taints", "node", node.Name, "phase", desired.Phase)
 	}
 
-	// Idempotent: write status only when it actually changed.
+	// 멱등: 실제로 바뀐 경우에만 상태 기록
 	if !equality.Semantic.DeepEqual(nh.Status, *desired) {
 		nh.Status = *desired
 		if err := r.Status().Update(ctx, &nh); err != nil {
@@ -143,8 +150,8 @@ func (r *NodeHealthReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	return ctrl.Result{}, nil
 }
 
-// mapNodeToNodeHealth maps a Node event to reconcile requests for every NodeHealth whose spec.nodeName matches the node.
-// This propagates node-side drift back into status.
+// Node event를 spec.nodeName이 일치하는 모든 NodeHealth의 재조정 요청으로 변환하고,
+// node 측 drift를 상태로 다시 전파하는 역할을 한다.
 func (r *NodeHealthReconciler) mapNodeToNodeHealth(ctx context.Context, obj client.Object) []reconcile.Request {
 	var list platformv1.NodeHealthList
 	if err := r.List(ctx, &list); err != nil {
@@ -161,7 +168,7 @@ func (r *NodeHealthReconciler) mapNodeToNodeHealth(ctx context.Context, obj clie
 	return reqs
 }
 
-// SetupWithManager sets up the controller with the Manager.
+// Manager에 controller 등록
 func (r *NodeHealthReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&platformv1.NodeHealth{}).

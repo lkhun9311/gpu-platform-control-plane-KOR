@@ -30,6 +30,7 @@ import (
 )
 
 var _ = Describe("resolveTenant", func() {
+	// k1 key를 team-vision tenant로 매핑한 Secret을 담은 fake client 준비
 	newServer := func() *Server {
 		c := fake.NewClientBuilder().WithObjects(&corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: "gateway-api-keys", Namespace: "gw"},
@@ -42,7 +43,7 @@ var _ = Describe("resolveTenant", func() {
 		s := newServer()
 		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 		tenant, ok := s.resolveTenant(context.Background(), r)
-		Expect(ok).To(BeFalse())
+		Expect(ok).To(BeFalse()) // Authorization header 없으면 실패
 		Expect(tenant).To(BeEmpty())
 	})
 
@@ -51,7 +52,7 @@ var _ = Describe("resolveTenant", func() {
 		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 		r.Header.Set("Authorization", "Bearer unknown")
 		tenant, ok := s.resolveTenant(context.Background(), r)
-		Expect(ok).To(BeFalse())
+		Expect(ok).To(BeFalse()) // Secret에 없는 key라 실패
 		Expect(tenant).To(BeEmpty())
 	})
 
@@ -67,7 +68,7 @@ var _ = Describe("resolveTenant", func() {
 	It("resolves a known bearer key case-insensitively", func() {
 		s := newServer()
 		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-		r.Header.Set("Authorization", "bearer k1")
+		r.Header.Set("Authorization", "bearer k1") // 소문자 bearer도 통과하는지 확인
 		tenant, ok := s.resolveTenant(context.Background(), r)
 		Expect(ok).To(BeTrue())
 		Expect(tenant).To(Equal("team-vision"))

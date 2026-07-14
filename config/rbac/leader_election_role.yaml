@@ -1,4 +1,4 @@
-# permissions to do leader election.
+# leader election(리더 선출)에 필요한 Lease 등의 resource 권한을 정의하는 role이다.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

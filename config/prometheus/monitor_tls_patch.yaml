@@ -1,9 +1,9 @@
-# Patch for Prometheus ServiceMonitor to enable secure TLS configuration
-# using certificates managed by cert-manager
+# cert-manager가 관리하는 certificate로 안전한 TLS를 사용하도록,
+# Prometheus ServiceMonitor에 적용하는 patch입니다.
 - op: replace
   path: /spec/endpoints/0/tlsConfig
   value:
-    # SERVICE_NAME and SERVICE_NAMESPACE will be substituted by kustomize
+    # SERVICE_NAME과 SERVICE_NAMESPACE는 kustomize가 실제 값으로 치환합니다.
     serverName: SERVICE_NAME.SERVICE_NAMESPACE.svc
     insecureSkipVerify: false
     ca:

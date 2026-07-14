@@ -25,13 +25,13 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// resolveTenant maps the request's Bearer API key to a tenant via the api-keys Secret.
-// It returns ok=false for a missing or unknown key.
+// 요청의 Bearer API key를 api-keys Secret을 통해 tenant로 해석하고,
+// key가 없거나 알 수 없는 key면 ok=false를 반환한다.
 func (s *Server) resolveTenant(ctx context.Context, r *http.Request) (string, bool) {
 	h := r.Header.Get("Authorization")
-	// Split the header into scheme and credential on the first space.
+	// 첫 공백 기준으로 scheme과 자격증명 분리
 	scheme, credential, found := strings.Cut(h, " ")
-	// HTTP auth schemes are case-insensitive per RFC 7235, so compare with EqualFold.
+	// HTTP 인증 scheme은 RFC 7235상 대소문자 구분 없음, 그래서 EqualFold로 비교
 	if !found || !strings.EqualFold(scheme, "Bearer") {
 		return "", false
 	}
@@ -44,5 +44,5 @@ func (s *Server) resolveTenant(ctx context.Context, r *http.Request) (string, bo
 		return "", false
 	}
 	tenant, ok := sec.Data[key]
-	return string(tenant), ok && len(tenant) > 0
+	return string(tenant), ok && len(tenant) > 0 // 값이 비어있지 않아야 유효한 tenant
 }

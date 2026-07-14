@@ -46,7 +46,7 @@ var _ = Describe("MLTrainingJob Controller", func() {
 		BeforeEach(func() {
 			By("creating the custom resource for the Kind MLTrainingJob")
 			err := k8sClient.Get(ctx, typeNamespacedName, mltrainingjob)
-			if err != nil && errors.IsNotFound(err) {
+			if err != nil && errors.IsNotFound(err) { // 아직 없을 때만 새로 생성
 				resource := &platformv1.MLTrainingJob{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
@@ -103,7 +103,7 @@ var _ = Describe("MLTrainingJob Controller", func() {
 			Expect(k8sClient.Get(ctx, typeNamespacedName, fetched)).To(Succeed())
 
 			fetched.Status.Phase = phasePending
-			Expect(k8sClient.Status().Update(ctx, fetched)).To(Succeed())
+			Expect(k8sClient.Status().Update(ctx, fetched)).To(Succeed()) // status subresource로만 갱신
 
 			updated := &platformv1.MLTrainingJob{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package v1 contains API Schema definitions for the platform v1 API group.
+// Package v1은 platform v1 API group의 API schema 정의 포함
 // +kubebuilder:object:generate=true
 // +groupName=platform.lkhun9311.github.io
 package v1
@@ -25,16 +25,16 @@ import (
 )
 
 var (
-	// SchemeGroupVersion is group version used to register these objects.
-	// This name is used by applyconfiguration generators (e.g. controller-gen).
+	// 이 object들을 등록하는 데 쓰이는 group version,
+	// applyconfiguration 생성기(예: controller-gen)가 이 이름을 사용한다.
 	SchemeGroupVersion = schema.GroupVersion{Group: "platform.lkhun9311.github.io", Version: "v1"}
 
-	// GroupVersion is an alias for SchemeGroupVersion, for backward compatibility.
+	// 하위 호환을 위한 SchemeGroupVersion의 별칭
 	GroupVersion = SchemeGroupVersion
 
-	// SchemeBuilder is used to add go types to the GroupVersionKind scheme.
+	// go type을 GroupVersionKind scheme에 추가하는 데 사용
 	SchemeBuilder = &scheme.Builder{GroupVersion: SchemeGroupVersion}
 
-	// AddToScheme adds the types in this group-version to the given scheme.
+	// 이 group-version의 type들을 주어진 scheme에 추가
 	AddToScheme = SchemeBuilder.AddToScheme
 )

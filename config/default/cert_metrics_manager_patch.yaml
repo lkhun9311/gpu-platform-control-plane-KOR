@@ -1,6 +1,6 @@
-# This patch adds the args, volumes, and ports to allow the manager to use the metrics-server certs.
+# 이 patch는 manager가 metrics-server cert를 사용하도록 args, volume, volumeMount를 추가한다.
 
-# Add the volumeMount for the metrics-server certs
+# metrics-server cert를 위한 volumeMount를 추가한다.
 - op: add
   path: /spec/template/spec/containers/0/volumeMounts/-
   value:
@@ -8,12 +8,12 @@
     name: metrics-certs
     readOnly: true
 
-# Add the --metrics-cert-path argument for the metrics server
+# metric server에 --metrics-cert-path argument를 추가한다.
 - op: add
   path: /spec/template/spec/containers/0/args/-
   value: --metrics-cert-path=/tmp/k8s-metrics-server/metrics-certs
 
-# Add the metrics-server certs volume configuration
+# metrics-server cert volume 설정을 추가한다.
 - op: add
   path: /spec/template/spec/volumes/-
   value:

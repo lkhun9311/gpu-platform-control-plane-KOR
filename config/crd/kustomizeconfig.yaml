@@ -1,4 +1,4 @@
-# This file is for teaching kustomize how to substitute name and namespace reference in CRD
+# 이 파일은 kustomize가 CRD의 name과 namespace 참조를 어떻게 치환할지 알려준다.
 nameReference:
 - kind: Service
   version: v1

@@ -39,7 +39,7 @@ func warnError(err error) {
 	_, _ = fmt.Fprintf(GinkgoWriter, "warning: %v\n", err)
 }
 
-// Run executes the provided command within this context
+// 이 context 안에서 주어진 명령 실행
 func Run(cmd *exec.Cmd) (string, error) {
 	dir, _ := GetProjectDir()
 	cmd.Dir = dir
@@ -59,7 +59,7 @@ func Run(cmd *exec.Cmd) (string, error) {
 	return string(output), nil
 }
 
-// UninstallCertManager uninstalls the cert manager
+// cert manager 제거
 func UninstallCertManager() {
 	url := fmt.Sprintf(certmanagerURLTmpl, certmanagerVersion)
 	cmd := exec.Command("kubectl", "delete", "-f", url)
@@ -67,7 +67,7 @@ func UninstallCertManager() {
 		warnError(err)
 	}
 
-	// Delete leftover leases in kube-system (not cleaned by default)
+	// kube-system에 남은 lease 삭제, 기본적으로는 정리되지 않음
 	kubeSystemLeases := []string{
 		"cert-manager-cainjector-leader-election",
 		"cert-manager-controller",
@@ -81,15 +81,15 @@ func UninstallCertManager() {
 	}
 }
 
-// InstallCertManager installs the cert manager bundle.
+// cert manager bundle 설치
 func InstallCertManager() error {
 	url := fmt.Sprintf(certmanagerURLTmpl, certmanagerVersion)
 	cmd := exec.Command("kubectl", "apply", "-f", url)
 	if _, err := Run(cmd); err != nil {
 		return err
 	}
-	// Wait for cert-manager-webhook to be ready, which can take time if cert-manager
-	// was re-installed after uninstalling on a cluster.
+	// cert-manager-webhook가 준비될 때까지 대기하며,
+	// cluster에서 제거 후 재설치한 경우 시간이 걸릴 수 있다.
 	cmd = exec.Command("kubectl", "wait", "deployment.apps/cert-manager-webhook",
 		"--for", "condition=Available",
 		"--namespace", "cert-manager",
@@ -100,10 +100,10 @@ func InstallCertManager() error {
 	return err
 }
 
-// IsCertManagerCRDsInstalled checks if any Cert Manager CRDs are installed
-// by verifying the existence of key CRDs related to Cert Manager.
+// Cert Manager 관련 핵심 CRD의 존재 여부를 확인해,
+// Cert Manager CRD가 설치돼 있는지 검사한다.
 func IsCertManagerCRDsInstalled() bool {
-	// List of common Cert Manager CRDs
+	// 흔한 Cert Manager CRD 목록
 	certManagerCRDs := []string{
 		"certificates.cert-manager.io",
 		"issuers.cert-manager.io",
@@ -113,14 +113,14 @@ func IsCertManagerCRDsInstalled() bool {
 		"challenges.acme.cert-manager.io",
 	}
 
-	// Execute the kubectl command to get all CRDs
+	// kubectl 명령을 실행해 전체 CRD 조회
 	cmd := exec.Command("kubectl", "get", "crds")
 	output, err := Run(cmd)
 	if err != nil {
 		return false
 	}
 
-	// Check if any of the Cert Manager CRDs are present
+	// Cert Manager CRD 중 하나라도 존재하는지 확인
 	crdList := GetNonEmptyLines(output)
 	for _, crd := range certManagerCRDs {
 		for _, line := range crdList {
@@ -133,7 +133,7 @@ func IsCertManagerCRDsInstalled() bool {
 	return false
 }
 
-// LoadImageToKindClusterWithName loads a local docker image to the kind cluster
+// local docker image를 kind cluster로 load
 func LoadImageToKindClusterWithName(name string) error {
 	cluster := defaultKindCluster
 	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
@@ -149,8 +149,8 @@ func LoadImageToKindClusterWithName(name string) error {
 	return err
 }
 
-// GetNonEmptyLines converts given command output string into individual objects
-// according to line breakers, and ignores the empty elements in it.
+// 주어진 명령 출력 문자열을 줄바꿈 기준으로 개별 항목으로 나누고,
+// 그중 빈 요소는 무시한다.
 func GetNonEmptyLines(output string) []string {
 	var res []string
 	elements := strings.SplitSeq(output, "\n")
@@ -163,7 +163,7 @@ func GetNonEmptyLines(output string) []string {
 	return res
 }
 
-// GetProjectDir will return the directory where the project is
+// 프로젝트가 위치한 directory 반환
 func GetProjectDir() (string, error) {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -173,8 +173,8 @@ func GetProjectDir() (string, error) {
 	return wd, nil
 }
 
-// UncommentCode searches for target in the file and remove the comment prefix
-// of the target content. The target content may span multiple lines.
+// 파일에서 target을 찾아 해당 내용의 주석 접두사를 제거하며,
+// target 내용은 여러 줄에 걸칠 수 있다.
 func UncommentCode(filename, target, prefix string) error {
 	// false positive
 	// nolint:gosec
@@ -203,7 +203,7 @@ func UncommentCode(filename, target, prefix string) error {
 		if _, err = out.WriteString(strings.TrimPrefix(scanner.Text(), prefix)); err != nil {
 			return fmt.Errorf("failed to write to output: %w", err)
 		}
-		// Avoid writing a newline in case the previous line was the last in target.
+		// target의 마지막 줄이었던 경우 개행을 쓰지 않도록 함
 		if !scanner.Scan() {
 			break
 		}

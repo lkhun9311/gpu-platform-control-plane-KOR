@@ -32,18 +32,18 @@ import (
 )
 
 var (
-	// managerImage is the manager image to be built and loaded for testing.
+	// 테스트용으로 빌드하고 load할 manager image
 	managerImage = "example.com/gpu-platform-control-plane:v0.0.1"
-	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
+	// 이 suite가 CertManager를 설치했는지 여부 추적
 	shouldCleanupCertManager = false
 )
 
-// TestE2E runs the e2e test suite to validate the solution in an isolated environment.
-// The default setup requires Kind and CertManager.
+// 격리된 환경에서 솔루션을 검증하는 e2e 테스트 suite를 실행하고,
+// 기본 setup은 Kind와 CertManager를 필요로 한다.
 //
-// To enable kubectl kuberc (use custom kubectl configurations), set: KUBECTL_KUBERC=true
-// By default, kuberc is disabled to ensure consistent test behavior across different environments.
-// To skip CertManager installation, set: CERT_MANAGER_INSTALL_SKIP=true
+// kubectl kuberc(custom kubectl 설정 사용)를 활성화하려면 KUBECTL_KUBERC=true를 설정하고,
+// kuberc는 기본적으로 비활성이며 이는 환경별로 일관된 테스트 동작을 보장하기 위함이고,
+// CertManager 설치를 건너뛰려면 CERT_MANAGER_INSTALL_SKIP=true를 설정한다.
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	_, _ = fmt.Fprintf(GinkgoWriter, "Starting gpu-platform-control-plane e2e test suite\n")
@@ -56,8 +56,8 @@ var _ = BeforeSuite(func() {
 	_, err := utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager image")
 
-	// TODO(user): If you want to change the e2e test vendor from Kind,
-	// ensure the image is built and available, then remove the following block.
+	// TODO(user): e2e 테스트 vendor를 Kind에서 바꾸고 싶다면,
+	// image가 빌드되어 사용 가능한지 확인한 뒤 아래 block을 제거한다.
 	By("loading the manager image on Kind")
 	err = utils.LoadImageToKindClusterWithName(managerImage)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
@@ -70,9 +70,9 @@ var _ = AfterSuite(func() {
 	teardownCertManager()
 })
 
-// Disable kubectl kuberc by default for test isolation.
-// This prevents local kubectl configurations from affecting test behavior.
-// To enable kuberc, set: KUBECTL_KUBERC=true
+// 테스트 격리를 위해 기본적으로 kubectl kuberc를 비활성화하고,
+// local kubectl 설정이 테스트 동작에 영향을 주는 것을 방지하며,
+// kuberc를 활성화하려면 KUBECTL_KUBERC=true를 설정한다.
 func configureKubectlKubeRC() {
 	if os.Getenv("KUBECTL_KUBERC") != "true" {
 		By("disabling kubectl kuberc for test isolation")
@@ -85,8 +85,8 @@ func configureKubectlKubeRC() {
 	}
 }
 
-// setupCertManager installs CertManager if needed for webhook tests.
-// Skips installation if CERT_MANAGER_INSTALL_SKIP=true or if already present.
+// webhook 테스트에 필요하면 CertManager를 설치하고,
+// CERT_MANAGER_INSTALL_SKIP=true이거나 이미 설치돼 있으면 설치를 건너뛴다.
 func setupCertManager() {
 	if os.Getenv("CERT_MANAGER_INSTALL_SKIP") == "true" {
 		_, _ = fmt.Fprintf(GinkgoWriter, "Skipping CertManager installation (CERT_MANAGER_INSTALL_SKIP=true)\n")
@@ -99,15 +99,15 @@ func setupCertManager() {
 		return
 	}
 
-	// Mark for cleanup before installation to handle interruptions and partial installs.
+	// 중단이나 부분 설치에 대비해 설치 전에 정리 대상으로 표시
 	shouldCleanupCertManager = true
 
 	By("installing CertManager")
 	Expect(utils.InstallCertManager()).To(Succeed(), "Failed to install CertManager")
 }
 
-// teardownCertManager uninstalls CertManager if it was installed by setupCertManager.
-// This ensures we only remove what we installed.
+// 설치한 경우에만 CertManager를 제거하여,
+// 우리가 설치한 것만 지우도록 보장한다.
 func teardownCertManager() {
 	if !shouldCleanupCertManager {
 		_, _ = fmt.Fprintf(GinkgoWriter, "Skipping CertManager cleanup (not installed by this suite)\n")

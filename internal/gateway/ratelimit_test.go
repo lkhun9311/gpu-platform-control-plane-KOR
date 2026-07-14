@@ -31,7 +31,7 @@ import (
 	platformv1 "github.com/lkhun9311/gpu-mlops-platform-control-plane/api/v1"
 )
 
-// newSchemeForTest builds a scheme with both the client-go and platform types registered.
+// client-go와 platform type을 모두 등록한 scheme 생성
 func newSchemeForTest() *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
@@ -51,7 +51,7 @@ var _ = Describe("policyForTenant", func() {
 		older := &platformv1.GPUQuotaPolicy{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              "team-vision-old",
-				CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Hour)),
+				CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Hour)), // 한 시간 이른 생성 시각
 			},
 			Spec: platformv1.GPUQuotaPolicySpec{Tenant: "team-vision"},
 		}
@@ -66,20 +66,20 @@ var _ = Describe("policyForTenant", func() {
 		s := &Server{Client: c}
 		got, err := s.policyForTenant(context.Background(), "team-vision")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(got.Name).To(Equal("team-vision-old"))
+		Expect(got.Name).To(Equal("team-vision-old")) // 더 오래된 정책이 뽑혀야 함
 	})
 })
 
 var _ = Describe("bucketRegistry", func() {
 	It("limits per the rate and refreshes on change", func() {
 		b := newBucketRegistry()
-		rl := &platformv1.GPUQuotaRateLimit{RequestsPerMinute: 60, Burst: 1}
+		rl := &platformv1.GPUQuotaRateLimit{RequestsPerMinute: 60, Burst: 1} // burst 1이라 첫 요청만 통과
 		Expect(b.Allow("t", rl)).To(BeTrue())
-		Expect(b.Allow("t", rl)).To(BeFalse())
+		Expect(b.Allow("t", rl)).To(BeFalse()) // 두 번째는 한도 초과로 차단
 	})
 
 	It("returns true for an unlimited (nil) rate limit", func() {
 		b := newBucketRegistry()
-		Expect(b.Allow("t", nil)).To(BeTrue())
+		Expect(b.Allow("t", nil)).To(BeTrue()) // nil이면 무제한이라 항상 통과
 	})
 })

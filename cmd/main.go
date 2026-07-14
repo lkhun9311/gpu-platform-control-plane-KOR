@@ -21,8 +21,8 @@ import (
 	"flag"
 	"os"
 
-	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
-	// to ensure that exec-entrypoint and run can make use of them.
+	// 모든 Kubernetes client 인증 plugin (Azure, GCP, OIDC 등)을 import해
+	// exec-entrypoint와 run에서 사용할 수 있도록 보장한다.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -87,10 +87,10 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	// if the enable-http2 flag is false (the default), http/2 should be disabled
-	// due to its vulnerabilities. More specifically, disabling http/2 will
-	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
-	// Rapid Reset CVEs. For more information see:
+	// enable-http2 flag가 false(기본값)면 취약점 때문에 http/2를 비활성화해야 하는데
+	// 좀 더 구체적으로 http/2를 끄면 HTTP/2 Stream Cancellation 및 Rapid Reset CVE에
+	// 취약해지는 상황을 막을 수 있다.
+	// 자세한 내용은 아래를 참고한다:
 	// - https://github.com/advisories/GHSA-qppj-fm5r-hxr3
 	// - https://github.com/advisories/GHSA-4374-p667-p6c8
 	disableHTTP2 := func(c *tls.Config) {
@@ -102,7 +102,7 @@ func main() {
 		tlsOpts = append(tlsOpts, disableHTTP2)
 	}
 
-	// Initial webhook TLS options
+	// 초기 webhook TLS option
 	webhookTLSOpts := tlsOpts
 	webhookServerOptions := webhook.Options{
 		TLSOpts: webhookTLSOpts,
@@ -119,8 +119,8 @@ func main() {
 
 	webhookServer := webhook.NewServer(webhookServerOptions)
 
-	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
-	// More info:
+	// metric endpoint는 'config/default/kustomization.yaml'에서 활성화하고, Metrics option으로 서버를 구성하며,
+	// 자세한 내용은 아래를 참고한다:
 	// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/metrics/server
 	// - https://book.kubebuilder.io/reference/metrics.html
 	metricsServerOptions := metricsserver.Options{
@@ -130,21 +130,21 @@ func main() {
 	}
 
 	if secureMetrics {
-		// FilterProvider is used to protect the metrics endpoint with authn/authz.
-		// These configurations ensure that only authorized users and service accounts
-		// can access the metrics endpoint. The RBAC are configured in 'config/rbac/kustomization.yaml'. More info:
+		// FilterProvider로 metric endpoint를 authn/authz로 보호하여,
+		// 인가된 사용자와 서비스 계정만 metric endpoint에 접근하도록 보장하고,
+		// RBAC는 'config/rbac/kustomization.yaml'에서 구성하며, 자세한 내용은 아래를 참고한다:
 		// https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/metrics/filters#WithAuthenticationAndAuthorization
 		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
 	}
 
-	// If the certificate is not specified, controller-runtime will automatically
-	// generate self-signed certificates for the metrics server. While convenient for development and testing,
-	// this setup is not recommended for production.
+	// 인증서를 지정하지 않으면 controller-runtime이 metric 서버용 자체 서명 인증서를 자동 생성하는데,
+	// 개발과 테스트에는 편리하지만,
+	// 운영 환경에는 권장하지 않는다.
 	//
-	// TODO(user): If you enable certManager, uncomment the following lines:
-	// - [METRICS-WITH-CERTS] at config/default/kustomization.yaml to generate and use certificates
-	// managed by cert-manager for the metrics server.
-	// - [PROMETHEUS-WITH-CERTS] at config/prometheus/kustomization.yaml for TLS certification.
+	// TODO(user): certManager를 활성화하려면 아래 line의 주석을 해제한다:
+	// - config/default/kustomization.yaml의 [METRICS-WITH-CERTS], cert-manager가 관리하는
+	// metric 서버 인증서를 생성해 사용
+	// - config/prometheus/kustomization.yaml의 [PROMETHEUS-WITH-CERTS], TLS 인증용
 	if len(metricsCertPath) > 0 {
 		setupLog.Info("Initializing metrics certificate watcher using provided certificates",
 			"metrics-cert-path", metricsCertPath, "metrics-cert-name", metricsCertName, "metrics-cert-key", metricsCertKey)
@@ -161,16 +161,16 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "4b07920a.lkhun9311.github.io",
-		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
-		// when the Manager ends. This requires the binary to immediately end when the
-		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
-		// speeds up voluntary leader transitions as the new leader don't have to wait
-		// LeaseDuration time first.
+		// LeaderElectionReleaseOnCancel은 Manager 종료 시 리더가 자발적으로 물러날지 정의하며,
+		// 이를 위해서는 Manager가 멈출 때 binary가 즉시 종료돼야 하고,
+		// 그렇지 않으면 이 설정은 안전하지 않으며,
+		// 이 option을 켜면 새 리더가 LeaseDuration만큼 먼저 기다릴 필요가 없어,
+		// 자발적 리더 전환이 크게 빨라진다.
 		//
-		// In the default scaffold provided, the program ends immediately after
-		// the manager stops, so would be fine to enable this option. However,
-		// if you are doing or is intended to do any operation such as perform cleanups
-		// after the manager stops then its usage might be unsafe.
+		// 기본 scaffold에서는 manager가 멈춘 직후 프로그램이 종료되므로,
+		// 이 option을 켜도 무방하지만,
+		// manager 종료 후 정리 작업 같은 어떤 동작을 수행하거나 수행할 예정이라면,
+		// 사용이 안전하지 않을 수 있다.
 		// LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {

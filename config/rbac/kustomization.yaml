@@ -1,27 +1,21 @@
 resources:
-# All RBAC will be applied under this service account in
-# the deployment namespace. You may comment out this resource
-# if your manager will use a service account that exists at
-# runtime. Be sure to update RoleBinding and ClusterRoleBinding
-# subjects if changing service account names.
+# 모든 RBAC는 배포 namespace의 이 service account 아래에서 적용된다,
+# manager가 runtime에 이미 존재하는 service account를 쓴다면 이 resource는 주석 처리해도 된다,
+# service account 이름을 바꾸면 RoleBinding과 ClusterRoleBinding의 subject도 함께 갱신한다.
 - service_account.yaml
 - role.yaml
 - role_binding.yaml
 - leader_election_role.yaml
 - leader_election_role_binding.yaml
-# The following RBAC configurations are used to protect
-# the metrics endpoint with authn/authz. These configurations
-# ensure that only authorized users and service accounts
-# can access the metrics endpoint. Comment the following
-# permissions if you want to disable this protection.
-# More info: https://book.kubebuilder.io/reference/metrics.html
+# 아래 RBAC 설정은 metrics endpoint를 authn/authz로 보호하기 위한 것으로,
+# 인가된 사용자와 service account만 metrics endpoint에 접근하도록 보장한다,
+# 이 보호가 필요 없다면 아래 권한들을 주석 처리한다 (참고: https://book.kubebuilder.io/reference/metrics.html).
 - metrics_auth_role.yaml
 - metrics_auth_role_binding.yaml
 - metrics_reader_role.yaml
-# For each CRD, "Admin", "Editor" and "Viewer" roles are scaffolded by
-# default, aiding admins in cluster management. Those roles are
-# not used by the gpu-platform-control-plane itself. You can comment the following lines
-# if you do not want those helpers be installed with your Project.
+# 각 CRD마다 admin/editor/viewer role이 기본 제공되어 cluster 관리에 도움을 준다,
+# 이 role들은 프로젝트 자체가 쓰지는 않으며,
+# helper role이 필요 없다면 아래 줄들을 주석 처리한다.
 - mltrainingjob_admin_role.yaml
 - mltrainingjob_editor_role.yaml
 - mltrainingjob_viewer_role.yaml
@@ -34,4 +28,3 @@ resources:
 - nodehealth_admin_role.yaml
 - nodehealth_editor_role.yaml
 - nodehealth_viewer_role.yaml
-

@@ -1,5 +1,7 @@
 # Local AI tool workspace - do not commit
 superpowers/
+.superpowers/
+AGENTS.md
 docs/
 .claude/
 .cursor/

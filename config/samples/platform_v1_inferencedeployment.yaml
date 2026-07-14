@@ -8,17 +8,10 @@ metadata:
   namespace: default
 spec:
   model:
-    # name is the logical model name.
     name: llama3-8b
-    # storageUri is where the model weights live.
     storageUri: s3://models/llama3-8b
-  # image is the serving runtime container image.
   image: vllm/vllm-openai:v0.6.0
-  # gpuClass is illustrative; locally it is backed by simulated capacity.
   gpuClass: l40s
-  # gpuCount is GPUs per replica (nvidia.com/gpu).
   gpuCount: 1
-  # replicas is the fixed number of serving replicas (autoscaling lands in M4).
   replicas: 2
-  # port is the serving container port.
   port: 8080

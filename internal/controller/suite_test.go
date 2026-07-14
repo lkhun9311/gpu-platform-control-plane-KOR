@@ -37,8 +37,8 @@ import (
 	// +kubebuilder:scaffold:imports
 )
 
-// These tests use Ginkgo (BDD-style Go testing framework). Refer to
-// http://onsi.github.io/ginkgo/ to learn more about Ginkgo.
+// 이 테스트들은 Ginkgo(BDD 스타일 Go 테스트 framework)를 사용하며,
+// Ginkgo 소개는 http://onsi.github.io/ginkgo/ 참고.
 
 var (
 	ctx       context.Context
@@ -71,12 +71,12 @@ var _ = BeforeSuite(func() {
 		ErrorIfCRDPathMissing: true,
 	}
 
-	// Retrieve the first found binary directory to allow running tests from IDEs
+	// IDE에서 테스트를 돌릴 수 있도록 처음 발견되는 binary directory를 가져옴
 	if getFirstFoundEnvTestBinaryDir() != "" {
 		testEnv.BinaryAssetsDirectory = getFirstFoundEnvTestBinaryDir()
 	}
 
-	// cfg is defined in this file globally.
+	// cfg는 이 파일에 전역으로 정의돼 있음
 	cfg, err = testEnv.Start()
 	Expect(err).NotTo(HaveOccurred())
 	Expect(cfg).NotTo(BeNil())
@@ -94,14 +94,12 @@ var _ = AfterSuite(func() {
 	}, time.Minute, time.Second).Should(Succeed())
 })
 
-// getFirstFoundEnvTestBinaryDir locates the first binary in the specified path.
-// ENVTEST-based tests depend on specific binaries, usually located in paths set by
-// controller-runtime. When running tests directly (e.g., via an IDE) without using
-// Makefile targets, the 'BinaryAssetsDirectory' must be explicitly configured.
+// 지정 경로에서 처음 발견되는 binary를 찾으며,
+// ENVTEST 기반 테스트는 특정 binary에 의존하고 보통 controller-runtime이 정한 경로에 위치하며,
+// Makefile target 없이(예: IDE로) 테스트를 직접 돌릴 때는 'BinaryAssetsDirectory'를 명시적으로 지정해야 함.
 //
-// This function streamlines the process by finding the required binaries, similar to
-// setting the 'KUBEBUILDER_ASSETS' environment variable. To ensure the binaries are
-// properly set up, run 'make setup-envtest' beforehand.
+// 이 함수는 'KUBEBUILDER_ASSETS' 환경 변수 설정과 비슷하게 필요한 binary를 찾아 과정을 간소화하며,
+// binary가 제대로 준비되도록 사전에 'make setup-envtest' 실행 권장.
 func getFirstFoundEnvTestBinaryDir() string {
 	basePath := filepath.Join("..", "..", "bin", "k8s")
 	entries, err := os.ReadDir(basePath)
@@ -110,7 +108,7 @@ func getFirstFoundEnvTestBinaryDir() string {
 		return ""
 	}
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if entry.IsDir() { // 첫 하위 directory를 binary 경로로 채택
 			return filepath.Join(basePath, entry.Name())
 		}
 	}

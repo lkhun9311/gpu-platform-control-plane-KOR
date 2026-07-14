@@ -1,6 +1,6 @@
-# This NetworkPolicy allows ingress traffic
-# with Pods running on namespaces labeled with 'metrics: enabled'. Only Pods on those
-# namespaces are able to gather data from the metrics endpoint.
+# 이 NetworkPolicy는 특정 label이 붙은 namespace의 Pod에서 들어오는 ingress traffic만,
+# metrics 및 webhook server로 허용합니다.
+# 이를 통해 인가된 traffic만 이 핵심 endpoint에 접근하도록 제한합니다.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -17,7 +17,7 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    # This allows ingress traffic from any namespace with the label metrics: enabled
+    # metrics: enabled label이 붙은 namespace의 ingress traffic을 허용합니다.
     - from:
       - namespaceSelector:
           matchLabels:

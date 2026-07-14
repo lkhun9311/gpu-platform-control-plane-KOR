@@ -33,24 +33,24 @@ import (
 	"github.com/lkhun9311/gpu-mlops-platform-control-plane/test/utils"
 )
 
-// namespace where the project is deployed in
+// 프로젝트가 배포되는 namespace
 const namespace = "gpu-platform-control-plane-system"
 
-// serviceAccountName created for the project
+// 프로젝트용으로 생성되는 service account
 const serviceAccountName = "gpu-platform-control-plane-controller-manager"
 
-// metricsServiceName is the name of the metrics service of the project
+// 프로젝트 metric service 이름
 const metricsServiceName = "gpu-platform-control-plane-controller-manager-metrics-service"
 
-// metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
+// metric data 조회 권한을 부여하려고 생성하는 RBAC 이름
 const metricsRoleBindingName = "gpu-platform-control-plane-metrics-binding"
 
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
 
-	// Before running the tests, set up the environment by creating the namespace,
-	// enforce the restricted security policy to the namespace, installing CRDs,
-	// and deploying the controller.
+	// 테스트 실행 전 환경을 setup하고 namespace를 생성하며,
+	// namespace에 restricted 보안 정책을 적용하고 CRD를 설치한 뒤,
+	// controller를 배포한다.
 	BeforeAll(func() {
 		By("creating manager namespace")
 		cmd := exec.Command("kubectl", "create", "ns", namespace)
@@ -74,8 +74,8 @@ var _ = Describe("Manager", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
 	})
 
-	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
-	// and deleting the namespace.
+	// 모든 테스트 실행 후 정리하여 controller 배포를 해제하고 CRD를 제거한 뒤,
+	// namespace를 삭제한다.
 	AfterAll(func() {
 		By("cleaning up the curl pod for metrics")
 		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
@@ -94,8 +94,8 @@ var _ = Describe("Manager", Ordered, func() {
 		_, _ = utils.Run(cmd)
 	})
 
-	// After each test, check for failures and collect logs, events,
-	// and pod descriptions for debugging.
+	// 각 테스트 후 실패 여부를 확인하고, 디버깅용으로 log와 event,
+	// pod 상세 정보를 수집한다.
 	AfterEach(func() {
 		specReport := CurrentSpecReport()
 		if specReport.Failed() {
@@ -157,7 +157,7 @@ var _ = Describe("Manager", Ordered, func() {
 				podOutput, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve controller-manager pod information")
 				podNames := utils.GetNonEmptyLines(podOutput)
-				g.Expect(podNames).To(HaveLen(1), "expected 1 controller pod running")
+				g.Expect(podNames).To(HaveLen(1), "expected 1 controller pod running") // controller pod는 정확히 1개
 				controllerPodName = podNames[0]
 				g.Expect(controllerPodName).To(ContainSubstring("controller-manager"))
 
@@ -263,16 +263,16 @@ var _ = Describe("Manager", Ordered, func() {
 				metricsOutput, err := getMetricsOutput()
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
 				g.Expect(metricsOutput).NotTo(BeEmpty())
-				g.Expect(metricsOutput).To(ContainSubstring("< HTTP/1.1 200 OK"))
+				g.Expect(metricsOutput).To(ContainSubstring("< HTTP/1.1 200 OK")) // curl 응답에 200 OK 포함 확인
 			}
 			Eventually(verifyMetricsAvailable, 2*time.Minute).Should(Succeed())
 		})
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
 
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
+		// TODO: 프로젝트에 특화된 시나리오로 e2e 테스트 suite를 customize할 때,
+		// sample/CR을 적용해 상태를 확인하거나, metric으로 reconcile 동작을,
+		// 검증하는 방식을 고려한다. 예:
 		// metricsOutput, err := getMetricsOutput()
 		// Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
 		// Expect(metricsOutput).To(ContainSubstring(
@@ -282,9 +282,9 @@ var _ = Describe("Manager", Ordered, func() {
 	})
 })
 
-// serviceAccountToken returns a token for the specified service account in the given namespace.
-// It uses the Kubernetes TokenRequest API to generate a token by directly sending a request
-// and parsing the resulting token from the API response.
+// 지정한 namespace의 해당 service account token을 반환하며,
+// Kubernetes TokenRequest API로 직접 요청을 보내 token을 생성하고,
+// API 응답에서 token을 파싱한다.
 func serviceAccountToken() (string, error) {
 	const tokenRequestRawString = `{
 		"apiVersion": "authentication.k8s.io/v1",
@@ -323,15 +323,15 @@ func serviceAccountToken() (string, error) {
 	return out, err
 }
 
-// getMetricsOutput retrieves and returns the logs from the curl pod used to access the metrics endpoint.
+// metric endpoint 접근에 쓰인 curl pod의 log를 조회해 반환
 func getMetricsOutput() (string, error) {
 	By("getting the curl-metrics logs")
 	cmd := exec.Command("kubectl", "logs", "curl-metrics", "-n", namespace)
 	return utils.Run(cmd)
 }
 
-// tokenRequest is a simplified representation of the Kubernetes TokenRequest API response,
-// containing only the token field that we need to extract.
+// Kubernetes TokenRequest API 응답을 간략히 표현한 구조체로,
+// 추출에 필요한 token 필드만 포함한다.
 type tokenRequest struct {
 	Status struct {
 		Token string `json:"token"`

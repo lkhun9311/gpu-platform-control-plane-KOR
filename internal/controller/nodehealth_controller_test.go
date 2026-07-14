@@ -43,8 +43,7 @@ var _ = Describe("NodeHealth Controller", func() {
 			return &NodeHealthReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 		}
 
-		// reconcileUntilSteady drives Reconcile a few times so the finalizer is added and
-		// the status reaches its steady value.
+		// finalizer가 추가되고 status가 안정된 값에 도달하도록 Reconcile을 몇 번 구동
 		reconcileUntilSteady := func() {
 			for range 3 {
 				_, err := reconciler().Reconcile(ctx, reconcile.Request{NamespacedName: nhKey})
@@ -129,7 +128,7 @@ var _ = Describe("NodeHealth Controller", func() {
 
 			drifted := &platformv1.NodeHealth{}
 			Expect(k8sClient.Get(ctx, nhKey, drifted)).To(Succeed())
-			drifted.Status.Phase = phaseQuarantine
+			drifted.Status.Phase = phaseQuarantine // 상태를 수동으로 틀어 drift 유발
 			Expect(k8sClient.Status().Update(ctx, drifted)).To(Succeed())
 
 			_, err := reconciler().Reconcile(ctx, reconcile.Request{NamespacedName: nhKey})
@@ -155,7 +154,7 @@ var _ = Describe("NodeHealth Controller", func() {
 
 			gotNode := &corev1.Node{}
 			Expect(k8sClient.Get(ctx, nodeKey, gotNode)).To(Succeed())
-			Expect(unhealthyTaintCount(gotNode)).To(Equal(1))
+			Expect(unhealthyTaintCount(gotNode)).To(Equal(1)) // taint 정확히 하나 부여 확인
 		})
 
 		It("removes the taint and clears the fault signal when the node recovers", func() {
@@ -177,7 +176,7 @@ var _ = Describe("NodeHealth Controller", func() {
 
 			gotNode := &corev1.Node{}
 			Expect(k8sClient.Get(ctx, nodeKey, gotNode)).To(Succeed())
-			Expect(unhealthyTaintCount(gotNode)).To(Equal(0))
+			Expect(unhealthyTaintCount(gotNode)).To(Equal(0)) // 복구 후 taint 제거 확인
 		})
 
 		It("does not duplicate the taint or rewrite when already quarantined", func() {
@@ -200,6 +199,7 @@ var _ = Describe("NodeHealth Controller", func() {
 			Expect(k8sClient.Get(ctx, nodeKey, nodeAfter)).To(Succeed())
 
 			Expect(unhealthyTaintCount(nodeAfter)).To(Equal(1))
+			// 이미 격리 상태면 재작성 없이 ResourceVersion 그대로여야 멱등
 			Expect(nhAfter.ResourceVersion).To(Equal(nhBefore.ResourceVersion))
 			Expect(nodeAfter.ResourceVersion).To(Equal(nodeBefore.ResourceVersion))
 		})
@@ -229,7 +229,7 @@ var _ = Describe("NodeHealth Controller", func() {
 			Expect(k8sClient.Status().Update(ctx, recovered)).To(Succeed())
 			reconcileUntilSteady()
 
-			Expect(hasOther()).To(BeTrue())
+			Expect(hasOther()).To(BeTrue()) // 무관한 taint는 격리, 복구 전 구간 내내 유지
 			gotNode := &corev1.Node{}
 			Expect(k8sClient.Get(ctx, nodeKey, gotNode)).To(Succeed())
 			Expect(unhealthyTaintCount(gotNode)).To(Equal(0))
@@ -255,7 +255,7 @@ var _ = Describe("NodeHealth Controller", func() {
 			Expect(errors.IsNotFound(k8sClient.Get(ctx, nhKey, &platformv1.NodeHealth{}))).To(BeTrue())
 			gotNode := &corev1.Node{}
 			Expect(k8sClient.Get(ctx, nodeKey, gotNode)).To(Succeed())
-			Expect(unhealthyTaintCount(gotNode)).To(Equal(0))
+			Expect(unhealthyTaintCount(gotNode)).To(Equal(0)) // finalizer 정리로 taint까지 제거 확인
 		})
 
 		It("reports Pending when the target node is absent", func() {
@@ -283,7 +283,7 @@ var _ = Describe("NodeHealth Controller", func() {
 		It("rejects a change to the immutable nodeName", func() {
 			nh := &platformv1.NodeHealth{}
 			Expect(k8sClient.Get(ctx, nhKey, nh)).To(Succeed())
-			nh.Spec.NodeName = "some-other-node"
+			nh.Spec.NodeName = "some-other-node" // 불변 필드 변경 시도
 			err := k8sClient.Update(ctx, nh)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("nodeName is immutable"))
@@ -314,13 +314,13 @@ var _ = Describe("NodeHealth Controller", func() {
 			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "map-node"}}
 			reqs := r.mapNodeToNodeHealth(ctx, node)
 
-			Expect(reqs).To(HaveLen(1))
+			Expect(reqs).To(HaveLen(1)) // 이름 일치하는 하나만 매핑
 			Expect(reqs[0].Name).To(Equal("map-match"))
 		})
 	})
 })
 
-// unhealthyTaintCount counts taints carrying the platform unhealthy key.
+// platform unhealthy key를 가진 taint 개수 count
 func unhealthyTaintCount(node *corev1.Node) int {
 	n := 0
 	for _, t := range node.Spec.Taints {
@@ -331,7 +331,7 @@ func unhealthyTaintCount(node *corev1.Node) int {
 	return n
 }
 
-// findCondition returns a pointer to the condition of the given type, or nil.
+// 주어진 type의 condition pointer 반환, 없으면 nil
 func findCondition(conds []metav1.Condition, condType string) *metav1.Condition {
 	for i := range conds {
 		if conds[i].Type == condType {

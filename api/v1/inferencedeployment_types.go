@@ -20,36 +20,43 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// 이 파일은 직접 고쳐 가며 채워 넣는 기본 골격이다
+// 참고: json tag는 필수, 새 field를 추가할 때 직렬화되려면 반드시 json tag를 붙일 것
 
-// InferenceDeploymentSpec defines the desired state of InferenceDeployment.
+// InferenceDeployment의 원하는 상태 정의
 type InferenceDeploymentSpec struct {
-	// model is the model to serve.
+	// 서빙할 model
+	//
 	// +required
 	Model InferenceModel `json:"model"`
 
-	// image is the serving runtime container image (e.g. "vllm/vllm-openai:v0.6.0").
+	// 서빙 runtime container image (예: "vllm/vllm-openai:v0.6.0")
+	//
 	// +required
 	Image string `json:"image"`
 
-	// gpuClass is the illustrative GPU class (e.g. "l40s").
-	// Locally this is backed by simulated capacity (see the dev runbook).
+	// 예시용 GPU class (예: "l40s"),
+	// local에서는 시뮬레이션된 용량을 기준으로 동작한다 (개발 runbook 참고).
+	//
 	// +optional
 	GPUClass string `json:"gpuClass,omitempty"`
 
-	// gpuCount is the number of GPUs (nvidia.com/gpu) per replica.
-	// Locally this is backed by simulated capacity, not real hardware.
+	// replica당 GPU 수 (nvidia.com/gpu),
+	// local에서는 실제 hardware가 아니라 시뮬레이션된 용량을 기준으로 한다.
+	//
 	// +kubebuilder:validation:Minimum=0
 	// +required
 	GPUCount int32 `json:"gpuCount"`
 
-	// replicas is the fixed number of serving replicas. Autoscaling lands in M4.
+	// 고정 서빙 replica 수,
+	// 요청량에 따라 replica 수를 자동 조절하는 autoscaling은 이후 milestone에서 도입한다.
+	//
 	// +kubebuilder:validation:Minimum=0
 	// +required
 	Replicas int32 `json:"replicas"`
 
-	// port is the serving container port.
+	// 서빙 container port
+	//
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535
 	// +kubebuilder:default=8080
@@ -57,38 +64,46 @@ type InferenceDeploymentSpec struct {
 	Port int32 `json:"port,omitempty"`
 }
 
-// InferenceModel identifies the model to serve.
+// 서빙할 model 식별
 type InferenceModel struct {
-	// name is the logical model name.
+	// 논리적 model 이름
+	//
 	// +required
 	Name string `json:"name"`
 
-	// storageUri is where the model weights live (e.g. "s3://bucket/model", "pvc://claim/path").
+	// model 가중치가 저장된 위치 (예: "s3://bucket/model", "pvc://claim/path")
+	//
 	// +required
 	StorageURI string `json:"storageUri"`
 }
 
-// InferenceDeploymentStatus defines the observed state of InferenceDeployment.
+// InferenceDeployment의 관찰된 상태 정의
 type InferenceDeploymentStatus struct {
-	// phase is the high-level serving state.
+	// 상위 수준 서빙 상태
+	//
 	// +kubebuilder:validation:Enum=Pending;Progressing;Ready;Degraded
 	// +optional
 	Phase string `json:"phase,omitempty"`
 
-	// observedGeneration is the most recent generation observed by the controller.
+	// controller가 마지막으로 관찰한 generation
+	//
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// readyReplicas is the observed number of ready serving replicas (populated in M4).
+	// 준비 완료된 서빙 replica 수,
+	// 소유한 Deployment의 status에서 준비된 replica 수를 그대로 반영한다.
+	//
 	// +optional
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 
-	// lastTransitionTime is the time the phase last changed.
+	// phase가 마지막으로 바뀐 시각
+	//
 	// +optional
 	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
 
-	// conditions represent the current state of the InferenceDeployment resource.
-	// The status of each condition is one of True, False, or Unknown.
+	// InferenceDeployment resource의 현재 상태 표현,
+	// 각 condition의 status는 True, False, Unknown 중 하나다.
+	//
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -102,26 +117,29 @@ type InferenceDeploymentStatus struct {
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// InferenceDeployment is the Schema for the inferencedeployments API
+// inferencedeployments API의 schema
 type InferenceDeployment struct {
 	metav1.TypeMeta `json:",inline"`
 
-	// metadata is a standard object metadata
+	// 표준 object metadata
+	//
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-	// spec defines the desired state of InferenceDeployment
+	// InferenceDeployment의 원하는 상태 정의
+	//
 	// +required
 	Spec InferenceDeploymentSpec `json:"spec"`
 
-	// status defines the observed state of InferenceDeployment
+	// InferenceDeployment의 관찰된 상태 정의
+	//
 	// +optional
 	Status InferenceDeploymentStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
 
-// InferenceDeploymentList contains a list of InferenceDeployment
+// InferenceDeployment 목록 포함
 type InferenceDeploymentList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`

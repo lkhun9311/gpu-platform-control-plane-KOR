@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Command gateway runs the tenant-aware OpenAI-compatible serving gateway.
+// gateway command, tenant 인식 OpenAI 호환 서빙 gateway 구동
 package main
 
 import (
@@ -34,7 +34,7 @@ func main() {
 	log := ctrl.Log.WithName("gateway")
 	ctx := ctrl.SetupSignalHandler()
 
-	// Register the core and platform types the gateway reads.
+	// gateway가 읽는 core 및 platform type 등록
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		log.Error(err, "register client-go scheme")
@@ -58,20 +58,20 @@ func main() {
 		APIKeySecret: envOr("GATEWAY_API_KEY_SECRET", "gateway-api-keys"),
 	}
 
-	// Start the cache and flip readiness once it has synced.
+	// cache 시작, sync 완료되면 readiness 전환
 	go func() {
 		if err := ca.Start(ctx); err != nil {
 			log.Error(err, "cache stopped")
 		}
 	}()
 	go func() {
-		if ca.WaitForCacheSync(ctx) {
+		if ca.WaitForCacheSync(ctx) { // cache sync 대기 후 준비 완료 표시
 			s.MarkReady()
 			log.Info("cache synced; gateway ready")
 		}
 	}()
 
-	// Serve metrics/readiness on :8081 and the OpenAI-compatible API on :8080.
+	// metric/readiness는 :8081, OpenAI 호환 API는 :8080에서 서빙
 	go func() {
 		if err := http.ListenAndServe(":8081", s.MetricsHandler()); err != nil {
 			log.Error(err, "metrics server stopped")
@@ -84,7 +84,7 @@ func main() {
 	}
 }
 
-// envOr returns the environment value for key or def when unset.
+// key의 환경변수 값 반환, 미설정 시 def 사용
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v

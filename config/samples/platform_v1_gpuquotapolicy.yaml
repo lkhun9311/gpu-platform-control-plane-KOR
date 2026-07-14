@@ -6,12 +6,8 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: team-vision-quota
 spec:
-  # tenant is the logical tenant (team/org) this policy applies to.
   tenant: team-vision
-  # targetNamespace is the namespace into which quota objects are synced.
   targetNamespace: team-vision
-  # gpuClass is illustrative; locally it is backed by simulated capacity.
   gpuClass: l40s
   limits:
-    # gpuCount is the max number of GPUs (nvidia.com/gpu) for this tenant.
     gpuCount: 8
