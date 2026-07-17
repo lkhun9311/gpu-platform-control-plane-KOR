@@ -1,0 +1,10 @@
+# 게이트웨이 매니페스트 묶음이다.
+#
+# config/default가 이 디렉터리를 resources로 포함하면 namespace(system → 실제 namespace)와
+# namePrefix가 여기 있는 모든 이름에 함께 적용된다.
+# 그래서 각 파일은 namespace를 그대로 system으로 적어 두고, 치환은 default가 담당한다.
+resources:
+- serviceaccount.yaml
+- rbac.yaml
+- deployment.yaml
+- service.yaml

@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: system
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # replicas: 1은 임시방편이 아니라 현재 설계가 강제하는 값이다(설계서 Deployment 절, ADR).
+  #
+  # 토큰 버킷이 프로세스 메모리 안에 있기 때문이다(ratelimit.go의 bucketRegistry).
+  # 복제본을 2로 올리면 각 Pod가 자기만의 버킷을 갖게 되어, tenant의 실효 한도가 복제본 수만큼 곱해진다.
+  # 즉 분당 60회로 설정한 정책이 조용히 120회가 된다. 아무 에러도 나지 않고 한도만 틀어진다.
+  # 수평 확장을 하려면 먼저 버킷을 공유 저장소(Redis 등)로 옮겨야 하며, 그것은 명시적으로 M4-b 범위 밖이다.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gpu-platform-control-plane
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: gateway
+      labels:
+        app.kubernetes.io/name: gpu-platform-control-plane
+        app.kubernetes.io/component: gateway
+    spec:
+      # 컨트롤러(manager.yaml)와 같은 restricted Pod Security Standards를 따른다.
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: gateway
+        image: gateway:latest
+        command:
+        - /gateway
+        ports:
+        # 8080은 사용자 추론 트래픽, 8081은 metrics와 probe다.
+        # 포트를 나누는 이유는 tenant별 사용량이 담긴 metrics를 외부에 노출하지 않기 위해서다(server.go의 MetricsHandler).
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        - containerPort: 8081
+          name: metrics
+          protocol: TCP
+        env:
+        # 이 두 값이 api-keys Secret의 좌표다(tenant.go의 resolveTenant가 읽는다).
+        # 하나라도 실제 Secret과 어긋나면 모든 요청이 401로 떨어진다.
+        #
+        # GATEWAY_NAMESPACE를 상수로 박지 않고 fieldRef로 주입하는 이유:
+        # kustomize의 namePrefix/namespace 설정이 배포 시 namespace를 바꿀 수 있는데,
+        # 값을 박아 두면 그때 조용히 어긋난다. 자기가 실제로 떠 있는 namespace를 스스로 알게 하는 편이 안전하다.
+        - name: GATEWAY_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: GATEWAY_API_KEY_SECRET
+          value: gateway-api-keys
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - "ALL"
+        # readinessProbe는 캐시 동기화 전까지 503을 받는다(server.go의 readyz).
+        # 이것이 있어야 캐시가 비어 있는 Pod가 Service endpoint에 들어가지 않는다.
+        # 없으면 갓 뜬 Pod가 "그런 model 없음(404)" 같은 거짓 오류를 사용자에게 돌려준다.
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        # livenessProbe도 같은 /readyz를 쓰지만 의미가 다르다.
+        # readiness는 "지금 트래픽을 받을 수 있나", liveness는 "프로세스가 살아 있나"다.
+        # failureThreshold를 크게 잡은 이유는 캐시 동기화가 느릴 때 liveness가 먼저 터져
+        # 재시작을 반복하는 crash loop에 빠지지 않게 하기 위해서다.
+        livenessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          failureThreshold: 6
+        # 게이트웨이는 요청을 프록시할 뿐 추론을 하지 않으므로 자원 요구가 작다.
+        # 메모리의 주된 사용처는 CRD 캐시이며, 요청 본문은 1MB로 제한된다(proxy.go의 maxBodyBytes).
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+      serviceAccountName: gateway
+      terminationGracePeriodSeconds: 10

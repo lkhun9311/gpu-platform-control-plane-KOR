@@ -1,0 +1,102 @@
+# 게이트웨이의 권한은 "읽기만, 그것도 필요한 것만"이다(설계서 Deployment 절).
+#
+# 왜 컨트롤러의 manager-role을 재사용하지 않는가:
+# manager-role은 ResourceQuota와 Node를 create/update/patch 할 수 있다.
+# 게이트웨이는 요청을 라우팅할 뿐 클러스터 상태를 바꾸지 않으므로 그 권한이 전혀 필요 없다.
+# 게이트웨이는 외부 트래픽을 직접 받는 유일한 컴포넌트라 공격 표면이 가장 넓다.
+# 그런 곳에 쓰기 권한을 주면 침해 시 피해가 클러스터 전체로 번진다. 그래서 전용 역할을 따로 둔다.
+---
+# ClusterRole: CRD 두 종류를 읽는다.
+#
+# 왜 ClusterRole인가:
+# GPUQuotaPolicy는 cluster-scoped라 애초에 namespace 단위 Role로는 읽을 수 없다.
+# InferenceDeployment는 namespaced지만 tenant마다 다른 namespace에 있고,
+# 게이트웨이는 어떤 tenant의 요청이든 받아야 하므로 특정 namespace로 미리 좁힐 수 없다.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/managed-by: kustomize
+  name: gateway-role
+rules:
+# watch가 왜 필요한가:
+# 게이트웨이는 요청마다 apiserver를 부르지 않고 watch 기반 캐시에서 읽는다(server.go의 NewCache).
+# 캐시를 채우고 갱신하는 것이 watch이므로, list와 watch가 없으면 캐시가 영영 동기화되지 않고
+# readiness가 열리지 않아 Pod가 트래픽을 받지 못한다.
+- apiGroups:
+  - platform.lkhun9311.github.io
+  resources:
+  - inferencedeployments
+  - gpuquotapolicies
+  verbs:
+  - get
+  - list
+  - watch
+---
+# Role: api-keys Secret 하나만 읽는다.
+#
+# 왜 ClusterRole이 아니라 Role인가:
+# Secret은 클러스터에서 가장 민감한 자원이다.
+# ClusterRole로 secrets 읽기를 주면 게이트웨이가 모든 namespace의 모든 Secret을 읽을 수 있게 된다.
+# 여기엔 다른 컴포넌트의 자격증명과 TLS 키까지 포함된다.
+# 게이트웨이가 실제로 필요한 것은 자기 namespace의 api-keys Secret 하나뿐이므로 Role로 범위를 가둔다.
+#
+# resourceNames로 더 좁히지 않은 이유:
+# resourceNames를 걸면 list와 watch가 동작하지 않는다(이름을 미리 아는 get에만 적용된다).
+# 캐시가 watch로 채워지는 구조라 그렇게 좁히면 캐시 동기화 자체가 실패한다.
+# 그래서 namespace 경계를 신뢰 경계로 삼고, 게이트웨이 namespace에는 이 Secret만 두는 것이 전제다.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/managed-by: kustomize
+  name: gateway-secret-reader
+  namespace: system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/managed-by: kustomize
+  name: gateway-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gateway-role
+subjects:
+- kind: ServiceAccount
+  name: gateway
+  namespace: system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/managed-by: kustomize
+  name: gateway-secret-reader-binding
+  namespace: system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gateway-secret-reader
+subjects:
+- kind: ServiceAccount
+  name: gateway
+  namespace: system

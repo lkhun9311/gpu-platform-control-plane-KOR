@@ -1,5 +1,8 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
+# 게이트웨이는 별도의 프로세스이자 별도의 이미지라 태그도 따로 받는다.
+# IMG 하나를 공유하면 컨트롤러를 밀 때 게이트웨이까지 같은 태그로 덮여 버린다.
+GATEWAY_IMG ?= gateway:latest
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -115,6 +118,22 @@ build: manifests generate fmt vet ## Build manager binary.
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
+
+.PHONY: build-gateway
+build-gateway: fmt vet ## Build gateway binary.
+	go build -o bin/gateway cmd/gateway/main.go
+
+.PHONY: run-gateway
+run-gateway: fmt vet ## Run the gateway from your host.
+	go run ./cmd/gateway/main.go
+
+.PHONY: docker-build-gateway
+docker-build-gateway: ## Build docker image with the gateway.
+	$(CONTAINER_TOOL) build -t ${GATEWAY_IMG} -f Dockerfile.gateway .
+
+.PHONY: docker-push-gateway
+docker-push-gateway: ## Push docker image with the gateway.
+	$(CONTAINER_TOOL) push ${GATEWAY_IMG}
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
