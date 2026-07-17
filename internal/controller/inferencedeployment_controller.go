@@ -475,7 +475,8 @@ const (
 //  2. ScaledToZero, Replicas == 0 이면 Ready (0 replica는 spec만으로 항상 확정)
 //  3. Degraded, Deployment의 Progressing condition이 ProgressDeadlineExceeded로 False
 //  4. Pending, ReadyReplicas == 0
-//  5. Progressing, UpdatedReplicas나 ReadyReplicas가 spec.Replicas 미만이거나 옛 replica가 아직 안 빠짐
+//  5. Progressing, UpdatedReplicas나 ReadyReplicas가 spec.Replicas 미만이거나, 옛 replica가 아직 안 빠졌거나,
+//     세 replica 수가 아직 spec.Replicas로 수렴하지 않음
 //  6. Ready, 완전히 수렴
 func computeInfDPhase(infd *platformv1.InferenceDeployment, dep *appsv1.Deployment) (string, metav1.Condition) {
 	// avail: Available condition을 만드는 작은 헬퍼를 지역 변수에 담았다.
@@ -565,7 +566,7 @@ func computeInfDPhase(infd *platformv1.InferenceDeployment, dep *appsv1.Deployme
 	if dep.Status.Replicas != dep.Status.UpdatedReplicas {
 		return infdPhaseProgressing, avail(metav1.ConditionFalse, infdReasonRollout, "waiting for old replicas to drain")
 	}
-	// 6. Ready, scale-down 도중 남은 잉여 replica가 아직 제거되지 않은 상황을 막기 위해,
+	// 여전히 Progressing, scale-down 도중 남은 잉여 replica가 아직 제거되지 않은 상황을 막기 위해,
 	// 세 replica count가 모두 원하는 값과 같아야 한다.
 	//
 	// 왜 이 검사가 따로 필요한가:
@@ -578,7 +579,7 @@ func computeInfDPhase(infd *platformv1.InferenceDeployment, dep *appsv1.Deployme
 	if dep.Status.Replicas != infd.Spec.Replicas || dep.Status.UpdatedReplicas != infd.Spec.Replicas || dep.Status.ReadyReplicas != infd.Spec.Replicas {
 		return infdPhaseProgressing, avail(metav1.ConditionFalse, infdReasonRollout, "waiting for replica count to converge")
 	}
-	// 7. Ready, 완전히 수렴
+	// 6. Ready, 완전히 수렴
 	//
 	// 위 모든 관문을 통과했으므로 status는 최신이고, 실패도 없고, 세 count가 정확히 원하는 값과 같다.
 	// 이때만 Ready를 보고하므로 이 Ready는 신뢰할 수 있다.

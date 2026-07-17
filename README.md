@@ -53,10 +53,18 @@ GPU를 단순한 장비가 아니라 Kubernetes 플랫폼 리소스로 다루는
 
 ```bash
 kind create cluster --config hack/kind-config.yaml
-make manifests
 make build
 make test
 ```
+
+> **이 판본에서는 `make manifests`를 실행하지 마세요.**
+>
+> controller-gen은 `api/v1/*_types.go`의 필드 doc 주석을 CRD 스키마의 `description`으로 그대로 복사합니다.
+> 이 판본의 주석에는 Go 문법 설명이 들어 있어서, 재생성하면 그 설명이 클러스터에 적용되는 CRD와 `kubectl explain` 출력에 그대로 실리고 CRD 크기도 약 1.5배(33KB → 53KB)가 됩니다.
+> 그래서 `config/crd/bases/`의 CRD는 영어판에서 생성한 것을 그대로 두어, 두 판본이 동일한 CRD를 배포하도록 유지합니다.
+> 스키마를 바꿔야 한다면 영어판에서 `make manifests`를 돌린 뒤 그 결과를 이 판본으로 복사하세요.
+>
+> 같은 이유로 `api/v1/zz_generated.deepcopy.go`에는 한국어 주석을 달지 않습니다. `make generate`가 덮어쓰기 때문입니다.
 
 kind 환경에서는 실제 GPU 없이도 스케줄링과 쿼터 enforcement 흐름을 검증할 수 있도록 노드 상태에 가짜 GPU capacity를 패치합니다.
 
