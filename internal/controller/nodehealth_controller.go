@@ -77,7 +77,8 @@ type NodeHealthReconciler struct {
 // 앞의 세 줄은 NodeHealth 본체/status/finalizers에 대한 권한이다.
 // 마지막 줄의 groups=""는 코어 API 그룹을 뜻하며, Node에 update/patch 권한을 요구한다.
 // taint를 붙이고 떼려면 반드시 필요한 권한이지만, 동시에 이 컨트롤러가 클러스터 스케줄링에 개입할 수 있다는 뜻이기도 하다.
-// 그래서 delete는 요청하지 않는다 — 이 컨트롤러는 Node를 지울 이유가 전혀 없으므로 최소 권한 원칙에 따라 뺀다.
+// 그래서 delete는 요청하지 않는다.
+// 이 컨트롤러는 Node를 지울 이유가 전혀 없으므로 최소 권한 원칙에 따라 뺀다.
 // +kubebuilder:rbac:groups=platform.lkhun9311.github.io,resources=nodehealths,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=platform.lkhun9311.github.io,resources=nodehealths/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=platform.lkhun9311.github.io,resources=nodehealths/finalizers,verbs=update
@@ -90,7 +91,7 @@ type NodeHealthReconciler struct {
 // 재조정 흐름:
 //  1. 삭제 중이면 부여한 unhealthy taint를 걷어낸 뒤 finalizer를 떼어 실제 삭제가 진행되게 한다,
 //  2. finalizer가 없으면 붙이고 이번 pass를 끝낸다 (소유 taint를 만들기 전에 정리 약속을 먼저 건다),
-//  3. 대상 Node를 읽어 세 상태 중 하나로 판정한다 — node 없음→Pending, Ready→Ready(격리 해제), not-ready→Quarantine(격리 taint 부여),
+//  3. 대상 Node를 읽어 세 상태 중 하나로 판정한다: node 없음→Pending, Ready→Ready(격리 해제), not-ready→Quarantine(격리 taint 부여),
 //  4. taint 변경을 Node에 먼저 patch해 반영하지 못한 격리를 status가 주장하지 않게 한다,
 //  5. status가 실제로 바뀐 경우에만 멱등하게 기록한다.
 //
@@ -137,8 +138,8 @@ func (r *NodeHealthReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				// 바뀐 게 없으면 patch를 아예 보내지 않아 불필요한 쓰기를 피한다.
 				if removeUnhealthyTaint(&node) {
 					// client.MergeFrom(base)는 base와 현재 node의 차이만 담은 merge patch를 만든다.
-					// 노드 전체를 Update로 덮어쓰지 않는 이유가 중요하다 — Node는 kubelet이 계속 갱신하는 hot object라,
-					// 우리가 읽은 시점의 전체 오브젝트를 그대로 되쓰면 그 사이 kubelet이 쓴 status나 다른 컨트롤러의 변경을 되돌려 버린다.
+					// 노드 전체를 Update로 덮어쓰지 않는 이유가 중요하다.
+					// Node는 kubelet이 계속 갱신하는 hot object라, 우리가 읽은 시점의 전체 오브젝트를 그대로 되쓰면 그 사이 kubelet이 쓴 status나 다른 컨트롤러의 변경을 되돌려 버린다.
 					// taint delta만 보내면 우리가 실제로 의도한 필드만 건드리게 된다.
 					if err := r.Patch(ctx, &node, client.MergeFrom(base)); err != nil {
 						// %w 동사는 원래 에러를 감싸(wrap) 보존하므로, 상위에서 errors.Is로 원인을 판별할 수 있다.
@@ -158,7 +159,8 @@ func (r *NodeHealthReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				return ctrl.Result{}, fmt.Errorf("get node %s on deletion: %w", nh.Spec.NodeName, err)
 			}
 			// taint 정리가 끝났으니 이제 finalizer를 떼어 API 서버가 실제 삭제를 진행하게 한다.
-			// 순서가 핵심이다 — 반드시 정리를 먼저 하고 finalizer를 나중에 떼야 한다.
+			// 순서가 핵심이다.
+			// 반드시 정리를 먼저 하고 finalizer를 나중에 떼야 한다.
 			// 반대로 하면 오브젝트가 즉시 사라져 taint를 지울 기회를 영원히 잃는다.
 			controllerutil.RemoveFinalizer(&nh, nodeHealthFinalizer)
 			// finalizer는 status가 아니라 metadata에 있으므로 Status().Update가 아니라 일반 Update로 쓴다.
@@ -240,7 +242,7 @@ func (r *NodeHealthReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// taint 변경을 node에 먼저 반영해 적용하지 못한 격리를 상태가 주장하지 않도록 하고,
 	// 변경 전 base 대비 taint delta만 patch하여 hot한 Node object에 대한 kubelet 동시 갱신을 덮어쓰지 않게 한다.
 	//
-	// 설계 근거 — 쓰기 순서가 안전성의 핵심이다.
+	// 설계 근거: 쓰기 순서가 안전성의 핵심이다.
 	// status를 먼저 쓰고 노드 patch가 실패하면, NodeHealth는 "Quarantine"이라고 주장하는데 실제 노드엔 taint가 없는 거짓 상태가 된다.
 	// 운영자는 격리됐다고 믿지만 스케줄러는 계속 GPU 워크로드를 그 노드에 얹는, 가장 위험한 조합이다.
 	// 반대로 노드를 먼저 patch하면 최악의 경우가 "taint는 걸렸는데 status가 아직 안 따라옴"이고, 이는 다음 재조정에서 저절로 수렴한다.

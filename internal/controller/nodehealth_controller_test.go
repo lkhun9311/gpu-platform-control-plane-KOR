@@ -282,9 +282,9 @@ var _ = Describe("NodeHealth Controller", func() {
 			Expect(nodeAfter.ResourceVersion).To(Equal(nodeBefore.ResourceVersion))
 		})
 
-		// 이 테스트가 막는 회귀 — 이 파일에서 가장 중요한 안전성 검증 중 하나다.
+		// 이 테스트가 막는 회귀: 이 파일에서 가장 중요한 안전성 검증 중 하나다.
 		// 컨트롤러가 taint를 지울 때 "우리 것"만 정확히 골라내지 못하고 노드의 taint 목록을 통째로 비워 버리는 경우를 막는다.
-		// 실제 클러스터의 노드에는 다른 주체가 건 taint가 얼마든지 있다 — 전용 노드 풀 표시, 클러스터 오토스케일러, 사람이 건 cordon 등이다.
+		// 실제 클러스터의 노드에는 다른 주체가 건 taint가 얼마든지 있다: 전용 노드 풀 표시, 클러스터 오토스케일러, 사람이 건 cordon 등이다.
 		// 그걸 우리가 날려 버리면 격리와 무관한 워크로드가 엉뚱한 노드로 쏟아지는 광범위한 사고가 된다.
 		// removeUnhealthyTaint가 key와 effect로 소유권을 정확히 매칭해야 하는 이유가 바로 이것이며,
 		// 이 스펙은 격리 시점과 복구 시점 양쪽 모두에서 무관한 taint가 살아남는지 확인한다.
