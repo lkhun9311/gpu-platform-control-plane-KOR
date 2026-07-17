@@ -37,6 +37,7 @@ import (
 	//   - dot import는 이름 충돌 위험 때문에 보통 피하지만, Ginkgo/Gomega는 문장처럼 읽히게 하려고 공식적으로 이 방식을 권장한다.
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
 	// corev1: Namespace, ResourceQuota 같은 core API 그룹 v1 타입들이다.
 	corev1 "k8s.io/api/core/v1"
 	// errors: 여기서는 표준 errors가 아니라 쿠버네티스의 api/errors다.

@@ -40,6 +40,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+
 	// client: DeleteAllOf의 옵션(client.InNamespace) 등을 쓰기 위해 필요하다.
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	// reconcile: Reconcile에 넘길 Request 타입이 들어 있다.

@@ -26,6 +26,7 @@ import (
 	// Ginkgo/Gomega는 테스트가 문장처럼 읽히도록 관례적으로 이 방식을 쓴다.
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
 	// corev1: Node, Taint, NodeCondition 등 코어 API 타입이다.
 	corev1 "k8s.io/api/core/v1"
 	// errors: 쿠버네티스 API 에러를 종류별로 판별하며, 여기서는 errors.IsNotFound를 쓴다.

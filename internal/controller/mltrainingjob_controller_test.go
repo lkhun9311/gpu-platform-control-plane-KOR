@@ -27,6 +27,7 @@ import (
 	// 보통 dot import는 이름 충돌 위험 때문에 피하지만, Ginkgo/Gomega는 테스트를 문장처럼 읽히게 하려고 관례적으로 이 방식을 쓴다.
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
 	// errors: 쿠버네티스 API 에러를 종류별로 판별하는 도우미이며, 여기서는 errors.IsNotFound를 쓴다.
 	"k8s.io/apimachinery/pkg/api/errors"
 	// types: 오브젝트를 지목하는 NamespacedName(이름 + 네임스페이스) 타입이 들어 있다.
