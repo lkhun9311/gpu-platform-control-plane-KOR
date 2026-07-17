@@ -31,18 +31,28 @@ import (
 	// context: 요청의 취소/타임아웃 신호를 함수 사이로 전달하는 표준 타입이다.
 	// 쿠버네티스 클라이언트 호출은 중단 가능해야 하므로 전부 ctx를 첫 인자로 받는다.
 	"context"
+	// errors: errors.Is로 ErrNoPolicy/ErrNoRoute 같은 특정 에러를 정확히 골라낼 때 쓴다.
+	"errors"
 	// fmt: 문자열 포맷팅 표준 패키지이며, 여기서는 fmt.Errorf로 에러에 맥락을 덧붙일 때 쓴다.
 	"fmt"
 	// net/http: Go의 표준 HTTP 서버/클라이언트 패키지다.
 	// Handler, ServeMux, ResponseWriter, 상태 코드 상수가 전부 여기서 온다.
 	"net/http"
+	// net/url: backend 주소를 담는 URL 타입이다.
+	"net/url"
+	// strconv: 상태 코드(int)를 metric 라벨(string)로 바꿀 때 쓴다.
+	"strconv"
 	// sync/atomic: 잠금 없이 안전하게 읽고 쓰는 원자적(atomic) 타입 모음이다.
 	// 여기서는 readiness 플래그를 담는 atomic.Bool을 쓴다.
 	"sync/atomic"
+	// time: 요청 처리 시간을 재는 데 쓴다.
+	"time"
 
 	// platformv1: 우리 프로젝트가 정의한 CRD 타입들(InferenceDeployment 등)이다.
 	// import 경로 앞의 platformv1은 별칭(alias)이며, 원래 패키지 이름 v1이 다른 v1들과 헷갈리기 때문에 붙였다.
 	platformv1 "github.com/lkhun9311/gpu-mlops-platform-control-plane/api/v1"
+	// corev1: 쿠버네티스 내장 타입들이며, 여기서는 Secret의 cache 감시 범위를 지정할 때 쓴다.
+	corev1 "k8s.io/api/core/v1"
 	// runtime: 쿠버네티스의 Scheme(=Go 타입과 API 그룹/버전을 연결하는 등록부) 타입이 들어 있다.
 	"k8s.io/apimachinery/pkg/runtime"
 	// rest: apiserver 접속 정보(주소, 인증 정보 등)를 담는 rest.Config 타입을 제공한다.
@@ -52,6 +62,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	// client: controller-runtime의 통합 클라이언트 인터페이스(Get/List/Create 등)를 제공한다.
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	// log: context에 실린 logger를 꺼내 쓰는 controller-runtime의 로깅 진입점이다.
+	// router.go가 이미 같은 방식으로 쓰고 있어 로그 형식이 패키지 안에서 일관된다.
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // ModelNameIndex: InferenceDeployment.spec.model.name에 대한 cache field index의 key다.
@@ -99,6 +112,33 @@ type Server struct {
 	// /readyz를 처리하는 HTTP goroutine들이 동시에 이 값을 읽는다.
 	// 쓰는 쪽과 읽는 쪽이 다른 goroutine이므로 atomic이 반드시 필요하다.
 	ready atomic.Bool
+	// buckets: tenant별 token bucket을 보관하는 등록부다.
+	//
+	// Go 문법 설명: 소문자로 시작하므로 패키지 밖에서는 보이지 않는다.
+	// 이 필드를 채우는 일은 cmd/gateway/main.go의 조립 단계가 맡는다.
+	//
+	// 설계 근거(설계서 Components 절): 속도 제한은 요청 사이에 상태(남은 토큰)가 이어져야 의미가 있다.
+	// 요청마다 새 bucket을 만들면 모든 요청이 가득 찬 bucket을 보게 되어 제한이 전혀 걸리지 않는다.
+	// 그래서 프로세스 전체가 공유하는 이 등록부 하나에 tenant별 bucket을 모아 둔다.
+	buckets *bucketRegistry
+	// backendOverride: model을 backend URL로 바꾸는 경로를 테스트에서 갈아끼우는 훅이다.
+	// nil이면(운영에서는 항상 nil이다) 아래 resolveBackend가 진짜 backendFor를 쓴다.
+	//
+	// 왜 이런 훅이 필요한가(플랜 Task 6):
+	// backendFor는 http://<name>.<ns>.svc:<port> 라는 클러스터 내부 DNS 주소를 만든다.
+	// 테스트 프로세스에는 그 DNS가 없으므로 어떤 방법으로도 그 주소에 붙을 수 없다.
+	// 훅을 두면 해석 결과만 httptest 서버 주소로 바꿔 파이프라인 전체를 실제로 통과시킬 수 있다.
+	// 훅이 nil일 때 운영 경로가 그대로 도는 것이 핵심이다. 즉 이 훅은 운영 동작을 우회하지 않는다.
+	backendOverride func(model string) *url.URL
+	// responseHeaderTimeout: 업스트림의 응답 헤더를 기다리는 상한이다.
+	// 0이면 proxy.go의 defaultResponseHeaderTimeout(30초)이 쓰이므로 운영에서는 비워 둔다.
+	//
+	// 왜 상수로 박지 않고 필드로 뺐는가:
+	// 이 값은 504 응답이 나오기까지 걸리는 시간을 그대로 결정한다.
+	// 30초로 고정하면 504 매핑을 검증하는 테스트가 30초를 기다려야 하므로 아무도 그 테스트를 두지 않게 되고,
+	// 결국 504 분기가 검증되지 않은 채 남는다(그 분기는 지워져도 502로 조용히 대체될 뿐이라 더 위험하다).
+	// 필드로 두면 테스트가 같은 코드 경로를 짧은 상한으로 즉시 통과시킬 수 있다.
+	responseHeaderTimeout time.Duration
 }
 
 // markReady: gateway가 서빙 가능한 상태임을 표시하는 내부 헬퍼다.
@@ -117,6 +157,15 @@ func (s *Server) markReady() { s.ready.Store(true) }
 // 하지만 "공개 API 표면"과 "내부 구현"을 분리해 두면, 나중에 markReady의 동작이 복잡해져도
 // 바깥에 노출된 이름과 시그니처는 흔들리지 않는다.
 func (s *Server) MarkReady() { s.markReady() }
+
+// InitRateLimiter: tenant별 token bucket 등록부를 만들어 넣는 exported 진입점이다.
+//
+// 왜 이 메서드가 필요한가:
+// buckets 필드도 bucketRegistry 타입도 소문자라 이 패키지 밖에서는 보이지 않는다.
+// 그래서 cmd/gateway/main.go는 구조체 리터럴로 직접 채울 수 없고, 이렇게 공개된 메서드를 거쳐야 한다.
+// 타입을 공개하지 않고 감춰 두는 편이 나은 이유는, bucket의 내부 구조가 바뀌어도
+// 조립하는 쪽 코드는 전혀 건드릴 필요가 없기 때문이다.
+func (s *Server) InitRateLimiter() { s.buckets = newBucketRegistry() }
 
 // readyz: cache가 동기화된 후에만 200을 반환하고, 아니면 503을 반환해 Pod가 Service endpoint에서 빠지도록 한다.
 //
@@ -148,30 +197,172 @@ func (s *Server) readyz(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// Handler: :8080에서 서빙하는 mux를 만들어 돌려준다.
-// 이후 작업에서 POST /v1/chat/completions를 추가할 예정이다.
+// fail: 요청을 주어진 상태 코드로 끝내고 그 사실을 metric에 남긴다.
+//
+// 왜 헬퍼로 묶는가:
+// 파이프라인의 모든 실패 분기가 "코드를 쓴다 + metric을 센다" 두 가지를 함께 해야 한다.
+// 한 곳이라도 metric을 빠뜨리면 그 실패는 관측되지 않아 조용히 사라진다.
+// 헬퍼 하나를 거치게 하면 그런 누락이 애초에 생기지 않는다.
+//
+// model 인자가 빈 문자열일 수 있는 이유: 인증/정책/속도 제한 단계는 본문을 파싱하기 전이라 model을 아직 모른다.
+// 그때는 ""를 넣어 "이 단계에서는 model이 정해지지 않았다"는 사실이 metric에 그대로 드러나게 한다.
+func (s *Server) fail(w http.ResponseWriter, tenant, model string, code int) {
+	requests.WithLabelValues(tenant, model, strconv.Itoa(code)).Inc()
+	http.Error(w, http.StatusText(code), code)
+}
+
+// resolveBackend: model을 backend URL로 해석한다.
+// 테스트 훅이 걸려 있으면 그것을 쓰고, 아니면 진짜 backendFor를 쓴다.
+//
+// Go 문법 설명: 함수 타입 필드가 nil인지 검사하는 것은 "훅이 설정되었는가"를 묻는 관용구다.
+// nil인 함수를 그냥 호출하면 패닉이 나므로 이 검사가 반드시 앞에 와야 한다.
+func (s *Server) resolveBackend(ctx context.Context, policy *platformv1.GPUQuotaPolicy, model string) (*url.URL, error) {
+	if s.backendOverride != nil {
+		return s.backendOverride(model), nil
+	}
+	return s.backendFor(ctx, policy, model)
+}
+
+// chatCompletions: OpenAI 호환 chat completions 요청을 처리하는 파이프라인이다.
+//
+// 단계의 순서가 이 함수의 핵심이다(설계서 Request flow 절):
+//  1. request id 부여 — 이후 모든 로그와 업스트림 요청이 같은 id를 공유해야 추적이 이어진다.
+//  2. 인증 — 누구인지 모르는 요청은 여기서 끝난다(401).
+//  3. 정책 조회 — 신원은 알지만 권한이 없으면 여기서 끝난다(403).
+//  4. 속도 제한 — 자기 몫을 넘겼으면 여기서 끝난다(429).
+//  5. 본문 파싱 — model을 꺼낸다(400).
+//  6. 라우팅 — model을 backend로 해석한다(404).
+//  7. 프록시 — 업스트림으로 넘긴다(502/504 또는 업스트림의 응답).
+//
+// 왜 인증이 속도 제한보다 먼저인가:
+// 속도 제한은 tenant별 bucket을 쓰므로 tenant를 모르면 애초에 판정할 수 없다.
+// 게다가 인증 없이 제한을 걸면 익명 요청이 남의 bucket을 소모시켜, 공격자가 남의 tenant를 마비시킬 수 있다.
+//
+// 왜 속도 제한이 본문 파싱보다 먼저인가:
+// 본문 파싱은 최대 1MB를 메모리에 올린다. 제한에 걸릴 요청까지 본문을 읽으면
+// 폭주하는 클라이언트가 게이트웨이 메모리를 계속 소모시킬 수 있다.
+// 거절할 요청은 가능한 한 빨리, 비용을 쓰기 전에 거절하는 것이 맞다.
+func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// 1. request id: 호출자가 이미 달아 왔으면 그대로 쓰고, 없으면 새로 만든다.
+	//
+	// 왜 들어온 id를 이어받는가: 호출자가 자기 시스템의 추적 id를 달아 보냈다면
+	// 그것을 유지해야 게이트웨이의 로그와 호출자의 로그가 하나로 이어진다.
+	// 무조건 새로 만들면 그 연결이 끊긴다.
+	rid := r.Header.Get("X-Request-Id")
+	if rid == "" {
+		rid = newRequestID()
+	}
+	// 응답과 업스트림 요청 양쪽에 단다.
+	// 응답에만 달면 업스트림 로그에서 이 요청을 찾을 수 없고,
+	// 요청에만 달면 클라이언트가 자기 요청의 id를 알 수 없어 문의 시 대조가 불가능하다.
+	w.Header().Set("X-Request-Id", rid)
+	r.Header.Set("X-Request-Id", rid)
+
+	// 2. 인증: API key를 tenant로 해석한다.
+	tenant, ok := s.resolveTenant(ctx, r)
+	if !ok {
+		s.fail(w, "", "", http.StatusUnauthorized)
+		return
+	}
+
+	// 3. 정책 조회: 이 tenant의 GPUQuotaPolicy를 찾는다.
+	policy, err := s.policyForTenant(ctx, tenant)
+	// errors.Is로 "정책이 없음"이라는 정상적 결과와 "조회가 깨짐"이라는 사고를 구분한다.
+	// 이 둘을 뭉뚱그리면 apiserver 장애가 403으로 보여 운영자가 정책 설정을 헤매게 된다.
+	if errors.Is(err, ErrNoPolicy) {
+		s.fail(w, tenant, "", http.StatusForbidden)
+		return
+	}
+	if err != nil {
+		// 조회 자체가 실패한 경우다. 클라이언트 잘못이 아니므로 502다.
+		log.FromContext(ctx).Error(err, "policy lookup failed", "tenant", tenant, "request_id", rid)
+		s.fail(w, tenant, "", http.StatusBadGateway)
+		return
+	}
+
+	// 4. 속도 제한: tenant의 bucket에서 토큰 하나를 꺼내 본다.
+	if !s.buckets.Allow(tenant, policy.Spec.RateLimit) {
+		// 전용 metric을 따로 센다(requests의 code=429와 목적이 다르다).
+		rateLimited.WithLabelValues(tenant).Inc()
+		s.fail(w, tenant, "", http.StatusTooManyRequests)
+		return
+	}
+
+	// 5. 본문 파싱: model을 꺼내고 본문을 복원한다.
+	body, model, err := readModel(r)
+	if err != nil {
+		// 깨진 JSON, model 누락, 크기 초과가 모두 여기 해당한다.
+		// 셋 다 클라이언트가 고쳐야 할 문제이므로 400이 맞다.
+		s.fail(w, tenant, "", http.StatusBadRequest)
+		return
+	}
+	// 복원된 본문을 요청에 되돌려 놓는다. 이 줄이 없으면 업스트림이 빈 본문을 받는다.
+	r.Body = body
+
+	// 6. 라우팅: model을 서빙하는 backend를 찾는다.
+	target, err := s.resolveBackend(ctx, policy, model)
+	if errors.Is(err, ErrNoRoute) {
+		// 그런 model이 없다는 정상적 결과다.
+		s.fail(w, tenant, model, http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.FromContext(ctx).Error(err, "backend lookup failed", "tenant", tenant, "model", model, "request_id", rid)
+		s.fail(w, tenant, model, http.StatusBadGateway)
+		return
+	}
+
+	// 7. 프록시: 여기서부터는 응답을 우리가 만들지 않고 업스트림 것을 그대로 흘려보낸다.
+	start := time.Now()
+	// statusRecorder로 감싸 업스트림이 쓴 상태 코드를 나중에 metric에 남길 수 있게 한다.
+	rec := &statusRecorder{ResponseWriter: w, code: http.StatusOK}
+	newReverseProxy(target, s.responseHeaderTimeout, func(c int) {
+		upstreamErrors.WithLabelValues(tenant, model).Inc()
+		// ErrorHandler가 http.Error로 코드를 쓰지만 그 경로는 statusRecorder를 거치지 않을 수 있으므로
+		// 여기서 직접 기록해 metric이 실제 응답과 어긋나지 않게 한다.
+		rec.code = c
+	}).ServeHTTP(rec, r)
+
+	// ServeHTTP가 반환했다는 것은 응답 전송이 끝났다는 뜻이다(스트리밍이면 스트림이 닫힌 시점이다).
+	// 그러므로 여기서 재는 시간은 첫 바이트까지가 아니라 요청 전체가 완료되기까지의 시간이다.
+	requests.WithLabelValues(tenant, model, strconv.Itoa(rec.code)).Inc()
+	requestDuration.WithLabelValues(tenant, model).Observe(time.Since(start).Seconds())
+}
+
+// Handler: :8080에서 사용자 트래픽을 서빙하는 mux를 만들어 돌려준다.
 //
 // Go 문법 설명:
 //   - 반환 타입 http.Handler는 인터페이스이며, ServeHTTP 메서드를 가진 무엇이든 담을 수 있다.
 //     구체 타입(*http.ServeMux) 대신 인터페이스를 반환하면 호출한 쪽이 내부 구현에 묶이지 않는다.
 //   - http.NewServeMux()는 "경로 → handler" 라우팅 표를 만든다.
-//   - mux.HandleFunc(경로, 함수)는 그 표에 한 줄을 등록한다.
+//   - mux.HandleFunc(패턴, 함수)는 그 표에 한 줄을 등록한다.
 //   - s.readyz 처럼 괄호 없이 메서드 이름만 쓰면 "호출"이 아니라 "함수 값 자체"를 넘기는 것이다.
 //     이때 리시버 s가 함께 묶여서(method value) 나중에 호출될 때도 같은 Server 인스턴스를 본다.
+//
+// 패턴에 메서드를 함께 적는 이유(설계서 Error codes 절):
+// Go 1.22부터 ServeMux 패턴에 "POST /경로"처럼 메서드를 적을 수 있다.
+// 이렇게 등록하면 경로는 맞고 메서드만 다른 요청에 mux가 알아서 405를 돌려주고,
+// 등록되지 않은 경로에는 404를 돌려준다. 즉 두 코드를 우리가 직접 구현할 필요가 없다.
+// 메서드 없이 "/v1/chat/completions"로만 등록하면 GET 요청까지 파이프라인으로 들어와
+// 405여야 할 것이 401이나 400으로 나가게 된다.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/chat/completions", s.chatCompletions)
 	mux.HandleFunc("/readyz", s.readyz)
 	return mux
 }
 
 // MetricsHandler: :8081에서 관측성을 담당하는 mux를 만들어 돌려준다.
-// 이후 작업에서 /metrics를 추가할 예정이다.
 //
 // 설계 근거(설계서 Components 절): 사용자 트래픽(:8080)과 관측성 트래픽(:8081)을 별도 포트로 분리한다.
 // 포트가 나뉘어 있으면 metrics 엔드포인트를 외부에 노출하지 않고 클러스터 내부에만 열어둘 수 있다.
+// tenant별 사용량이 담긴 metric이 사용자에게 노출되면 다른 tenant의 활동을 추측할 수 있으므로 반드시 분리해야 한다.
 // 두 mux 모두 /readyz를 등록하는 이유는 어느 포트로 probe를 걸든 같은 답을 얻게 하기 위해서다.
 func (s *Server) MetricsHandler() http.Handler {
 	mux := http.NewServeMux()
+	mux.Handle("/metrics", metricsHTTPHandler())
 	mux.HandleFunc("/readyz", s.readyz)
 	return mux
 }
@@ -188,19 +379,45 @@ func (s *Server) MetricsHandler() http.Handler {
 //
 // 설계 근거(설계서 Components 절): 게이트웨이는 요청마다 apiserver를 때리면 안 된다.
 // watch 기반 cache를 로컬에 두고 메모리에서 읽어야 지연이 낮고 apiserver 부하도 없다.
-func NewCache(ctx context.Context, cfg *rest.Config, scheme *runtime.Scheme) (cache.Cache, client.Client, error) {
+func NewCache(ctx context.Context, cfg *rest.Config, scheme *runtime.Scheme, namespace string) (cache.Cache, client.Client, error) {
 	// cache.New(...)는 접속 설정(cfg)과 타입 등록부(scheme)로 cache를 만든다.
 	// ca, err := ... 처럼 반환값이 둘이면 왼쪽에 변수를 둘 나열해 받는다.
-	// cache.Options의 두 필드 설명:
+	// cache.Options의 세 필드 설명:
 	//   - Scheme: 어떤 Go 타입이 어떤 API 그룹/버전에 대응하는지 알려주는 등록부다.
 	//     이게 없으면 cache가 InferenceDeployment 같은 커스텀 타입을 역직렬화하지 못한다.
 	//   - DefaultTransform: cache에 넣기 전에 객체를 한 번 가공하는 함수다.
 	//     TransformStripManagedFields()는 metadata.managedFields를 떼어낸다.
 	//     이 필드는 서버 사이드 apply 이력이라 게이트웨이가 전혀 쓰지 않으면서 객체마다 용량을 크게 차지한다.
 	//     미리 버리면 cache 메모리 사용량이 눈에 띄게 줄어든다.
+	//   - ByObject: 타입마다 감시 범위를 따로 정한다. 아래에서 Secret에만 건다.
 	ca, err := cache.New(cfg, cache.Options{
 		Scheme:           scheme,
 		DefaultTransform: cache.TransformStripManagedFields(),
+		// Secret은 이 게이트웨이가 떠 있는 namespace 하나만 감시한다.
+		//
+		// 이 범위 제한이 없으면 무슨 일이 벌어지는가(설계서 Components 절이 "scoped cache"를 요구하는 이유):
+		// controller-runtime의 cache는 범위를 지정하지 않으면 모든 namespace를 감시한다
+		// (cache.Options 문서: "An empty map ... means that all namespaces will be cached").
+		// 그러면 게이트웨이가 클러스터의 모든 Secret을 메모리에 들고 있게 된다.
+		// 거기엔 다른 컴포넌트의 자격증명과 TLS 개인키까지 전부 포함된다.
+		// 게이트웨이는 외부 트래픽을 직접 받는 유일한 컴포넌트라 침해 시 그 전부가 함께 새어 나간다.
+		// 필요한 것은 api-keys Secret 하나뿐이므로 그 namespace로 가둔다.
+		//
+		// RBAC과 반드시 짝이 맞아야 한다:
+		// config/gateway/rbac.yaml은 secrets 읽기를 게이트웨이 namespace의 Role로만 준다.
+		// 여기서 범위를 가두지 않으면 cache가 모든 namespace의 secrets를 list/watch 하려다 권한이 없어 실패하고,
+		// cache가 영영 동기화되지 않아 readiness가 열리지 않는다. 즉 게이트웨이가 아무 요청도 받지 못한다.
+		//
+		// InferenceDeployment는 여기에 넣지 않는다. tenant마다 다른 namespace에 있고
+		// 게이트웨이는 어떤 tenant의 요청이든 받아야 하므로 범위를 미리 좁힐 수 없다.
+		// GPUQuotaPolicy는 cluster-scoped라 애초에 namespace 개념이 없다.
+		ByObject: map[client.Object]cache.ByObject{
+			&corev1.Secret{}: {
+				Namespaces: map[string]cache.Config{
+					namespace: {},
+				},
+			},
+		},
 	})
 	// 에러가 있으면 두 개의 반환값 자리에 nil을 채우고 에러만 위로 올린다.
 	if err != nil {

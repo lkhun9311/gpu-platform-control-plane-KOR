@@ -107,6 +107,13 @@ func main() {
 	// ctrl.GetConfigOrDie()는 클러스터 안에서는 ServiceAccount 토큰을, 밖에서는 ~/.kube/config를 자동으로 쓴다.
 	// 이름 끝의 OrDie가 뜻하듯 찾지 못하면 에러를 돌려주는 대신 그 자리에서 프로그램을 죽인다.
 	cfg := ctrl.GetConfigOrDie()
+	// namespace를 cache 생성 전에 확정한다.
+	//
+	// 왜 여기로 끌어올렸는가:
+	// 이 값은 아래 Server의 Namespace 필드에도 쓰이지만, NewCache가 Secret 감시 범위를 가두는 데에도 필요하다.
+	// 두 곳이 서로 다른 namespace를 보면 게이트웨이는 A를 감시하면서 B에서 Secret을 찾게 되어
+	// 모든 요청이 401로 떨어진다. 한 변수에서 갈라 쓰면 그런 어긋남이 생길 수 없다.
+	namespace := envOr("GATEWAY_NAMESPACE", "default")
 	// gateway.NewCache(...)는 반환값을 세 개 돌려준다.
 	//   - ca: cache 인스턴스이며, 아래에서 고루틴으로 Start를 호출해 돌린다.
 	//   - cl: 그 cache를 통해 읽는 client이며, Server에 넣어 준다.
@@ -117,7 +124,7 @@ func main() {
 	// 설계 근거(설계서 Components 절): 게이트웨이는 요청마다 정책과 Secret을 읽어야 한다.
 	// 매 요청 API 서버를 호출하면 지연시간이 밀리초 단위로 늘고 API 서버에도 부하가 걸린다.
 	// cache는 watch로 변경을 미리 받아 메모리에 들고 있어서 읽기를 사실상 0에 가까운 비용으로 만든다.
-	ca, cl, err := gateway.NewCache(ctx, cfg, scheme)
+	ca, cl, err := gateway.NewCache(ctx, cfg, scheme, namespace)
 	if err != nil {
 		log.Error(err, "build cache")
 		os.Exit(1)
@@ -141,9 +148,16 @@ func main() {
 	// 값이 바뀌어도 이미지나 커맨드 인자를 건드리지 않고 매니페스트만 고치면 되기 때문이다.
 	s := &gateway.Server{
 		Client:       cl,
-		Namespace:    envOr("GATEWAY_NAMESPACE", "default"),
+		Namespace:    namespace,
 		APIKeySecret: envOr("GATEWAY_API_KEY_SECRET", "gateway-api-keys"),
 	}
+	// tenant별 token bucket 등록부를 켠다.
+	//
+	// 왜 조립 단계에서 하는가:
+	// bucketRegistry는 gateway 패키지의 비공개 타입이라 여기서 직접 만들 수 없다.
+	// 그래서 gateway 쪽이 공개 메서드 하나를 열어 두고, main은 "속도 제한을 켠다"는 의사만 밝힌다.
+	// 이 호출을 빠뜨리면 buckets가 nil인 채로 요청을 받게 되므로, gateway 쪽에서 그 경우를 막아 둔다.
+	s.InitRateLimiter()
 
 	// 아래부터 고루틴 세 개를 띄운다.
 	//
