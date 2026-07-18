@@ -38,10 +38,13 @@ GPU를 단순한 장비가 아니라 Kubernetes 플랫폼 리소스로 다루는
 | M2 | idempotent reconcile, finalizer, drift recovery | 완료 |
 | M3 | 비정상 GPU 노드 taint, 테넌트별 ResourceQuota 동기화 | 완료 |
 | M4-a | `InferenceDeployment` 기반 추론 워크로드 관리 | 완료 |
-| M4-b | 테넌트 인식 서빙 게이트웨이, rate limit, 라우팅, 메트릭 | 진행 중 |
-| M5 | AWS/EKS 배포 설계와 real GPU 성능 격리 실험 | 설계 완료/확장 예정 |
-| M6 | Kueue 기반 학습 잡 입장 제어 | 계획 |
-| M7 | 실패 주입과 운영 증거 기록 | 스케치 |
+| M4-b | 테넌트 인식 서빙 게이트웨이: API key → tenant, 토큰 버킷 → 429, 모델 라우팅, 프록시, 메트릭 | 완료 |
+| M5-a | AWS 호스팅: Terraform(state bootstrap, EKS, 노드 그룹), GitHub Actions CI(OIDC → ECR), Argo CD GitOps, EKS에 오퍼레이터 배포, 경량 관측성(아직 GPU 없음) | 설계 완료(v3.1) |
+| M5-b | 그 인프라 위의 real-GPU 플래그십: GPU 노드 그룹(On-Demand, ephemeral), `GpuSharingBenchmark`와 KV-cache 인식 입장 가드, noisy neighbor p99 A/B 측정(핵심 기능) | 설계 완료 |
+| M5-c | 심화: 비용/공정성 프론티어(가드 임계값 3개 이상)와 공유 모드 매트릭스(exclusive / time-slicing / MPS). M5-b 증거를 강화하며 새 기능은 없다 | 계획 |
+| M5-d | 측정 수치를 담은 기술 문서(M5-c 이후 공개) | 계획 |
+| M6 | 학습 입장 제어(스트레치에서 승격): `MLTrainingJob` → Job과 Kueue Workload, 2-테넌트 공정 공유, kind에서 preemption 증거 확보. 학습 쿼터는 Kueue가 소유한다 | 계획 |
+| M7 | 실패 시나리오 주입과 운영 증거 기록(`WorkloadRun`) | 스케치 |
 
 ## 기술 스택
 
