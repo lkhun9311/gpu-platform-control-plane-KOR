@@ -43,6 +43,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	// testutil: 등록된 counter 값을 코드에서 직접 읽어오는 prometheus 테스트 헬퍼이며, 아래에서 testutil.ToFloat64로 쓴다.
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	// corev1: Namespace, ResourceQuota 같은 core API 그룹 v1 타입들이다.
 	corev1 "k8s.io/api/core/v1"
 	// errors: 여기서는 표준 errors가 아니라 쿠버네티스의 api/errors다.
@@ -316,6 +319,10 @@ var _ = Describe("GPUQuotaPolicy Controller", func() {
 			rq.Spec.Hard[gpuResource] = *resource.NewQuantity(99, resource.DecimalSI)
 			Expect(k8sClient.Update(ctx, rq)).To(Succeed())
 
+			// counter는 프로세스 전역이라 이 spec 실행 전에 다른 spec이 이미 값을 올려놓았을 수 있다.
+			// 그래서 0이라고 가정하지 않고, 전후 값의 차이(delta)만 검증한다.
+			before := testutil.ToFloat64(gpuQuotaPolicyDriftCorrectedTotal)
+
 			reconcileUntilSteady()
 
 			// 정책이 정한 8로 되돌아왔는지 확인한다.
@@ -323,6 +330,10 @@ var _ = Describe("GPUQuotaPolicy Controller", func() {
 			Expect(k8sClient.Get(ctx, rqKey, corrected)).To(Succeed())
 			q := corrected.Spec.Hard[gpuResource]
 			Expect(q.Value()).To(Equal(int64(8)))
+
+			// 실제로 값을 되돌린 교정 1건과 metric 증가분이 정확히 일치해야 한다.
+			after := testutil.ToFloat64(gpuQuotaPolicyDriftCorrectedTotal)
+			Expect(after - before).To(Equal(1.0))
 		})
 
 		// finalizer 기반 정리 검증이다.

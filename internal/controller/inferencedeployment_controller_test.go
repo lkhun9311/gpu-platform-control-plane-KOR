@@ -40,6 +40,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	// gomega: Expect(...).To(...) 형태의 단언(assertion) 라이브러리이며 Ginkgo와 짝을 이룬다.
 	. "github.com/onsi/gomega"
+	// testutil: 등록된 counter 값을 코드에서 직접 읽어오는 prometheus 테스트 헬퍼이며, 아래에서 testutil.ToFloat64로 쓴다.
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	// appsv1, corev1, metav1, types: 프로덕션 코드와 같은 쿠버네티스 API 타입들이다.
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -366,6 +368,10 @@ var _ = Describe("InferenceDeployment Controller", func() {
 			Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
 			Expect(k8sClient.Create(ctx, newInfD(1, 1))).To(Succeed())
 
+			// counter는 프로세스 전역이라 이 spec 실행 전에 다른 spec이 이미 값을 올려놓았을 수 있다.
+			// 그래서 0이라고 가정하지 않고, 전후 값의 차이(delta)만 검증한다.
+			before := testutil.ToFloat64(inferenceDeploymentDegradedTotal.WithLabelValues(infdReasonConflict))
+
 			// 충돌은 에러가 아니라 status로 보고해야 한다.
 			//
 			// 재시도해도 풀리지 않는 문제라 에러를 내면 백오프 재시도만 무한 반복하기 때문이다.
@@ -384,6 +390,10 @@ var _ = Describe("InferenceDeployment Controller", func() {
 			//
 			// 만약 vllm/vllm-openai:test로 바뀌었다면 탈취가 실제로 일어난 것이다.
 			Expect(got.Spec.Template.Spec.Containers[0].Image).To(Equal("busybox"))
+
+			// Degraded 전환과 함께 reason=DeploymentConflict metric도 정확히 1만큼 늘어야 한다.
+			after := testutil.ToFloat64(inferenceDeploymentDegradedTotal.WithLabelValues(infdReasonConflict))
+			Expect(after - before).To(Equal(1.0))
 		})
 
 		// scale-down 도중 replica가 남아도는 상황에서 Ready로 올리면 안 된다.

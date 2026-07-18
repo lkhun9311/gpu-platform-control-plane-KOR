@@ -27,6 +27,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	// testutil: 등록된 counter 값을 직접 읽어오는 prometheus 테스트 헬퍼이며, 아래에서 testutil.ToFloat64로 쓴다.
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	// corev1: Node, Taint, NodeCondition 등 코어 API 타입이다.
 	corev1 "k8s.io/api/core/v1"
 	// errors: 쿠버네티스 API 에러를 종류별로 판별하며, 여기서는 errors.IsNotFound를 쓴다.
@@ -205,6 +208,10 @@ var _ = Describe("NodeHealth Controller", func() {
 		// not-ready 노드에 taint가 걸리지 않으면 스케줄러가 고장난 노드에 계속 GPU 워크로드를 얹게 되며, 이 컨트롤러의 존재 이유가 사라진다.
 		// taint 개수를 정확히 1로 보는 것은 중복 부착까지 함께 막기 위해서다.
 		It("quarantines a not-ready node: taints it, sets phase and fault signal", func() {
+			// counter는 프로세스 전역이라 이 spec 실행 전에 다른 spec이 이미 값을 올려놓았을 수 있다.
+			// 그래서 0이라고 가정하지 않고, 전후 값의 차이(delta)만 검증한다.
+			before := testutil.ToFloat64(nodeHealthTaintTotal.WithLabelValues("applied"))
+
 			node := makeNode(corev1.ConditionFalse)
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
 			Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
@@ -223,6 +230,10 @@ var _ = Describe("NodeHealth Controller", func() {
 			gotNode := &corev1.Node{}
 			Expect(k8sClient.Get(ctx, nodeKey, gotNode)).To(Succeed())
 			Expect(unhealthyTaintCount(gotNode)).To(Equal(1)) // taint 정확히 하나 부여 확인
+
+			// metric도 실제 taint 부여와 함께 정확히 1만큼 늘어야 한다.
+			after := testutil.ToFloat64(nodeHealthTaintTotal.WithLabelValues("applied"))
+			Expect(after - before).To(Equal(1.0))
 		})
 
 		// 이 테스트가 막는 회귀: taint를 걸기만 하고 되돌리지 못하는 경우다.
@@ -233,6 +244,10 @@ var _ = Describe("NodeHealth Controller", func() {
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
 			Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
 			reconcileUntilSteady()
+
+			// 격리가 이미 한 번 걸린 뒤의 시점을 기준선으로 잡는다.
+			// 이 spec은 "removed" 전환만 검증하므로, "applied" 쪽 카운터 증가는 여기서 볼 필요가 없다.
+			before := testutil.ToFloat64(nodeHealthTaintTotal.WithLabelValues("removed"))
 
 			// 노드를 Ready로 되돌려 복구를 흉내낸다.
 			recovered := &corev1.Node{}
@@ -251,6 +266,10 @@ var _ = Describe("NodeHealth Controller", func() {
 			gotNode := &corev1.Node{}
 			Expect(k8sClient.Get(ctx, nodeKey, gotNode)).To(Succeed())
 			Expect(unhealthyTaintCount(gotNode)).To(Equal(0)) // 복구 후 taint 제거 확인
+
+			// taint 제거와 함께 "removed" metric도 정확히 1만큼 늘어야 한다.
+			after := testutil.ToFloat64(nodeHealthTaintTotal.WithLabelValues("removed"))
+			Expect(after - before).To(Equal(1.0))
 		})
 
 		// 이 테스트가 막는 회귀: 이미 격리된 노드를 재조정할 때마다 taint를 또 붙이거나 오브젝트를 되쓰는 경우다.

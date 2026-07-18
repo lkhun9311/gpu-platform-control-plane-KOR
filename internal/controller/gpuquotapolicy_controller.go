@@ -382,6 +382,11 @@ func (r *GPUQuotaPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 				return ctrl.Result{}, err
 			}
 			log.Info("Corrected ResourceQuota drift", "resourceQuota", rqKey.String())
+
+			// drift 교정 metric은 Update가 성공한 뒤에만 센다.
+			//
+			// 쓰기가 실패하면 위에서 에러를 그대로 리턴해 이 줄에 닿지 못하므로, 실패한 쓰기를 성공한 교정으로 잘못 세는 일이 없다.
+			gpuQuotaPolicyDriftCorrectedTotal.Inc()
 		}
 		// 소유가 맞고 값도 같으면 아무것도 하지 않는다.
 		//

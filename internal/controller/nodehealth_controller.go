@@ -252,6 +252,18 @@ func (r *NodeHealthReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			return ctrl.Result{}, fmt.Errorf("update node %s taints: %w", node.Name, err)
 		}
 		log.Info("Updated node taints", "node", node.Name, "phase", desired.Phase)
+
+		// taint 전환 metric은 patch가 성공한 뒤에만 센다.
+		//
+		// 쓰기가 실패해 에러로 리턴하면 이 줄에 도달하지 않으므로, 실제로 일어나지 않은 격리를 metric이 주장하는 일이 없다.
+		//
+		// Pending 판정에는 taint 변경이 없으므로 switch에 case를 두지 않으며, Quarantine과 Ready 두 경우에만 각각 "applied"와 "removed"로 늘린다.
+		switch desired.Phase {
+		case phaseQuarantine:
+			nodeHealthTaintTotal.WithLabelValues("applied").Inc()
+		case phaseReady:
+			nodeHealthTaintTotal.WithLabelValues("removed").Inc()
+		}
 	}
 
 	// 멱등: 실제로 바뀐 경우에만 상태 기록

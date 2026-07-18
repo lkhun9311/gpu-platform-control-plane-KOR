@@ -743,6 +743,11 @@ func (r *InferenceDeploymentReconciler) markDegraded(ctx context.Context, infd *
 		if err := r.Status().Update(ctx, infd); err != nil {
 			return ctrl.Result{}, fmt.Errorf("update inferencedeployment status %s/%s to Degraded: %w", infd.Namespace, infd.Name, err)
 		}
+
+		// Degraded 전환 metric은 status 쓰기가 성공한 뒤에만 센다.
+		//
+		// 이 가드가 없으면 이미 Degraded인 객체를 다시 확인하기만 하는 재조정에서도 매번 카운터가 올라 실제 전환 횟수를 부풀린다.
+		inferenceDeploymentDegradedTotal.WithLabelValues(reason).Inc()
 	}
 	// 에러 없이 정상 종료한다.
 	//
