@@ -1,0 +1,31 @@
+# Builds the gpu-simulator binary
+#
+# Why a separate Dockerfile:
+# The existing Dockerfile builds cmd/main.go (the controller) into the manager binary, and Dockerfile.gateway builds the gateway.
+# gpu-simulator is a third, independent process that runs as a DaemonSet on every node, so it takes its own image for the same reason the gateway does: a shared image would redeploy all three whenever only one changes.
+FROM golang:1.26 AS builder
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+# Copy go.mod/go.sum first to cache the dependency layer.
+# This avoids re-downloading dependencies when only the source changes.
+COPY go.mod go.mod
+COPY go.sum go.sum
+RUN go mod download
+
+# Copy the source (.dockerignore filters it).
+COPY . .
+
+# GOARCH is left without a default for the same reason as in the existing Dockerfile.
+# Left empty, the build targets the platform of the host that runs it.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o gpu-simulator cmd/gpu-simulator/main.go
+
+# distroless: a minimal base image with no shell and no package manager.
+# gpu-simulator only writes one unix socket file under a hostPath mount, so it needs no shell or package manager either.
+FROM gcr.io/distroless/static:nonroot
+WORKDIR /
+COPY --from=builder /workspace/gpu-simulator .
+USER 65532:65532
+
+ENTRYPOINT ["/gpu-simulator"]

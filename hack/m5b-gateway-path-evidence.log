@@ -1,0 +1,616 @@
+
+===== 0. preflight =====
++ docker version --format {{.Server.Version}}
+29.1.3
++ go version
+go version go1.26.0 linux/amd64
+
+===== 1. build benchharness on the host =====
++ go build -o /tmp/tmp.3V6wsnhWZo/benchharness ./cmd/benchharness
+
+===== 2. recreate the kind cluster (platform) =====
+Creating cluster "platform" ...
+ • Ensuring node image (kindest/node:v1.31.0) 🖼  ...
+ ✓ Ensuring node image (kindest/node:v1.31.0) 🖼
+ • Preparing nodes 📦   ...
+ ✓ Preparing nodes 📦 
+ • Writing configuration 📜  ...
+ ✓ Writing configuration 📜
+ • Starting control-plane 🕹️  ...
+ ✓ Starting control-plane 🕹️
+ • Installing CNI 🔌  ...
+ ✓ Installing CNI 🔌
+ • Installing StorageClass 💾  ...
+ ✓ Installing StorageClass 💾
+Set kubectl context to "kind-platform"
+You can now use your cluster with:
+
+kubectl cluster-info --context kind-platform
+
+Have a nice day! 👋
++ k get nodes -o wide
+NAME                     STATUS     ROLES           AGE   VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                         KERNEL-VERSION     CONTAINER-RUNTIME
+platform-control-plane   NotReady   control-plane   4s    v1.31.0   172.18.0.2    <none>        Debian GNU/Linux 12 (bookworm)   7.0.0-28-generic   containerd://1.7.18
+
+===== 3. install Kueue v0.18.3 =====
+namespace/kueue-system serverside-applied
+customresourcedefinition.apiextensions.k8s.io/admissionchecks.kueue.x-k8s.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/clusterqueues.kueue.x-k8s.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/cohorts.kueue.x-k8s.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/localqueues.kueue.x-k8s.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/multikueueclusters.kueue.x-k8s.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/multikueueconfigs.kueue.x-k8s.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/provisioningrequestconfigs.kueue.x-k8s.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/resourceflavors.kueue.x-k8s.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/topologies.kueue.x-k8s.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/workloadpriorityclasses.kueue.x-k8s.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/workloads.kueue.x-k8s.io serverside-applied
+serviceaccount/kueue-controller-manager serverside-applied
+role.rbac.authorization.k8s.io/kueue-leader-election-role serverside-applied
+role.rbac.authorization.k8s.io/kueue-manager-clusterprofiles-role serverside-applied
+role.rbac.authorization.k8s.io/kueue-manager-secrets-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-batch-admin-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-batch-user-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-clusterqueue-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-clusterqueue-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-cohort-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-cohort-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-jaxjob-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-jaxjob-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-job-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-job-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-jobset-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-jobset-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-leaderworkerset-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-leaderworkerset-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-localqueue-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-localqueue-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-manager-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-metrics-auth-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-metrics-reader serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-mpijob-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-mpijob-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-paddlejob-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-paddlejob-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-pending-workloads-cq-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-pending-workloads-lq-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-pytorchjob-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-pytorchjob-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-raycluster-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-raycluster-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-rayjob-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-rayjob-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-rayservice-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-rayservice-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-resourceflavor-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-resourceflavor-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-sparkapplication-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-sparkapplication-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-tfjob-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-tfjob-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-topology-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-topology-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-trainjob-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-trainjob-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-workload-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-workload-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-xgboostjob-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-xgboostjob-viewer-role serverside-applied
+rolebinding.rbac.authorization.k8s.io/kueue-visibility-server-auth-reader serverside-applied
+rolebinding.rbac.authorization.k8s.io/kueue-leader-election-rolebinding serverside-applied
+rolebinding.rbac.authorization.k8s.io/kueue-manager-clusterprofiles-rolebinding serverside-applied
+rolebinding.rbac.authorization.k8s.io/kueue-manager-secrets-rolebinding serverside-applied
+clusterrolebinding.rbac.authorization.k8s.io/kueue-manager-rolebinding serverside-applied
+clusterrolebinding.rbac.authorization.k8s.io/kueue-metrics-auth-rolebinding serverside-applied
+configmap/kueue-manager-config serverside-applied
+secret/kueue-webhook-server-cert serverside-applied
+service/kueue-controller-manager-metrics-service serverside-applied
+service/kueue-visibility-server serverside-applied
+service/kueue-webhook-service serverside-applied
+deployment.apps/kueue-controller-manager serverside-applied
+apiservice.apiregistration.k8s.io/v1beta1.visibility.kueue.x-k8s.io serverside-applied
+apiservice.apiregistration.k8s.io/v1beta2.visibility.kueue.x-k8s.io serverside-applied
+mutatingwebhookconfiguration.admissionregistration.k8s.io/kueue-mutating-webhook-configuration serverside-applied
+validatingwebhookconfiguration.admissionregistration.k8s.io/kueue-validating-webhook-configuration serverside-applied
+deployment.apps/kueue-controller-manager condition met
+
+===== 4. build and load the operator, gateway and benchharness images =====
++ make docker-build IMG=controller:latest
+docker build -t controller:latest .
+DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+            Install the buildx component to build images with BuildKit:
+            https://docs.docker.com/go/buildx/
+
+Sending build context to Docker daemon  657.4kB
+Step 1/14 : FROM golang:1.26 AS builder
+ ---> ae5a2316d12f
+Step 2/14 : ARG TARGETOS
+ ---> Using cache
+ ---> b895f7e0385c
+Step 3/14 : ARG TARGETARCH
+ ---> Using cache
+ ---> e15038479dfc
+Step 4/14 : WORKDIR /workspace
+ ---> Using cache
+ ---> 8ede8b3c1fc8
+Step 5/14 : COPY go.mod go.mod
+ ---> Using cache
+ ---> 8f73382e93c0
+Step 6/14 : COPY go.sum go.sum
+ ---> Using cache
+ ---> 36d31b09b2a9
+Step 7/14 : RUN go mod download
+ ---> Using cache
+ ---> b2a736bb51f8
+Step 8/14 : COPY . .
+ ---> 0526e7d6ccc6
+Step 9/14 : RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o manager cmd/main.go
+ ---> Running in 34bf4d10aea5
+ ---> Removed intermediate container 34bf4d10aea5
+ ---> 571889747729
+Step 10/14 : FROM gcr.io/distroless/static:nonroot
+ ---> f7f8f729987a
+Step 11/14 : WORKDIR /
+ ---> Using cache
+ ---> a90f61dacaf8
+Step 12/14 : COPY --from=builder /workspace/manager .
+ ---> Using cache
+ ---> a6efe75956b3
+Step 13/14 : USER 65532:65532
+ ---> Using cache
+ ---> f61b6104456c
+Step 14/14 : ENTRYPOINT ["/manager"]
+ ---> Using cache
+ ---> d6c4bc3498ea
+Successfully built d6c4bc3498ea
+Successfully tagged controller:latest
++ make docker-build-gateway GATEWAY_IMG=gateway:latest
+docker build -t gateway:latest -f Dockerfile.gateway .
+DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+            Install the buildx component to build images with BuildKit:
+            https://docs.docker.com/go/buildx/
+
+Sending build context to Docker daemon  657.4kB
+Step 1/14 : FROM golang:1.26 AS builder
+ ---> ae5a2316d12f
+Step 2/14 : ARG TARGETOS
+ ---> Using cache
+ ---> b895f7e0385c
+Step 3/14 : ARG TARGETARCH
+ ---> Using cache
+ ---> e15038479dfc
+Step 4/14 : WORKDIR /workspace
+ ---> Using cache
+ ---> 8ede8b3c1fc8
+Step 5/14 : COPY go.mod go.mod
+ ---> Using cache
+ ---> 8f73382e93c0
+Step 6/14 : COPY go.sum go.sum
+ ---> Using cache
+ ---> 36d31b09b2a9
+Step 7/14 : RUN go mod download
+ ---> Using cache
+ ---> b2a736bb51f8
+Step 8/14 : COPY . .
+ ---> Using cache
+ ---> 0526e7d6ccc6
+Step 9/14 : RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o gateway cmd/gateway/main.go
+ ---> Running in e5cf390b319f
+ ---> Removed intermediate container e5cf390b319f
+ ---> ebeb1c12c03a
+Step 10/14 : FROM gcr.io/distroless/static:nonroot
+ ---> f7f8f729987a
+Step 11/14 : WORKDIR /
+ ---> Using cache
+ ---> a90f61dacaf8
+Step 12/14 : COPY --from=builder /workspace/gateway .
+ ---> Using cache
+ ---> 80f77091a756
+Step 13/14 : USER 65532:65532
+ ---> Using cache
+ ---> 90a74dcf499b
+Step 14/14 : ENTRYPOINT ["/gateway"]
+ ---> Using cache
+ ---> 780877f03a81
+Successfully built 780877f03a81
+Successfully tagged gateway:latest
++ make docker-build-benchharness BENCHHARNESS_IMG=benchharness:evidence
+docker build -t benchharness:evidence -f Dockerfile.benchharness .
+DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+            Install the buildx component to build images with BuildKit:
+            https://docs.docker.com/go/buildx/
+
+Sending build context to Docker daemon  657.4kB
+Step 1/14 : FROM golang:1.26 AS builder
+ ---> ae5a2316d12f
+Step 2/14 : ARG TARGETOS
+ ---> Using cache
+ ---> b895f7e0385c
+Step 3/14 : ARG TARGETARCH
+ ---> Using cache
+ ---> e15038479dfc
+Step 4/14 : WORKDIR /workspace
+ ---> Using cache
+ ---> 8ede8b3c1fc8
+Step 5/14 : COPY go.mod go.mod
+ ---> Using cache
+ ---> 8f73382e93c0
+Step 6/14 : COPY go.sum go.sum
+ ---> Using cache
+ ---> 36d31b09b2a9
+Step 7/14 : RUN go mod download
+ ---> Using cache
+ ---> b2a736bb51f8
+Step 8/14 : COPY . .
+ ---> Using cache
+ ---> 0526e7d6ccc6
+Step 9/14 : RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o benchharness ./cmd/benchharness
+ ---> Running in 7cf0bd3fcf0b
+ ---> Removed intermediate container 7cf0bd3fcf0b
+ ---> eb417ee315b6
+Step 10/14 : FROM gcr.io/distroless/static:nonroot
+ ---> f7f8f729987a
+Step 11/14 : WORKDIR /
+ ---> Using cache
+ ---> a90f61dacaf8
+Step 12/14 : COPY --from=builder /workspace/benchharness .
+ ---> fd94070d8f28
+Step 13/14 : USER 65532:65532
+ ---> Running in 32a88de8e36b
+ ---> Removed intermediate container 32a88de8e36b
+ ---> faa44e956cf6
+Step 14/14 : ENTRYPOINT ["/benchharness", "stub-serve"]
+ ---> Running in 9fc3a0b0fb7f
+ ---> Removed intermediate container 9fc3a0b0fb7f
+ ---> 8d2ccb154dcc
+Successfully built 8d2ccb154dcc
+Successfully tagged benchharness:evidence
++ kind load docker-image controller:latest --name platform
+Image: "controller:latest" with ID "sha256:d6c4bc3498eaf5a4949477bd4116a08503da24fb84cf837f6134eb85f791ce64" not yet present on node "platform-control-plane", loading...
++ kind load docker-image gateway:latest --name platform
+Image: "gateway:latest" with ID "sha256:780877f03a81a939c382a118a0a4679c72f48ea18f35a6d173fbc2c34833f92e" not yet present on node "platform-control-plane", loading...
++ kind load docker-image benchharness:evidence --name platform
+Image: "benchharness:evidence" with ID "sha256:8d2ccb154dcc34e4e595a60bc72e230323ce6b6d119a9ddd0611ef94a7d09314" not yet present on node "platform-control-plane", loading...
+
+===== 5. install CRDs and deploy the operator =====
+customresourcedefinition.apiextensions.k8s.io/gpuquotapolicies.platform.lkhun9311.github.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/inferencedeployments.platform.lkhun9311.github.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/mltrainingjobs.platform.lkhun9311.github.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/nodehealths.platform.lkhun9311.github.io serverside-applied
+namespace/gpu-platform-control-plane-system created
+namespace/gpu-platform-control-plane-system serverside-applied
+serviceaccount/gpu-platform-control-plane-controller-manager serverside-applied
+role.rbac.authorization.k8s.io/gpu-platform-control-plane-leader-election-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-gpuquotapolicy-admin-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-gpuquotapolicy-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-gpuquotapolicy-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-inferencedeployment-admin-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-inferencedeployment-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-inferencedeployment-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-manager-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-metrics-auth-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-metrics-reader serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-mltrainingjob-admin-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-mltrainingjob-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-mltrainingjob-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-nodehealth-admin-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-nodehealth-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-nodehealth-viewer-role serverside-applied
+rolebinding.rbac.authorization.k8s.io/gpu-platform-control-plane-leader-election-rolebinding serverside-applied
+clusterrolebinding.rbac.authorization.k8s.io/gpu-platform-control-plane-manager-rolebinding serverside-applied
+clusterrolebinding.rbac.authorization.k8s.io/gpu-platform-control-plane-metrics-auth-rolebinding serverside-applied
+deployment.apps/gpu-platform-control-plane-controller-manager serverside-applied
+operator deployment: deployment.apps/gpu-platform-control-plane-controller-manager
+deployment.apps/gpu-platform-control-plane-controller-manager patched
+Waiting for deployment "gpu-platform-control-plane-controller-manager" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "gpu-platform-control-plane-controller-manager" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "gpu-platform-control-plane-controller-manager" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "gpu-platform-control-plane-controller-manager" rollout to finish: 1 old replicas are pending termination...
+deployment "gpu-platform-control-plane-controller-manager" successfully rolled out
+
+===== 6. deploy the gateway =====
+serviceaccount/gateway serverside-applied
+role.rbac.authorization.k8s.io/gateway-secret-reader serverside-applied
+clusterrole.rbac.authorization.k8s.io/gateway-role serverside-applied
+rolebinding.rbac.authorization.k8s.io/gateway-secret-reader-binding serverside-applied
+clusterrolebinding.rbac.authorization.k8s.io/gateway-rolebinding serverside-applied
+service/gateway serverside-applied
+deployment.apps/gateway serverside-applied
+deployment.apps/gateway patched
+secret/gateway-api-keys created
+deployment.apps/gateway restarted
+Waiting for deployment spec update to be observed...
+Waiting for deployment "gateway" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "gateway" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "gateway" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "gateway" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "gateway" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "gateway" rollout to finish: 1 old replicas are pending termination...
+deployment "gateway" successfully rolled out
+
+===== 7. apply tenant policies and the stub InferenceDeployments =====
++ k apply -f config/kueue/resourceflavor.yaml
+Warning: This version is deprecated. Use v1beta2 instead.
+resourceflavor.kueue.x-k8s.io/gpu created
+namespace/serving created
+gpuquotapolicy.platform.lkhun9311.github.io/premium-1-quota created
++ applied GPUQuotaPolicy premium-1-quota (tenant premium-1 -> namespace serving)
+gpuquotapolicy.platform.lkhun9311.github.io/standard-noisy-quota created
++ applied GPUQuotaPolicy standard-noisy-quota (tenant standard-noisy -> namespace serving)
+inferencedeployment.platform.lkhun9311.github.io/llama-3-8b created
++ applied InferenceDeployment serving/llama-3-8b (stub://profile?tokens=8&ttft-ms=5&itl-ms=2)
+inferencedeployment.platform.lkhun9311.github.io/llama-3-8b-slow created
++ applied InferenceDeployment serving/llama-3-8b-slow (stub://profile?tokens=4&ttft-ms=2000&itl-ms=2)
+Waiting for deployment "llama-3-8b" rollout to finish: 0 of 1 updated replicas are available...
+deployment "llama-3-8b" successfully rolled out
+Waiting for deployment "llama-3-8b-slow" rollout to finish: 0 of 1 updated replicas are available...
+deployment "llama-3-8b-slow" successfully rolled out
+
+===== 8. publish the evidence NodePorts =====
+service/gateway-evidence created
+service/stub-fast-evidence created
+service/stub-slow-evidence created
++ k get inferencedeployment -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,MODEL:.spec.model.name,PHASE:.status.phase,READY:.status.readyReplicas
+NS        NAME              MODEL             PHASE   READY
+serving   llama-3-8b        llama-3-8b        Ready   1
+serving   llama-3-8b-slow   llama-3-8b-slow   Ready   1
++ k get pods -A -o wide
+NAMESPACE                           NAME                                                             READY   STATUS    RESTARTS   AGE     IP            NODE                     NOMINATED NODE   READINESS GATES
+gpu-platform-control-plane-system   gateway-b745cfb58-hk4hd                                          1/1     Running   0          13s     10.244.0.9    platform-control-plane   <none>           <none>
+gpu-platform-control-plane-system   gpu-platform-control-plane-controller-manager-64c56cfdc5-hz7pc   1/1     Running   0          24s     10.244.0.7    platform-control-plane   <none>           <none>
+kube-system                         coredns-6f6b679f8f-2wxxc                                         1/1     Running   0          2m6s    10.244.0.2    platform-control-plane   <none>           <none>
+kube-system                         coredns-6f6b679f8f-5xpw2                                         1/1     Running   0          2m6s    10.244.0.4    platform-control-plane   <none>           <none>
+kube-system                         etcd-platform-control-plane                                      1/1     Running   0          2m13s   172.18.0.2    platform-control-plane   <none>           <none>
+kube-system                         kindnet-5dzqn                                                    1/1     Running   0          2m6s    172.18.0.2    platform-control-plane   <none>           <none>
+kube-system                         kube-apiserver-platform-control-plane                            1/1     Running   0          2m13s   172.18.0.2    platform-control-plane   <none>           <none>
+kube-system                         kube-controller-manager-platform-control-plane                   1/1     Running   0          2m13s   172.18.0.2    platform-control-plane   <none>           <none>
+kube-system                         kube-proxy-8sbgf                                                 1/1     Running   0          2m6s    172.18.0.2    platform-control-plane   <none>           <none>
+kube-system                         kube-scheduler-platform-control-plane                            1/1     Running   0          2m13s   172.18.0.2    platform-control-plane   <none>           <none>
+kueue-system                        kueue-controller-manager-788fb4b79f-tzhnm                        1/1     Running   0          2m6s    10.244.0.3    platform-control-plane   <none>           <none>
+local-path-storage                  local-path-provisioner-57c5987fd4-rwvw2                          1/1     Running   0          84s     10.244.0.5    platform-control-plane   <none>           <none>
+serving                             llama-3-8b-7487dd559-cvpsz                                       1/1     Running   0          2s      10.244.0.10   platform-control-plane   <none>           <none>
+serving                             llama-3-8b-slow-695d9b45f4-h2zfv                                 1/1     Running   0          2s      10.244.0.11   platform-control-plane   <none>           <none>
+
+===== 9. smoke test: one request through the gateway =====
+curl: (56) Recv failure: Connection reset by peer
+smoke status: 200
++ head -3 /tmp/tmp.3V6wsnhWZo/smoke.txt
+data: {"choices":[{"delta":{"content":"x"}}]}
+
+data: {"choices":[{"delta":{"content":"x"}}]}
+
+===== 10. generate the shared trace (rate 20/s, 45000ms, timeout 30000ms) =====
++ /tmp/tmp.3V6wsnhWZo/benchharness gen-trace --seed 7 --duration-ms 45000 --rate 20 --timeout-ms 30000 --arm off --model llama-3-8b --gateway-url http://127.0.0.1:30080 --trace-out /tmp/tmp.3V6wsnhWZo/trace.jsonl --manifest-out /tmp/tmp.3V6wsnhWZo/manifest.yaml
+wrote 884 trace rows to /tmp/tmp.3V6wsnhWZo/trace.jsonl and manifest /tmp/tmp.3V6wsnhWZo/manifest.yaml (arm=off)
+
+===== 11. RUN A: through the gateway, client BEFORE and AFTER =====
+--- arm gateway/legacy: target http://127.0.0.1:30080, client mode legacy ---
++ /tmp/tmp.3V6wsnhWZo/benchharness replay --manifest /tmp/tmp.3V6wsnhWZo/manifest.yaml --target http://127.0.0.1:30080 --conn-mode legacy --api-keys premium-1=premium-key,standard-noisy=standard-key --raw-out /tmp/tmp.3V6wsnhWZo/raw-gw-before.jsonl
+client connection mode: legacy (MaxIdleConnsPerHost=0, drain=false) for 884 rows at timeout 30s
+replayed 884 rows against http://127.0.0.1:30080 (arm=off) to /tmp/tmp.3V6wsnhWZo/raw-gw-before.jsonl
+[EVIDENCE] stub counters, gateway path, client legacy: {"requestsServed":884,"chatConnections":6,"maxRequestsOnOneConnection":268,"inFlight":0,"peakInFlight":6,"connectionsAccepted":16,"openConnections":7,"peakOpenConnections":8}
+--- arm gateway/pooled: target http://127.0.0.1:30080, client mode pooled ---
++ /tmp/tmp.3V6wsnhWZo/benchharness replay --manifest /tmp/tmp.3V6wsnhWZo/manifest.yaml --target http://127.0.0.1:30080 --conn-mode pooled --api-keys premium-1=premium-key,standard-noisy=standard-key --raw-out /tmp/tmp.3V6wsnhWZo/raw-gateway.jsonl
+client connection mode: pooled (MaxIdleConnsPerHost=592, drain=true) for 884 rows at timeout 30s
+replayed 884 rows against http://127.0.0.1:30080 (arm=off) to /tmp/tmp.3V6wsnhWZo/raw-gateway.jsonl
+[EVIDENCE] stub counters, gateway path, client pooled: {"requestsServed":884,"chatConnections":6,"maxRequestsOnOneConnection":256,"inFlight":0,"peakInFlight":6,"connectionsAccepted":9,"openConnections":7,"peakOpenConnections":8}
+
+===== 12. RUN B: straight to the stub, client legacy / drain-only / pooled =====
+--- arm direct/legacy: target http://127.0.0.1:30081, client mode legacy ---
++ /tmp/tmp.3V6wsnhWZo/benchharness replay --manifest /tmp/tmp.3V6wsnhWZo/manifest.yaml --target http://127.0.0.1:30081 --conn-mode legacy --api-keys premium-1=premium-key,standard-noisy=standard-key --raw-out /tmp/tmp.3V6wsnhWZo/raw-direct-before.jsonl
+client connection mode: legacy (MaxIdleConnsPerHost=0, drain=false) for 884 rows at timeout 30s
+replayed 884 rows against http://127.0.0.1:30081 (arm=off) to /tmp/tmp.3V6wsnhWZo/raw-direct-before.jsonl
+[EVIDENCE] stub counters, direct path, client legacy:     {"requestsServed":884,"chatConnections":431,"maxRequestsOnOneConnection":23,"inFlight":0,"peakInFlight":6,"connectionsAccepted":442,"openConnections":7,"peakOpenConnections":12}
+--- arm direct/drain-only: target http://127.0.0.1:30081, client mode drain-only ---
++ /tmp/tmp.3V6wsnhWZo/benchharness replay --manifest /tmp/tmp.3V6wsnhWZo/manifest.yaml --target http://127.0.0.1:30081 --conn-mode drain-only --api-keys premium-1=premium-key,standard-noisy=standard-key --raw-out /tmp/tmp.3V6wsnhWZo/raw-direct-drain.jsonl
+client connection mode: drain-only (MaxIdleConnsPerHost=0, drain=true) for 884 rows at timeout 30s
+replayed 884 rows against http://127.0.0.1:30081 (arm=off) to /tmp/tmp.3V6wsnhWZo/raw-direct-drain.jsonl
+[EVIDENCE] stub counters, direct path, client drain-only: {"requestsServed":884,"chatConnections":53,"maxRequestsOnOneConnection":211,"inFlight":0,"peakInFlight":6,"connectionsAccepted":62,"openConnections":1,"peakOpenConnections":10}
+--- arm direct/pooled: target http://127.0.0.1:30081, client mode pooled ---
++ /tmp/tmp.3V6wsnhWZo/benchharness replay --manifest /tmp/tmp.3V6wsnhWZo/manifest.yaml --target http://127.0.0.1:30081 --conn-mode pooled --api-keys premium-1=premium-key,standard-noisy=standard-key --raw-out /tmp/tmp.3V6wsnhWZo/raw-direct.jsonl
+client connection mode: pooled (MaxIdleConnsPerHost=592, drain=true) for 884 rows at timeout 30s
+replayed 884 rows against http://127.0.0.1:30081 (arm=off) to /tmp/tmp.3V6wsnhWZo/raw-direct.jsonl
+[EVIDENCE] stub counters, direct path, client pooled:     {"requestsServed":884,"chatConnections":6,"maxRequestsOnOneConnection":260,"inFlight":0,"peakInFlight":6,"connectionsAccepted":17,"openConnections":1,"peakOpenConnections":8}
+
+===== 13. MEASUREMENT 1: connection reuse, gateway's pool and the harness's own =====
+gateway -> stub (gateway's own shared Transport): 884 requests over 6 connections (max 256 on one connection; 9 accepted in total including kubelet probes)
+[EVIDENCE] gateway requests-per-connection: 147.3
+  RESULT: PASS - connections (6) are fewer than requests (884), so the shared Transport pooled.
+
+harness -> stub, BEFORE     (legacy: DefaultTransport, no drain): 884 requests over 431 connections
+harness -> stub, drain only (DefaultTransport + drain):         884 requests over 53 connections
+harness -> stub, AFTER      (sized pool + drain):               884 requests over 6 connections
+[EVIDENCE] harness requests-per-connection: before 2.0, drain-only 16.6, after 147.3
+[EVIDENCE] connections the instrument no longer opens: 425 of 431
+[EVIDENCE] attribution: the drain accounts for 378 of that, the pool size for 47
+  RESULT: PASS - the sized client pool cut the instrument's own connections from 431 to 6.
+
+===== 14. MEASUREMENT 4: latency, gateway vs direct, client pool before vs after =====
+--- report: gw-before ---
++ /tmp/tmp.3V6wsnhWZo/benchharness report --raw /tmp/tmp.3V6wsnhWZo/raw-gw-before.jsonl
+M5-b benchmark report
+
+arm             total     done      429  timeout  ttftP50  ttftP95  ttftP99
+off               884      884        0        0      5.8      6.1      6.4
+
+Pre-registered checks (primary endpoint: TTFT p99)
+  absolute protection  C/R1 = 0.000  (<= 1.25)  FAIL
+  incremental value    C/B  = 0.000  CI[0.000, 0.000]  (<= 0.90, CI hi < 1.0)  PASS
+  admission match      |B-C|/C = 0.000  (<= 0.050)  FAIL
+  RUN INVALID: arm  completed no premium requests, so its tail is undefined
+
+VERDICT: run invalid; no protection claim is made from this evidence.
+--- report: gateway ---
++ /tmp/tmp.3V6wsnhWZo/benchharness report --raw /tmp/tmp.3V6wsnhWZo/raw-gateway.jsonl
+M5-b benchmark report
+
+arm             total     done      429  timeout  ttftP50  ttftP95  ttftP99
+off               884      884        0        0      5.7      6.0      6.7
+
+Pre-registered checks (primary endpoint: TTFT p99)
+  absolute protection  C/R1 = 0.000  (<= 1.25)  FAIL
+  incremental value    C/B  = 0.000  CI[0.000, 0.000]  (<= 0.90, CI hi < 1.0)  PASS
+  admission match      |B-C|/C = 0.000  (<= 0.050)  FAIL
+  RUN INVALID: arm  completed no premium requests, so its tail is undefined
+
+VERDICT: run invalid; no protection claim is made from this evidence.
+--- report: direct-before ---
++ /tmp/tmp.3V6wsnhWZo/benchharness report --raw /tmp/tmp.3V6wsnhWZo/raw-direct-before.jsonl
+M5-b benchmark report
+
+arm             total     done      429  timeout  ttftP50  ttftP95  ttftP99
+off               884      884        0        0      5.5      5.8      5.9
+
+Pre-registered checks (primary endpoint: TTFT p99)
+  absolute protection  C/R1 = 0.000  (<= 1.25)  FAIL
+  incremental value    C/B  = 0.000  CI[0.000, 0.000]  (<= 0.90, CI hi < 1.0)  PASS
+  admission match      |B-C|/C = 0.000  (<= 0.050)  FAIL
+  RUN INVALID: arm  completed no premium requests, so its tail is undefined
+
+VERDICT: run invalid; no protection claim is made from this evidence.
+--- report: direct-drain ---
++ /tmp/tmp.3V6wsnhWZo/benchharness report --raw /tmp/tmp.3V6wsnhWZo/raw-direct-drain.jsonl
+M5-b benchmark report
+
+arm             total     done      429  timeout  ttftP50  ttftP95  ttftP99
+off               884      884        0        0      5.4      5.6      5.8
+
+Pre-registered checks (primary endpoint: TTFT p99)
+  absolute protection  C/R1 = 0.000  (<= 1.25)  FAIL
+  incremental value    C/B  = 0.000  CI[0.000, 0.000]  (<= 0.90, CI hi < 1.0)  PASS
+  admission match      |B-C|/C = 0.000  (<= 0.050)  FAIL
+  RUN INVALID: arm  completed no premium requests, so its tail is undefined
+
+VERDICT: run invalid; no protection claim is made from this evidence.
+--- report: direct ---
++ /tmp/tmp.3V6wsnhWZo/benchharness report --raw /tmp/tmp.3V6wsnhWZo/raw-direct.jsonl
+M5-b benchmark report
+
+arm             total     done      429  timeout  ttftP50  ttftP95  ttftP99
+off               884      884        0        0      5.4      5.5      5.7
+
+Pre-registered checks (primary endpoint: TTFT p99)
+  absolute protection  C/R1 = 0.000  (<= 1.25)  FAIL
+  incremental value    C/B  = 0.000  CI[0.000, 0.000]  (<= 0.90, CI hi < 1.0)  PASS
+  admission match      |B-C|/C = 0.000  (<= 0.050)  FAIL
+  RUN INVALID: arm  completed no premium requests, so its tail is undefined
+
+VERDICT: run invalid; no protection claim is made from this evidence.
+[EVIDENCE] premium TTFT ms   gateway, client legacy:     p50=5.8 p95=6.1 p99=6.4
+[EVIDENCE] premium TTFT ms   gateway, client pooled:     p50=5.7 p95=6.0 p99=6.7
+[EVIDENCE] premium TTFT ms   direct,  client legacy:     p50=5.5 p95=5.8 p99=5.9
+[EVIDENCE] premium TTFT ms   direct,  client drain-only: p50=5.4 p95=5.6 p99=5.8
+[EVIDENCE] premium TTFT ms   direct,  client pooled:     p50=5.4 p95=5.5 p99=5.7
+[EVIDENCE] instrument cost removed  gateway p50=.1 p95=.1 p99=-.3 ms
+[EVIDENCE] instrument cost removed  direct  p50=.1 p95=.3 p99=.2 ms
+[EVIDENCE] noise check: the gateway path and the direct path differ by p99 1.0 ms, and the gateway path is strictly the longer one, so any difference at or below that magnitude is at the noise floor of this run
+[EVIDENCE] premium TTFT ms   gateway: p50=5.7 p95=6.0 p99=6.7
+[EVIDENCE] premium TTFT ms   direct : p50=5.4 p95=5.5 p99=5.7
+[EVIDENCE] gateway hop cost (both arms, pooled client)  p50=.3 ms  p95=.5 ms  p99=1.0 ms
+[EVIDENCE] M5-b's absolute-protection margin is 25% of baseline p99 = 1.42 ms; the gateway hop costs 1.0 ms of that
+
+===== 15. RUN C: slow backend, to make outbound concurrency observable =====
++ /tmp/tmp.3V6wsnhWZo/benchharness gen-trace --seed 11 --duration-ms 20000 --rate 40 --timeout-ms 30000 --arm off --model llama-3-8b-slow --gateway-url http://127.0.0.1:30080 --trace-out /tmp/tmp.3V6wsnhWZo/trace-slow.jsonl --manifest-out /tmp/tmp.3V6wsnhWZo/manifest-slow.yaml
+wrote 791 trace rows to /tmp/tmp.3V6wsnhWZo/trace-slow.jsonl and manifest /tmp/tmp.3V6wsnhWZo/manifest-slow.yaml (arm=off)
++ /tmp/tmp.3V6wsnhWZo/benchharness replay --manifest /tmp/tmp.3V6wsnhWZo/manifest-slow.yaml --target http://127.0.0.1:30080 --api-keys premium-1=premium-key,standard-noisy=standard-key --raw-out /tmp/tmp.3V6wsnhWZo/raw-slow.jsonl
+client connection mode: pooled (MaxIdleConnsPerHost=791, drain=true) for 791 rows at timeout 30s
+replayed 791 rows against http://127.0.0.1:30080 (arm=off) to /tmp/tmp.3V6wsnhWZo/raw-slow.jsonl
+[EVIDENCE] slow stub counters after the gateway run: {"requestsServed":791,"chatConnections":97,"maxRequestsOnOneConnection":10,"inFlight":0,"peakInFlight":97,"connectionsAccepted":102,"openConnections":98,"peakOpenConnections":99}
+
+===== 16. MEASUREMENT 2: MaxIdleConnsPerHost = 600 against observed concurrency =====
+cap under test: MaxIdleConnsPerHost = 600, derived as -rate 20/s x -timeout-ms 30s (internal/gateway/proxy.go)
+harness-default run (rate 20/s, fast backend): peak in-flight 6, peak open connections 8, distinct connections 6
+slow-backend run    (rate 40/s, ~2s backend): 791 requests, peak in-flight 97, peak open connections 99, distinct connections 97
+[EVIDENCE] highest concurrency observed anywhere in this run: 97 in flight against a cap of 600
+  RESULT: the cap of 600 was never approached (peak 97, headroom 6.1x); it bounds nothing that this run offered, and no reuse was lost to it.
+
+===== 17. MEASUREMENT 3: metric cardinality on the unresolved-model path =====
+gpuaas_gateway_requests_total series before: 4
+driving 12 requests, each naming a different model that no InferenceDeployment serves...
+  unknown model 1 -> HTTP 404
+  unknown model 2 -> HTTP 404
+  unknown model 3 -> HTTP 404
+  unknown model 4 -> HTTP 404
+  unknown model 5 -> HTTP 404
+  unknown model 6 -> HTTP 404
+  unknown model 7 -> HTTP 404
+  unknown model 8 -> HTTP 404
+  unknown model 9 -> HTTP 404
+  unknown model 10 -> HTTP 404
+  unknown model 11 -> HTTP 404
+  unknown model 12 -> HTTP 404
+gpuaas_gateway_requests_total series after:  5
+--- distinct model label values on gpuaas_gateway_requests_total ---
+llama-3-8b
+llama-3-8b-slow
+_unresolved
+  RESULT: PASS - 12 distinct unknown model names added 1 series, not 12.
+--- gateway series with the unresolved sentinel ---
+gpuaas_gateway_requests_total{code="404",model="_unresolved",tenant="premium-1"} 12
+
+===== 18. gateway resource use during the run =====
++ k -n gpu-platform-control-plane-system get deploy gateway -o jsonpath={.spec.template.spec.containers[0].resources}
+{"limits":{"cpu":"500m","memory":"256Mi"},"requests":{"cpu":"10m","memory":"64Mi"}}
++ k -n gpu-platform-control-plane-system logs deploy/gateway --tail=20
+2026-08-08T06:12:35Z	INFO	gateway	serving	{"addr": ":8080"}
+2026-08-08T06:12:35Z	INFO	gateway	cache synced; gateway ready
+2026-08-08T06:16:58Z	INFO	no backend for model	{"tenant": "premium-1", "model": "ghost-model-1-17646", "request_id": "996f58c364cddb793ccc9240ef4c57d6"}
+2026-08-08T06:16:58Z	INFO	no backend for model	{"tenant": "premium-1", "model": "ghost-model-2-765", "request_id": "ef434edbbf5f59c72aedec1743c46449"}
+2026-08-08T06:16:58Z	INFO	no backend for model	{"tenant": "premium-1", "model": "ghost-model-3-3221", "request_id": "4424830b4431d62fc0fb7e4f915b078a"}
+2026-08-08T06:16:58Z	INFO	no backend for model	{"tenant": "premium-1", "model": "ghost-model-4-11978", "request_id": "508a8a98de59c146875fa60907313975"}
+2026-08-08T06:16:58Z	INFO	no backend for model	{"tenant": "premium-1", "model": "ghost-model-5-27533", "request_id": "50b0449934346e3f0e476c60e553d3d7"}
+2026-08-08T06:16:58Z	INFO	no backend for model	{"tenant": "premium-1", "model": "ghost-model-6-10807", "request_id": "ed0174b3e4041604dfdecb980c52dece"}
+2026-08-08T06:16:58Z	INFO	no backend for model	{"tenant": "premium-1", "model": "ghost-model-7-269", "request_id": "9e5404ef5067f1a3dbadf6abc51c0390"}
+2026-08-08T06:16:58Z	INFO	no backend for model	{"tenant": "premium-1", "model": "ghost-model-8-11546", "request_id": "1715418892bda2fece1fa583acf9b7cd"}
+2026-08-08T06:16:58Z	INFO	no backend for model	{"tenant": "premium-1", "model": "ghost-model-9-3335", "request_id": "127ed449d926ec599d210bc0d970dd90"}
+2026-08-08T06:16:58Z	INFO	no backend for model	{"tenant": "premium-1", "model": "ghost-model-10-12633", "request_id": "fa4057102c817afeb2cfe32739663036"}
+2026-08-08T06:16:58Z	INFO	no backend for model	{"tenant": "premium-1", "model": "ghost-model-11-17734", "request_id": "c853b38f3871e8956436295ba4d94e12"}
+2026-08-08T06:16:58Z	INFO	no backend for model	{"tenant": "premium-1", "model": "ghost-model-12-20157", "request_id": "d97f549a861a31dbf78e280d8d8a122b"}
+
+===== 19. the existing GPU-free dry run, for provenance =====
++ ./hack/m5b-harness-dryrun.sh
+== build benchharness ==
+== start stub backend ==
+stub backend listening on 127.0.0.1:8091 (tokens=8 ttft=3ms itl=1ms)
+== arm R1: gen-trace + replay ==
+wrote 60 trace rows to /tmp/tmp.vSFlPZQFAG/trace-R1.jsonl and manifest /tmp/tmp.vSFlPZQFAG/manifest-R1.yaml (arm=R1)
+client connection mode: pooled (MaxIdleConnsPerHost=60, drain=true) for 60 rows at timeout 30s
+replayed 60 rows against http://127.0.0.1:8091 (arm=R1) to /tmp/tmp.vSFlPZQFAG/raw-R1.jsonl
+== arm off: gen-trace + replay ==
+wrote 123 trace rows to /tmp/tmp.vSFlPZQFAG/trace-off.jsonl and manifest /tmp/tmp.vSFlPZQFAG/manifest-off.yaml (arm=off)
+client connection mode: pooled (MaxIdleConnsPerHost=123, drain=true) for 123 rows at timeout 30s
+replayed 123 rows against http://127.0.0.1:8091 (arm=off) to /tmp/tmp.vSFlPZQFAG/raw-off.jsonl
+== arm static-cap: gen-trace + replay ==
+wrote 123 trace rows to /tmp/tmp.vSFlPZQFAG/trace-static-cap.jsonl and manifest /tmp/tmp.vSFlPZQFAG/manifest-static-cap.yaml (arm=static-cap)
+client connection mode: pooled (MaxIdleConnsPerHost=123, drain=true) for 123 rows at timeout 30s
+replayed 123 rows against http://127.0.0.1:8091 (arm=static-cap) to /tmp/tmp.vSFlPZQFAG/raw-static-cap.jsonl
+== arm kv-aware: gen-trace + replay ==
+wrote 123 trace rows to /tmp/tmp.vSFlPZQFAG/trace-kv-aware.jsonl and manifest /tmp/tmp.vSFlPZQFAG/manifest-kv-aware.yaml (arm=kv-aware)
+client connection mode: pooled (MaxIdleConnsPerHost=123, drain=true) for 123 rows at timeout 30s
+replayed 123 rows against http://127.0.0.1:8091 (arm=kv-aware) to /tmp/tmp.vSFlPZQFAG/raw-kv-aware.jsonl
+== render report ==
+wrote report to /tmp/tmp.vSFlPZQFAG/report.txt
+
+M5-b benchmark report
+
+arm             total     done      429  timeout  ttftP50  ttftP95  ttftP99
+R1                 60       60        0        0      3.3      3.4      3.9
+off               123      123        0        0      3.3      3.5      3.6
+static-cap        123      123        0        0      3.3      3.4      3.6
+kv-aware          123      123        0        0      3.3      3.5      3.9
+
+Pre-registered checks (primary endpoint: TTFT p99)
+  absolute protection  C/R1 = 1.018  (<= 1.25)  PASS
+  incremental value    C/B  = 1.103  CI[1.103, 1.103]  (<= 0.90, CI hi < 1.0)  FAIL
+  admission match      |B-C|/C = 0.000  (<= 0.050)  PASS
+
+VERDICT: not all checks passed; the word "protects" is not used for this run.
+
+DRY RUN OK: gen -> replay (4 arms) -> report completed with no GPU and no cluster.
+
+===== DONE =====
+Every number above was read out of the running cluster and is in this log.
++ kind delete cluster --name platform
+Deleting cluster "platform" ...
+Deleted nodes: ["platform-control-plane"]
+Cluster 'platform' deleted.

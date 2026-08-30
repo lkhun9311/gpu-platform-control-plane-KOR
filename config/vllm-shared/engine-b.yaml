@@ -1,0 +1,86 @@
+# The second engine; see engine-a.yaml for why both exist and why neither names a namespace.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-shared-b
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: vllm-shared
+    platform.lkhun9311.github.io/engine: "b"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: vllm-shared
+      platform.lkhun9311.github.io/engine: "b"
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gpu-platform-control-plane
+        app.kubernetes.io/component: vllm-shared
+        platform.lkhun9311.github.io/engine: "b"
+    spec:
+      # The sharing node group, which is the one the time-slicing plugin runs on. Its max_size is 1, and
+      # that is what makes co-location certain: two engines on two nodes would not be sharing anything, and
+      # nothing downstream could tell that apart from a sharing result.
+      nodeSelector:
+        platform.lkhun9311.github.io/gpu-sharing: "true"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: present
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967
+          args:
+            - Qwen/Qwen2.5-3B-Instruct
+            - --dtype=half
+            - --max-model-len=16384
+            - --max-num-seqs=32
+            - --gpu-memory-utilization=0.475
+            - --port=8000
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: hf-cache
+              mountPath: /root/.cache/huggingface
+          startupProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            failureThreshold: 90
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 5
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+        - name: hf-cache
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-shared-b
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: vllm-shared
+spec:
+  selector:
+    app.kubernetes.io/component: vllm-shared
+    platform.lkhun9311.github.io/engine: "b"
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

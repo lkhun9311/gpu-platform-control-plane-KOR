@@ -1,0 +1,109 @@
+# The real NVIDIA device plugin: what makes a GPU node advertise nvidia.com/gpu capacity the kubelet will not
+# overwrite.
+#
+# It is MUTUALLY EXCLUSIVE with config/device-plugin, which is the simulator advertising fake capacity on
+# nodes with no card. Both registered at once would have two plugins claiming the same resource name on the
+# same node, and the lab would be measuring reservations against a number nobody owns. The simulator's own
+# header says the same thing from the other side.
+#
+# Which one is deployed is the difference between every record reading device-not-observed and a record that
+# can say otherwise, so it is a manifest rather than a step in somebody's shell history.
+#
+# One property is load-bearing for the verdict in internal/queuelab/device.go: this plugin allocates WHOLE
+# cards. It is not configured for time-slicing, MPS, or MIG, and that is deliberate -- under any of those a
+# device's utilisation is shared and the exclusivity clause refuses to attribute it, so a session configured
+# that way would spend hardware to produce "not attributable" on every run. If sharing is ever the subject of
+# an experiment, it needs a different verdict, not a different plugin config.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin
+  namespace: system
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: nvidia-device-plugin
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gpu-platform-control-plane
+      app.kubernetes.io/component: nvidia-device-plugin
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gpu-platform-control-plane
+        app.kubernetes.io/component: nvidia-device-plugin
+    spec:
+      # It has to run on the node whose card it is registering, which carries the taint the GPU node group
+      # sets (infra/aws/cluster/eks.tf).
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      # This repository's own label, not nvidia.com/gpu.present: that one comes from GPU Feature Discovery,
+      # which is not deployed here, and selecting on it would leave the plugin unschedulable and the node
+      # advertising nothing -- which reads downstream as "no GPU nodes" rather than as "the plugin never ran".
+      nodeSelector:
+        platform.lkhun9311.github.io/gpu: "true"
+      priorityClassName: system-node-critical
+      containers:
+        - name: plugin
+          # Pinned by digest for the reason config/dcgm-exporter/daemonset.yaml gives, and resolved the same
+          # way: from the registry, without a GPU node and without pulling anything. What this daemonset
+          # advertises is the resource every gate in this study counts, so a tag that moved under it would
+          # change what "2 allocatable" means between a qualification and the run it qualified.
+          image: nvcr.io/nvidia/k8s-device-plugin:v0.16.2@sha256:ed39e22c8b71343fb996737741a99da88ce6c75dd83b5c520e0b3d8e8a884c47
+          env:
+            # Refuse to start rather than register a node whose driver is missing. The alternative -- starting
+            # and advertising nothing -- is the failure that reads as an absent node group.
+            - name: FAIL_ON_INIT_ERROR
+              value: "true"
+            # THE EXPERIMENT DEPENDS ON SCARCITY, so the node must advertise exactly what the protocol
+            # needs and not what the instance happens to carry.
+            #
+            # The contrast this lab publishes is physical card contention: in every recorded run the owner
+            # becomes Ready one to two seconds AFTER the victim's terminal phase, in both arms, because
+            # Kueue admits the owner within 0.1 s of the preemption decision and its Pod then waits for a
+            # card. The 29-second arm difference is that wait.
+            #
+            # The cheapest rentable instance with more than one well-supported card is a g4dn.12xlarge,
+            # which carries four. Two spare devices would absorb the owner's Pod at admission in both arms,
+            # the wait would collapse to a container start on each side, and the difference would fall below
+            # the floor -- producing a plausible, internally consistent record set in which the study's
+            # headline had been destroyed by the instance type. The preregistration's third refutation
+            # condition would then read the artifact as the session's most useful discovery.
+            #
+            # THIS PROBABLY DOES NOT WORK, and it is left here with the reason rather than deleted, because
+            # the alternative someone will reach for first is exactly this.
+            #
+            # It was committed as though it restricted what the plugin ADVERTISES. Two independent reviews
+            # found otherwise and neither has been contradicted. NVIDIA_VISIBLE_DEVICES is read by the
+            # container runtime hook to decide which already-allocated devices to inject; the plugin
+            # enumerates through NVML over whatever its own container can see. This container is
+            # `privileged: true`, which hands it every host device node regardless of the hook, so NVML
+            # should find all four. NVIDIA/k8s-device-plugin#435 is a user setting exactly this on the
+            # plugin and getting all eight GPUs still advertised; it was closed as not planned, and the
+            # plugin's README documents no mechanism for restricting what it advertises.
+            #
+            # Nothing here has ever run against a card, so this is a prediction and not a measurement --
+            # which is precisely the status the line originally claimed for itself and had not earned.
+            #
+            # What the session does about it is NOT this variable. hack/gpu-session.sh applies a Pod
+            # labelled queuelab.gpu-platform/surplus-occupier on each worker, holding the devices the
+            # protocol must not have; the run's qualification counts those out and requires what remains to
+            # equal the requirement exactly. The run RECOGNISES the occupier rather than creating one -- an
+            # earlier version of this comment said the run occupies the surplus itself, which is false and
+            # would have sent someone looking for code that is not there.
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "0,1"
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins

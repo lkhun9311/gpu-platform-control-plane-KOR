@@ -1,0 +1,10 @@
+# The real device plugin, deployed only on a cluster with real cards.
+#
+# Mutually exclusive with config/device-plugin (the simulator). Composed by neither config/default nor
+# config/operator: a cluster with no GPU node has nothing for this to register, and FAIL_ON_INIT_ERROR means
+# it would crash-loop rather than sit idle -- which is the correct behaviour for a plugin and a bad default
+# for an overlay.
+namespace: gpu-platform-control-plane-system
+
+resources:
+  - daemonset.yaml

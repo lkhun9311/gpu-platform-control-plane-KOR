@@ -1,0 +1,16 @@
+{
+  "experiment": "reconcile queue drain under a namespace fill",
+  "objects": 400,
+  "batchSize": 50,
+  "concurrency": "MaxConcurrentReconciles=1 (controller-runtime default, unset in this operator)",
+  "samplingIntervalSec": 5,
+  "createMs": 5312.4,
+  "drainMs": 10053.7,
+  "reconciles": 1437,
+  "peakQueueDepth": 0,
+  "throughputPerSec": 143.7,
+  "reconcileP99Sec": 0.024476712277475852,
+  "reconcileErrors": 0,
+  "caveat": "Measured with the field index already in place, so a flat drain is consistent with the fix rather than proof the previous code was quadratic. What it establishes is this operator's current absorption rate.",
+  "resolutionNote": "Queue depth is sampled every 5s from Prometheus, which itself scrapes at 15s, so the peak is a lower bound: a spike between two scrapes is invisible."
+}

@@ -64,11 +64,13 @@ spec:
               gpuClass:
                 description: |-
                   gpuClass is the illustrative GPU class (e.g. "l40s").
+
                   Locally this is backed by simulated capacity (see the dev runbook).
                 type: string
               gpuCount:
                 description: |-
                   gpuCount is the number of GPUs (nvidia.com/gpu) per pod.
+
                   Locally this is backed by simulated capacity, not real hardware.
                 format: int32
                 minimum: 0
@@ -98,6 +100,7 @@ spec:
               conditions:
                 description: |-
                   conditions represent the current state of the MLTrainingJob resource.
+
                   The status of each condition is one of True, False, or Unknown.
                 items:
                   description: Condition contains details for one aspect of the current

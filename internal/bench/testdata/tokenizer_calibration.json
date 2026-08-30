@@ -1,0 +1,41 @@
+{
+  "_comment": "Measured, not estimated. Produced by tokenizing the exact bytes internal/bench.PromptText emits, wrapped in the served model's chat template, with the tokenizer at the recorded revision. Recapture whenever promptCorpusSHA or the served model changes; both are inputs to every number here.",
+  "promptCorpusSHA256": "dec1020701584417449f9c7efa5354073682cce69348af3b9fb5244705200a86",
+  "tokenizer": "Qwen/Qwen2.5-3B-Instruct",
+  "tokenizerSharedWith": "Qwen/Qwen2.5-7B-Instruct",
+  "chatTemplateApplied": true,
+  "addGenerationPrompt": true,
+  "measuredAt": "2026-08-23",
+  "samples": [
+    {
+      "role": "premium",
+      "promptLenChars": 200,
+      "estimatedTokens": 50,
+      "actualTokens": 68,
+      "actualOverEstimated": 1.36
+    },
+    {
+      "role": "standard, sized to land exactly on the guard's threshold",
+      "promptLenChars": 16384,
+      "estimatedTokens": 4096,
+      "actualTokens": 3171,
+      "actualOverEstimated": 0.774
+    },
+    {
+      "role": "standard-noisy",
+      "promptLenChars": 40000,
+      "estimatedTokens": 10000,
+      "actualTokens": 7695,
+      "actualOverEstimated": 0.77
+    }
+  ],
+  "estimatorVerdict": {
+    "formula": "ceil(len(content)/4)",
+    "conservative": false,
+    "_why": "The ratio is not monotone, so no single fudge factor fixes it. The chat template costs a fixed ~25 tokens, which dominates a 200-character prompt and makes the estimator UNDER-count by 36 percent there; the corpus itself runs about 5.2 characters per token, so on a 40,000-character prompt the same formula OVER-counts by 30 percent. The design spec's claim that len/4 is conservative holds only in the long regime.",
+    "thresholdTokens": 4096,
+    "thresholdEstimatedAtChars": 16384,
+    "thresholdActualTokensAtThatLength": 3171,
+    "_falsePositiveBand": "A request the guard scores at exactly 4096 was measured at 3171 real tokens, so requests whose true input is between 3171 and 4096 tokens are rejected as though they had crossed. The band is 925 tokens, 22.6 percent of the threshold, and it costs a tenant service rather than costing the cache. Reported rather than corrected: the threshold was pre-registered, and moving it after measuring is exactly the post-hoc tuning the control arm exists to rule out."
+  }
+}

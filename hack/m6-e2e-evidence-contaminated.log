@@ -1,0 +1,395 @@
+
+===== 1. create kind cluster (platform) =====
+cluster platform already exists; reusing it (delete it first for a clean run)
++ k cluster-info
+Kubernetes control plane is running at https://127.0.0.1:46713
+CoreDNS is running at https://127.0.0.1:46713/api/v1/namespaces/kube-system/services/kube-dns:dns/proxy
+
+To further debug and diagnose cluster problems, use 'kubectl cluster-info dump'.
+
+===== 2. install Kueue v0.18.3 =====
+Kueue already installed; reusing it
+waiting for kueue-controller-manager to become Available...
+deployment.apps/kueue-controller-manager condition met
++ k -n kueue-system get pods
+NAME                                        READY   STATUS    RESTARTS   AGE
+kueue-controller-manager-788fb4b79f-7xbj9   1/1     Running   0          20m
+
+===== 3. build and load operator + gpu-simulator images =====
++ make docker-build IMG=controller:latest
+docker build -t controller:latest .
+DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+            Install the buildx component to build images with BuildKit:
+            https://docs.docker.com/go/buildx/
+
+Sending build context to Docker daemon  222.2kB
+Step 1/14 : FROM golang:1.26 AS builder
+ ---> ae5a2316d12f
+Step 2/14 : ARG TARGETOS
+ ---> Using cache
+ ---> b895f7e0385c
+Step 3/14 : ARG TARGETARCH
+ ---> Using cache
+ ---> e15038479dfc
+Step 4/14 : WORKDIR /workspace
+ ---> Using cache
+ ---> 8ede8b3c1fc8
+Step 5/14 : COPY go.mod go.mod
+ ---> Using cache
+ ---> ea7ee4b39ff8
+Step 6/14 : COPY go.sum go.sum
+ ---> Using cache
+ ---> 12f8097ad3b2
+Step 7/14 : RUN go mod download
+ ---> Using cache
+ ---> 5be78ed9ff1b
+Step 8/14 : COPY . .
+ ---> Using cache
+ ---> c1b7cd21061c
+Step 9/14 : RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o manager cmd/main.go
+ ---> Using cache
+ ---> 5ea0feb681d9
+Step 10/14 : FROM gcr.io/distroless/static:nonroot
+ ---> f7f8f729987a
+Step 11/14 : WORKDIR /
+ ---> Using cache
+ ---> a90f61dacaf8
+Step 12/14 : COPY --from=builder /workspace/manager .
+ ---> Using cache
+ ---> 05275e3cbb14
+Step 13/14 : USER 65532:65532
+ ---> Using cache
+ ---> 335c9d204671
+Step 14/14 : ENTRYPOINT ["/manager"]
+ ---> Using cache
+ ---> 49286fd3f538
+Successfully built 49286fd3f538
+Successfully tagged controller:latest
++ make docker-build-gpu-simulator GPU_SIMULATOR_IMG=gpu-simulator:latest
+docker build -t gpu-simulator:latest -f Dockerfile.gpu-simulator .
+DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+            Install the buildx component to build images with BuildKit:
+            https://docs.docker.com/go/buildx/
+
+Sending build context to Docker daemon  222.2kB
+Step 1/14 : FROM golang:1.26 AS builder
+ ---> ae5a2316d12f
+Step 2/14 : ARG TARGETOS
+ ---> Using cache
+ ---> b895f7e0385c
+Step 3/14 : ARG TARGETARCH
+ ---> Using cache
+ ---> e15038479dfc
+Step 4/14 : WORKDIR /workspace
+ ---> Using cache
+ ---> 8ede8b3c1fc8
+Step 5/14 : COPY go.mod go.mod
+ ---> Using cache
+ ---> ea7ee4b39ff8
+Step 6/14 : COPY go.sum go.sum
+ ---> Using cache
+ ---> 12f8097ad3b2
+Step 7/14 : RUN go mod download
+ ---> Using cache
+ ---> 5be78ed9ff1b
+Step 8/14 : COPY . .
+ ---> Using cache
+ ---> c1b7cd21061c
+Step 9/14 : RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o gpu-simulator cmd/gpu-simulator/main.go
+ ---> Using cache
+ ---> a6c4e87a6e6e
+Step 10/14 : FROM gcr.io/distroless/static:nonroot
+ ---> f7f8f729987a
+Step 11/14 : WORKDIR /
+ ---> Using cache
+ ---> a90f61dacaf8
+Step 12/14 : COPY --from=builder /workspace/gpu-simulator .
+ ---> Using cache
+ ---> b9c2f730b879
+Step 13/14 : USER 65532:65532
+ ---> Using cache
+ ---> 95a572f0664d
+Step 14/14 : ENTRYPOINT ["/gpu-simulator"]
+ ---> Using cache
+ ---> 6a490509e090
+Successfully built 6a490509e090
+Successfully tagged gpu-simulator:latest
++ kind load docker-image controller:latest --name platform
+Image: "controller:latest" with ID "sha256:49286fd3f53829e8d6a8fc59608ab7be5503631c7d79ec3e3155f911b8017466" not yet present on node "platform-worker2", loading...
+Image: "controller:latest" with ID "sha256:49286fd3f53829e8d6a8fc59608ab7be5503631c7d79ec3e3155f911b8017466" not yet present on node "platform-control-plane", loading...
+Image: "controller:latest" with ID "sha256:49286fd3f53829e8d6a8fc59608ab7be5503631c7d79ec3e3155f911b8017466" not yet present on node "platform-worker", loading...
++ kind load docker-image gpu-simulator:latest --name platform
+Image: "gpu-simulator:latest" with ID "sha256:6a490509e090e9cfe280f2334cb13e3a9e5620b66d1f5d50a293c337e0a7931b" not yet present on node "platform-worker2", loading...
+Image: "gpu-simulator:latest" with ID "sha256:6a490509e090e9cfe280f2334cb13e3a9e5620b66d1f5d50a293c337e0a7931b" not yet present on node "platform-control-plane", loading...
+Image: "gpu-simulator:latest" with ID "sha256:6a490509e090e9cfe280f2334cb13e3a9e5620b66d1f5d50a293c337e0a7931b" not yet present on node "platform-worker", loading...
+
+===== 4. install CRDs, deploy operator and fake GPU device plugin =====
++ make install
+"/home/lkhun9311/workspace/gpu-platform-control-plane/bin/controller-gen" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+customresourcedefinition.apiextensions.k8s.io/gpuquotapolicies.platform.lkhun9311.github.io unchanged
+customresourcedefinition.apiextensions.k8s.io/inferencedeployments.platform.lkhun9311.github.io unchanged
+customresourcedefinition.apiextensions.k8s.io/mltrainingjobs.platform.lkhun9311.github.io unchanged
+customresourcedefinition.apiextensions.k8s.io/nodehealths.platform.lkhun9311.github.io unchanged
+namespace/gpu-platform-control-plane-system serverside-applied
+serviceaccount/gpu-platform-control-plane-controller-manager serverside-applied
+role.rbac.authorization.k8s.io/gpu-platform-control-plane-leader-election-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-gpuquotapolicy-admin-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-gpuquotapolicy-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-gpuquotapolicy-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-inferencedeployment-admin-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-inferencedeployment-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-inferencedeployment-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-manager-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-metrics-auth-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-metrics-reader serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-mltrainingjob-admin-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-mltrainingjob-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-mltrainingjob-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-nodehealth-admin-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-nodehealth-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-nodehealth-viewer-role serverside-applied
+rolebinding.rbac.authorization.k8s.io/gpu-platform-control-plane-leader-election-rolebinding serverside-applied
+clusterrolebinding.rbac.authorization.k8s.io/gpu-platform-control-plane-manager-rolebinding serverside-applied
+clusterrolebinding.rbac.authorization.k8s.io/gpu-platform-control-plane-metrics-auth-rolebinding serverside-applied
+deployment.apps/gpu-platform-control-plane-controller-manager serverside-applied
+operator deployment: deployment.apps/gpu-platform-control-plane-controller-manager
+deployment.apps/gpu-platform-control-plane-controller-manager patched (no change)
+daemonset.apps/gpu-simulator configured
+daemonset.apps/gpu-simulator env updated
+daemonset.apps/gpu-simulator patched (no change)
+deployment.apps/gpu-platform-control-plane-controller-manager restarted
+daemonset.apps/gpu-simulator restarted
+waiting for operator and device plugin rollouts...
+Waiting for deployment "gpu-platform-control-plane-controller-manager" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "gpu-platform-control-plane-controller-manager" rollout to finish: 1 old replicas are pending termination...
+deployment "gpu-platform-control-plane-controller-manager" successfully rolled out
+daemon set "gpu-simulator" successfully rolled out
+waiting for a node to advertise nvidia.com/gpu...
+  node advertises nvidia.com/gpu=2
++ k get nodes -o custom-columns=NODE:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu
+NODE                     GPU
+platform-control-plane   2
+platform-worker          2
+platform-worker2         0
+
+===== 5. apply gpu ResourceFlavor, tenant namespaces, and two GPUQuotaPolicy =====
++ k apply -f config/kueue/namespaces.yaml
+namespace/tenant-a unchanged
+namespace/tenant-b unchanged
++ k apply -f config/kueue/resourceflavor.yaml
+Warning: This version is deprecated. Use v1beta2 instead.
+resourceflavor.kueue.x-k8s.io/gpu unchanged
+gpuquotapolicy.platform.lkhun9311.github.io/tenant-a-quota unchanged
++ applied GPUQuotaPolicy tenant-a-quota (ceiling 1)
+gpuquotapolicy.platform.lkhun9311.github.io/tenant-b-quota unchanged
++ applied GPUQuotaPolicy tenant-b-quota (ceiling 1)
+waiting for the operator to create both ClusterQueues with nominal quota 1...
+  both ClusterQueues present, nominal quota 1 each, cohort total 2
++ k get clusterqueue -o custom-columns=NAME:.metadata.name,COHORT:.spec.cohortName,NOMINAL:.spec.resourceGroups[0].flavors[0].resources[0].nominalQuota,RECLAIM:.spec.preemption.reclaimWithinCohort
+NAME           COHORT         NOMINAL   RECLAIM
+gpu-tenant-a   gpu-platform   1         Any
+gpu-tenant-b   gpu-platform   1         Any
++ k get localqueue -A
+NAMESPACE   NAME           CLUSTERQUEUE   PENDING WORKLOADS   ADMITTED WORKLOADS
+tenant-a    gpu-tenant-a   gpu-tenant-a   1                   1
+tenant-b    gpu-tenant-b   gpu-tenant-b   0                   1
+
+===== 6. FAIR SHARING: two tenant-a jobs while tenant-b is idle =====
+clearing any MLTrainingJobs from a previous run so the demo starts from an empty cohort...
+mltrainingjob.platform.lkhun9311.github.io "a1" deleted from tenant-a namespace
+mltrainingjob.platform.lkhun9311.github.io "a2" deleted from tenant-a namespace
+mltrainingjob.platform.lkhun9311.github.io "b1" deleted from tenant-b namespace
+  all Workloads cleared
+a1 uses tenant-a's own nominal unit; a2 borrows tenant-b's idle unit from the cohort.
+mltrainingjob.platform.lkhun9311.github.io/a1 created
++ submitted MLTrainingJob tenant-a/a1 (queue gpu-tenant-a)
+mltrainingjob.platform.lkhun9311.github.io/a2 created
++ submitted MLTrainingJob tenant-a/a2 (queue gpu-tenant-a)
+  tenant-a/a1 reached phase Running after 3s
+  tenant-a/a2 reached phase Running after 0s
+
+[EVIDENCE] fair sharing: tenant-a borrows past its nominal (a1 + a2 both Running)
+--- MLTrainingJob phases ---
+NS         NAME   PHASE
+tenant-a   a1     Running
+tenant-a   a2     Running
+--- Workloads (admitted) ---
+NS         NAME           QUEUE          ADMITTED
+tenant-a   job-a1-01b92   gpu-tenant-a   True
+tenant-a   job-a2-4764d   gpu-tenant-a   True
+--- ClusterQueue usage ---
+NAME           COHORT   PENDING   ADMITTED
+gpu-tenant-a   <none>   0         2
+gpu-tenant-b   <none>   0         0
+
+===== 7. PREEMPTION: tenant-b reclaims its nominal unit =====
+b1 makes tenant-b claim its own unit; reclaimWithinCohort=Any preempts the borrowed tenant-a job.
+mltrainingjob.platform.lkhun9311.github.io/b1 created
++ submitted MLTrainingJob tenant-b/b1 (queue gpu-tenant-b)
+  tenant-b/b1 reached phase Running after 3s
+waiting for a borrowed tenant-a job to be preempted back to Pending...
+  [EVIDENCE] preemption: tenant-a/a2 was reclaimed back to Pending after b1 admitted
+
+[EVIDENCE] preemption result
+--- MLTrainingJob phases ---
+NS         NAME   PHASE
+tenant-a   a1     Running
+tenant-a   a2     Pending
+tenant-b   b1     Running
+--- Workloads (admitted) ---
+NS         NAME           QUEUE          ADMITTED
+tenant-a   job-a1-01b92   gpu-tenant-a   True
+tenant-a   job-a2-4764d   gpu-tenant-a   False
+tenant-b   job-b1-c3566   gpu-tenant-b   True
+--- ClusterQueue usage ---
+NAME           COHORT   PENDING   ADMITTED
+gpu-tenant-a   <none>   1         1
+gpu-tenant-b   <none>   0         1
+
+--- recent Kueue / preemption events ---
++ k get events -A --field-selector reason=Preempted
+NAMESPACE   LAST SEEN   TYPE     REASON      OBJECT                  MESSAGE
+tenant-a    118s        Normal   Preempted   workload/job-a1-80803   Preempted to accommodate a workload (UID: b0058ac5-b135-41ac-96e8-a87f48238db2, JobUID: 4fec8102-a8dd-4aba-a6f2-f716f8fc4c2f) due to reclamation within the cohort; preemptor path: /gpu-platform/gpu-tenant-b; preemptee path: /gpu-platform/gpu-tenant-a; preemptor effective priority: 0 (base: 0, boost: 0); preemptee effective priority: 0 (base: 0, boost: 0)
+tenant-a    3s          Normal   Preempted   workload/job-a2-4764d   Preempted to accommodate a workload (UID: 71d3cd8f-52dd-48e6-bb92-ca65d5922aa5, JobUID: 0c365a2a-3eb9-44ea-80d2-8248b76c888b) due to reclamation within the cohort; preemptor path: /gpu-platform/gpu-tenant-b; preemptee path: /gpu-platform/gpu-tenant-a; preemptor effective priority: 0 (base: 0, boost: 0); preemptee effective priority: 0 (base: 0, boost: 0)
+tenant-a    10m         Normal   Preempted   workload/job-a2-69d98   Preempted to accommodate a workload (UID: 48d8808f-ef19-490b-b0e8-1ea6fd9f7339, JobUID: d95b5a4a-5653-40cc-8038-f40bc185f4e4) due to reclamation within the cohort; preemptor path: /gpu-platform/gpu-tenant-b; preemptee path: /gpu-platform/gpu-tenant-a; preemptor effective priority: 0 (base: 0, boost: 0); preemptee effective priority: 0 (base: 0, boost: 0)
++ k -n tenant-a get events --sort-by=.lastTimestamp
+LAST SEEN   TYPE      REASON                  OBJECT                  MESSAGE
+6s          Normal    CreatedWorkload         job/a1                  Created Workload: tenant-a/job-a1-01b92
+16m         Normal    Admitted                workload/job-a2-c63d1   Admitted by ClusterQueue gpu-tenant-a, wait time since reservation was 0s
+16m         Normal    QuotaReserved           workload/job-a2-c63d1   Quota reserved in ClusterQueue gpu-tenant-a, wait time since queued was 1s
+4m33s       Normal    Admitted                workload/job-a2-75c30   Admitted by ClusterQueue gpu-tenant-a, wait time since reservation was 0s
+4m33s       Normal    QuotaReserved           workload/job-a2-75c30   Quota reserved in ClusterQueue gpu-tenant-a, wait time since queued was 1s; Flavors considered: main: gpu(Fit;borrow=1)
+10m         Warning   Pending                 workload/job-a2-69d98   couldn't assign flavors to pod set main: insufficient unused quota for nvidia.com/gpu in flavor gpu, 1 more needed
+10m         Warning   Pending                 workload/job-a2-69d98   Workload no longer fits after processing another workload
+10m         Normal    Preempted               workload/job-a2-69d98   Preempted to accommodate a workload (UID: 48d8808f-ef19-490b-b0e8-1ea6fd9f7339, JobUID: d95b5a4a-5653-40cc-8038-f40bc185f4e4) due to reclamation within the cohort; preemptor path: /gpu-platform/gpu-tenant-b; preemptee path: /gpu-platform/gpu-tenant-a; preemptor effective priority: 0 (base: 0, boost: 0); preemptee effective priority: 0 (base: 0, boost: 0)
+10m         Normal    EvictedDueToPreempted   workload/job-a2-69d98   Preempted to accommodate a workload (UID: 48d8808f-ef19-490b-b0e8-1ea6fd9f7339, JobUID: d95b5a4a-5653-40cc-8038-f40bc185f4e4) due to reclamation within the cohort; preemptor path: /gpu-platform/gpu-tenant-b; preemptee path: /gpu-platform/gpu-tenant-a
+12m         Normal    Admitted                workload/job-a2-69d98   Admitted by ClusterQueue gpu-tenant-a, wait time since reservation was 0s
+12m         Normal    QuotaReserved           workload/job-a2-69d98   Quota reserved in ClusterQueue gpu-tenant-a, wait time since queued was 0s; Flavors considered: main: gpu(Fit;borrow=1)
+2s          Warning   Pending                 workload/job-a2-4764d   couldn't assign flavors to pod set main: insufficient unused quota for nvidia.com/gpu in flavor gpu, 1 more needed
+3s          Warning   Pending                 workload/job-a2-4764d   Workload no longer fits after processing another workload
+3s          Normal    Preempted               workload/job-a2-4764d   Preempted to accommodate a workload (UID: 71d3cd8f-52dd-48e6-bb92-ca65d5922aa5, JobUID: 0c365a2a-3eb9-44ea-80d2-8248b76c888b) due to reclamation within the cohort; preemptor path: /gpu-platform/gpu-tenant-b; preemptee path: /gpu-platform/gpu-tenant-a; preemptor effective priority: 0 (base: 0, boost: 0); preemptee effective priority: 0 (base: 0, boost: 0)
+3s          Normal    EvictedDueToPreempted   workload/job-a2-4764d   Preempted to accommodate a workload (UID: 71d3cd8f-52dd-48e6-bb92-ca65d5922aa5, JobUID: 0c365a2a-3eb9-44ea-80d2-8248b76c888b) due to reclamation within the cohort; preemptor path: /gpu-platform/gpu-tenant-b; preemptee path: /gpu-platform/gpu-tenant-a
+5s          Normal    Admitted                workload/job-a2-4764d   Admitted by ClusterQueue gpu-tenant-a, wait time since reservation was 0s
+5s          Normal    QuotaReserved           workload/job-a2-4764d   Quota reserved in ClusterQueue gpu-tenant-a, wait time since queued was 1s
+12m         Normal    Admitted                workload/job-a1-e0a9e   Admitted by ClusterQueue gpu-tenant-a, wait time since reservation was 0s
+12m         Normal    QuotaReserved           workload/job-a1-e0a9e   Quota reserved in ClusterQueue gpu-tenant-a, wait time since queued was 0s
+117s        Warning   Pending                 workload/job-a1-80803   couldn't assign flavors to pod set main: insufficient unused quota for nvidia.com/gpu in flavor gpu, 1 more needed
+118s        Warning   Pending                 workload/job-a1-80803   Workload no longer fits after processing another workload
+16m         Normal    CreatedWorkload         job/a1                  Created Workload: tenant-a/job-a1-43a7d
+16m         Normal    Started                 job/a1                  Admitted by clusterQueue gpu-tenant-a
+118s        Normal    Preempted               workload/job-a1-80803   Preempted to accommodate a workload (UID: b0058ac5-b135-41ac-96e8-a87f48238db2, JobUID: 4fec8102-a8dd-4aba-a6f2-f716f8fc4c2f) due to reclamation within the cohort; preemptor path: /gpu-platform/gpu-tenant-b; preemptee path: /gpu-platform/gpu-tenant-a; preemptor effective priority: 0 (base: 0, boost: 0); preemptee effective priority: 0 (base: 0, boost: 0)
+118s        Normal    EvictedDueToPreempted   workload/job-a1-80803   Preempted to accommodate a workload (UID: b0058ac5-b135-41ac-96e8-a87f48238db2, JobUID: 4fec8102-a8dd-4aba-a6f2-f716f8fc4c2f) due to reclamation within the cohort; preemptor path: /gpu-platform/gpu-tenant-b; preemptee path: /gpu-platform/gpu-tenant-a
+4m33s       Normal    Admitted                workload/job-a1-80803   Admitted by ClusterQueue gpu-tenant-a, wait time since reservation was 0s
+12m         Normal    CreatedWorkload         job/a1                  Created Workload: tenant-a/job-a1-e0a9e
+12m         Normal    Started                 job/a1                  Admitted by clusterQueue gpu-tenant-a
+4m33s       Normal    QuotaReserved           workload/job-a1-80803   Quota reserved in ClusterQueue gpu-tenant-a, wait time since queued was 1s
+16m         Normal    Admitted                workload/job-a1-43a7d   Admitted by ClusterQueue gpu-tenant-a, wait time since reservation was 0s
+16m         Normal    QuotaReserved           workload/job-a1-43a7d   Quota reserved in ClusterQueue gpu-tenant-a, wait time since queued was 0s
+5s          Normal    Admitted                workload/job-a1-01b92   Admitted by ClusterQueue gpu-tenant-a, wait time since reservation was 0s
+5s          Normal    QuotaReserved           workload/job-a1-01b92   Quota reserved in ClusterQueue gpu-tenant-a, wait time since queued was 1s; Flavors considered: main: gpu(Fit;borrow=1)
+3s          Normal    Stopped                 job/a2                  Preempted to accommodate a workload (UID: 71d3cd8f-52dd-48e6-bb92-ca65d5922aa5, JobUID: 0c365a2a-3eb9-44ea-80d2-8248b76c888b) due to reclamation within the cohort; preemptor path: /gpu-platform/gpu-tenant-b; preemptee path: /gpu-platform/gpu-tenant-a
+5s          Normal    Started                 job/a2                  Admitted by clusterQueue gpu-tenant-a
+6s          Normal    CreatedWorkload         job/a2                  Created Workload: tenant-a/job-a2-4764d
+4m33s       Normal    CreatedWorkload         job/a1                  Created Workload: tenant-a/job-a1-80803
+4m33s       Normal    Started                 job/a1                  Admitted by clusterQueue gpu-tenant-a
+4m33s       Normal    Started                 job/a2                  Admitted by clusterQueue gpu-tenant-a
+4m33s       Normal    CreatedWorkload         job/a2                  Created Workload: tenant-a/job-a2-75c30
+10m         Normal    Stopped                 job/a2                  Preempted to accommodate a workload (UID: 48d8808f-ef19-490b-b0e8-1ea6fd9f7339, JobUID: d95b5a4a-5653-40cc-8038-f40bc185f4e4) due to reclamation within the cohort; preemptor path: /gpu-platform/gpu-tenant-b; preemptee path: /gpu-platform/gpu-tenant-a
+10m         Normal    Stopped                 job/a2                  Preempted to accommodate a workload (UID: 48d8808f-ef19-490b-b0e8-1ea6fd9f7339, JobUID: d95b5a4a-5653-40cc-8038-f40bc185f4e4) due to reclamation within the cohort; preemptor path: /gpu-platform/gpu-tenant-b; preemptee path: /gpu-platform/gpu-tenant-a
+12m         Normal    Started                 job/a2                  Admitted by clusterQueue gpu-tenant-a
+12m         Normal    CreatedWorkload         job/a2                  Created Workload: tenant-a/job-a2-69d98
+16m         Normal    Started                 job/a2                  Admitted by clusterQueue gpu-tenant-a
+118s        Normal    Stopped                 job/a1                  Preempted to accommodate a workload (UID: b0058ac5-b135-41ac-96e8-a87f48238db2, JobUID: 4fec8102-a8dd-4aba-a6f2-f716f8fc4c2f) due to reclamation within the cohort; preemptor path: /gpu-platform/gpu-tenant-b; preemptee path: /gpu-platform/gpu-tenant-a
+16m         Normal    CreatedWorkload         job/a2                  Created Workload: tenant-a/job-a2-c63d1
+5s          Normal    Started                 job/a1                  Admitted by clusterQueue gpu-tenant-a
+16m         Normal    Suspended               job/a2                  Job suspended
+16m         Normal    Suspended               job/a1                  Job suspended
+16m         Normal    Resumed                 job/a2                  Job resumed
+16m         Normal    SuccessfulCreate        job/a2                  Created pod: a2-h4m9j
+16m         Normal    Resumed                 job/a1                  Job resumed
+16m         Normal    SuccessfulCreate        job/a1                  Created pod: a1-mjqxk
+16m         Normal    Scheduled               pod/a1-mjqxk            Successfully assigned tenant-a/a1-mjqxk to platform-worker2
+16m         Normal    Pulling                 pod/a1-mjqxk            Pulling image "busybox:1.36"
+16m         Normal    Pulling                 pod/a2-h4m9j            Pulling image "busybox:1.36"
+16m         Normal    Scheduled               pod/a2-h4m9j            Successfully assigned tenant-a/a2-h4m9j to platform-worker2
+16m         Normal    Started                 pod/a2-h4m9j            Started container trainer
+16m         Normal    Created                 pod/a2-h4m9j            Created container trainer
+16m         Normal    Pulled                  pod/a2-h4m9j            Successfully pulled image "busybox:1.36" in 3.62s (3.62s including waiting). Image size: 2217006 bytes.
+16m         Normal    Started                 pod/a1-mjqxk            Started container trainer
+16m         Normal    Created                 pod/a1-mjqxk            Created container trainer
+16m         Normal    Pulled                  pod/a1-mjqxk            Successfully pulled image "busybox:1.36" in 1.119s (4.673s including waiting). Image size: 2217006 bytes.
+12m         Normal    Killing                 pod/a1-mjqxk            Stopping container trainer
+12m         Normal    Killing                 pod/a2-h4m9j            Stopping container trainer
+12m         Normal    Resumed                 job/a1                  Job resumed
+12m         Normal    Suspended               job/a1                  Job suspended
+12m         Normal    Resumed                 job/a2                  Job resumed
+12m         Warning   FailedCreate            job/a2                  Error creating: pods "a2-rh27q" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=2, limited: requests.nvidia.com/gpu=1
+12m         Warning   FailedCreate            job/a1                  Error creating: pods "a1-t2lqk" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=2, limited: requests.nvidia.com/gpu=1
+12m         Warning   FailedCreate            job/a1                  Error creating: pods "a1-ptt2q" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=2, limited: requests.nvidia.com/gpu=1
+12m         Warning   FailedCreate            job/a2                  Error creating: pods "a2-sk8vv" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=2, limited: requests.nvidia.com/gpu=1
+12m         Warning   FailedCreate            job/a1                  Error creating: pods "a1-5lf78" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=2, limited: requests.nvidia.com/gpu=1
+12m         Warning   FailedCreate            job/a2                  Error creating: pods "a2-tlnxj" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=2, limited: requests.nvidia.com/gpu=1
+12m         Warning   FailedCreate            job/a2                  Error creating: pods "a2-lvhm4" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=2, limited: requests.nvidia.com/gpu=1
+12m         Warning   FailedCreate            job/a1                  Error creating: pods "a1-nkcxd" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=2, limited: requests.nvidia.com/gpu=1
+12m         Warning   FailedCreate            job/a2                  Error creating: pods "a2-jt66w" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=2, limited: requests.nvidia.com/gpu=1
+12m         Warning   FailedCreate            job/a1                  Error creating: pods "a1-jfs9g" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=2, limited: requests.nvidia.com/gpu=1
+12m         Warning   FailedCreate            job/a2                  Error creating: pods "a2-4dfct" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=1, limited: requests.nvidia.com/gpu=1
+12m         Normal    Started                 pod/a1-jx52b            Started container trainer
+12m         Normal    Created                 pod/a1-jx52b            Created container trainer
+12m         Normal    SuccessfulCreate        job/a1                  Created pod: a1-jx52b
+12m         Normal    Pulled                  pod/a1-jx52b            Container image "busybox:1.36" already present on machine
+12m         Normal    Scheduled               pod/a1-jx52b            Successfully assigned tenant-a/a1-jx52b to platform-worker2
+11m         Warning   FailedCreate            job/a2                  Error creating: pods "a2-lsjg6" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=1, limited: requests.nvidia.com/gpu=1
+10m         Warning   FailedCreate            job/a2                  Error creating: pods "a2-rl4zx" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=1, limited: requests.nvidia.com/gpu=1
+10m         Normal    Suspended               job/a2                  Job suspended
+4m34s       Normal    Killing                 pod/a1-jx52b            Stopping container trainer
+4m33s       Normal    Resumed                 job/a2                  Job resumed
+4m33s       Warning   FailedCreate            job/a2                  Error creating: pods "a2-dj7cj" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=1, limited: requests.nvidia.com/gpu=1
+4m33s       Normal    Resumed                 job/a1                  Job resumed
+4m33s       Warning   FailedCreate            job/a1                  Error creating: pods "a1-2jsf4" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=1, limited: requests.nvidia.com/gpu=1
+4m33s       Normal    Suspended               job/a2                  Job suspended
+4m32s       Warning   FailedCreate            job/a2                  Error creating: pods "a2-c66cl" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=1, limited: requests.nvidia.com/gpu=1
+4m32s       Warning   FailedCreate            job/a1                  Error creating: pods "a1-kk2hd" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=1, limited: requests.nvidia.com/gpu=1
+4m30s       Warning   FailedCreate            job/a2                  Error creating: pods "a2-vncls" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=1, limited: requests.nvidia.com/gpu=1
+4m30s       Warning   FailedCreate            job/a1                  Error creating: pods "a1-jm2cv" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=1, limited: requests.nvidia.com/gpu=1
+4m26s       Warning   FailedCreate            job/a2                  Error creating: pods "a2-pk9vp" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=1, limited: requests.nvidia.com/gpu=1
+4m26s       Warning   FailedCreate            job/a1                  Error creating: pods "a1-8pmjz" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=1, limited: requests.nvidia.com/gpu=1
+4m18s       Warning   FailedCreate            job/a1                  Error creating: pods "a1-b6wbh" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=1, limited: requests.nvidia.com/gpu=1
+4m18s       Warning   FailedCreate            job/a2                  Error creating: pods "a2-pvpbg" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=1, limited: requests.nvidia.com/gpu=1
+4m2s        Normal    SuccessfulCreate        job/a1                  Created pod: a1-sqm6v
+4m2s        Normal    Started                 pod/a1-sqm6v            Started container trainer
+4m2s        Normal    Created                 pod/a1-sqm6v            Created container trainer
+4m2s        Normal    Scheduled               pod/a1-sqm6v            Successfully assigned tenant-a/a1-sqm6v to platform-worker2
+4m2s        Warning   FailedCreate            job/a2                  Error creating: pods "a2-bkgsv" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=1, limited: requests.nvidia.com/gpu=1
+4m2s        Normal    Pulled                  pod/a1-sqm6v            Container image "busybox:1.36" already present on machine
+3m30s       Warning   FailedCreate            job/a2                  Error creating: pods "a2-sjfqq" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=1, limited: requests.nvidia.com/gpu=1
+2m30s       Warning   FailedCreate            job/a2                  Error creating: pods "a2-9pfjj" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=1, limited: requests.nvidia.com/gpu=1
+119s        Normal    Suspended               job/a1                  Job suspended
+119s        Normal    SuccessfulDelete        job/a1                  Deleted pod: a1-sqm6v
+119s        Normal    Killing                 pod/a1-sqm6v            Stopping container trainer
+90s         Warning   FailedCreate            job/a2                  Error creating: pods "a2-rbxtx" is forbidden: exceeded quota: gpuquota-tenant-a-quota, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=1, limited: requests.nvidia.com/gpu=1
+30s         Normal    Started                 pod/a2-5slrw            Started container trainer
+30s         Normal    Created                 pod/a2-5slrw            Created container trainer
+30s         Normal    Pulled                  pod/a2-5slrw            Container image "busybox:1.36" already present on machine
+30s         Normal    Scheduled               pod/a2-5slrw            Successfully assigned tenant-a/a2-5slrw to platform-worker
+30s         Normal    SuccessfulCreate        job/a2                  Created pod: a2-5slrw
+6s          Normal    Killing                 pod/a2-5slrw            Stopping container trainer
+6s          Normal    Suspended               job/a1                  Job suspended
+5s          Normal    Created                 pod/a2-dgnwk            Created container trainer
+5s          Normal    Resumed                 job/a2                  Job resumed
+5s          Normal    Pulled                  pod/a1-24jwj            Container image "busybox:1.36" already present on machine
+5s          Normal    Pulled                  pod/a2-dgnwk            Container image "busybox:1.36" already present on machine
+5s          Normal    Scheduled               pod/a2-dgnwk            Successfully assigned tenant-a/a2-dgnwk to platform-worker
+5s          Normal    Scheduled               pod/a1-24jwj            Successfully assigned tenant-a/a1-24jwj to platform-worker2
+5s          Normal    Created                 pod/a1-24jwj            Created container trainer
+5s          Normal    Started                 pod/a2-dgnwk            Started container trainer
+5s          Normal    SuccessfulCreate        job/a2                  Created pod: a2-dgnwk
+5s          Normal    Started                 pod/a1-24jwj            Started container trainer
+5s          Normal    Resumed                 job/a1                  Job resumed
+5s          Normal    SuccessfulCreate        job/a1                  Created pod: a1-24jwj
+3s          Normal    Suspended               job/a2                  Job suspended
+3s          Normal    SuccessfulDelete        job/a2                  Deleted pod: a2-dgnwk
+3s          Normal    Killing                 pod/a2-dgnwk            Stopping container trainer
+
+===== DONE =====
+Cluster 'platform' left running for inspection. Tear down with: kind delete cluster --name platform

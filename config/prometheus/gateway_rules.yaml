@@ -1,0 +1,106 @@
+# Alerts for the gateway, and each one exists because a specific silent failure was found rather than
+# imagined. Collecting metrics nobody looks at is the state this file's companion PodMonitor just left behind.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: gateway-rules
+  namespace: system
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  groups:
+    - name: gateway.admission
+      rules:
+        # The KV-aware guard fails OPEN: when a backend's telemetry goes stale it admits unconditionally
+        # rather than guessing. That is the right choice — refusing traffic on the strength of a number nobody
+        # could read would be worse — but it means the arm can be fully bypassed while every request still
+        # succeeds and no error is recorded anywhere. Staleness is therefore not a warning about the future;
+        # it is the statement that admission control is currently OFF for that backend.
+        #
+        # PRECONDITION: this fires only when the gateway runs with --admission-mode=kv-aware. In any other
+        # mode the guard does not exist, backend_telemetry_fresh is never observed, and a Vec with no
+        # observed child emits no series at all — so "== 0" matches nothing and the rule is permanently
+        # inactive. That is correct here (there is no guard to bypass), and it is why the rule below exists:
+        # absence means "no guard" and "guard broken" equally, and only one of those is an incident.
+        - alert: GatewayAdmissionGuardBypassed
+          expr: gpuaas_gateway_backend_telemetry_fresh == 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "KV guard is admitting unconditionally for {{ $labels.backend }}"
+            description: >-
+              Its telemetry has been stale for two minutes, so the guard fails open and every request is
+              admitted regardless of KV-cache pressure. Requests keep succeeding, so nothing else will say so.
+
+        # Scrape failures are the usual cause of the alert above, and separating them says whether the backend
+        # is unreachable or merely slow to answer.
+        # Same precondition as above: no kv-aware mode, no scrape, no series.
+        - alert: GatewayBackendScrapeFailing
+          expr: rate(gpuaas_gateway_backend_scrape_errors_total[5m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Cannot read telemetry from {{ $labels.backend }}"
+
+        # The two rules above are written over series the guard itself publishes, so they are silent when the
+        # guard is off AND when the guard is on but publishing nothing: a scraper goroutine that never
+        # started, a backend list that came back empty, a panic in the scrape loop. Both look identical to
+        # Prometheus, and the second is precisely the failure GatewayAdmissionGuardBypassed was written for.
+        #
+        # admission_mode_active is set once at process start, before any request or scrape, so it is present
+        # even when nothing else about the guard is. "unless on()" drops this series the moment any
+        # telemetry_fresh series exists at all, so the rule speaks only about total silence, not staleness.
+        - alert: GatewayKVGuardNotReporting
+          expr: |
+            (gpuaas_gateway_admission_mode_active{mode="kv-aware"} == 1) unless on() gpuaas_gateway_backend_telemetry_fresh
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "kv-aware admission is configured but publishing no backend telemetry"
+            description: >-
+              The gateway resolved --admission-mode=kv-aware, so admission decisions are supposed to depend
+              on backend KV-cache pressure, but no backend has reported freshness for five minutes. Either
+              the guard is watching no backends or its scrape loop is not running. Requests are being
+              admitted and nothing else will say so.
+
+    - name: gateway.routing
+      rules:
+        # Fallback working and fallback exhausted look identical in a request-rate graph, because both end in
+        # a served response until they do not. The ratio is what separates them: a model whose spare is
+        # carrying real traffic is degraded and will fail outright when the spare goes too.
+        - alert: GatewayModelDegraded
+          expr: |
+            sum by (model) (rate(gpuaas_gateway_backend_fallbacks_total[5m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Model {{ $labels.model }} is being served by a fallback backend"
+            description: >-
+              Its head backend has been failing for ten minutes and a spare is absorbing the traffic. Attempts
+              are capped at two, so this model has no depth left.
+
+        # Upstream errors that fallback did NOT rescue: these reached the client.
+        # Requests that ENDED in a 5xx, which is what a client actually experienced.
+        #
+        # This used to subtract successful fallbacks from upstream errors, and those count different things:
+        # upstream_errors_total increments once per failed ATTEMPT, backend_fallbacks_total once per rescued
+        # REQUEST. A request whose two attempts both failed contributed 2 and was rescued 0 times, so the
+        # stated 0.1 threshold fired at roughly 0.05 failed requests per second. Subtracting a request rate
+        # from an attempt rate cannot be made meaningful by choosing a different number.
+        #
+        # requests_total is stamped once per request with its final status, so a 5xx rate over it is the
+        # client-visible failure rate directly, with no arithmetic between mismatched cardinalities.
+        - alert: GatewayUpstreamErrorsReachingClients
+          expr: |
+            sum by (model) (rate(gpuaas_gateway_requests_total{code=~"5.."}[5m])) > 0.1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Model {{ $labels.model }} is failing requests outright"

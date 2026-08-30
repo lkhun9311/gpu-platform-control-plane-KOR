@@ -1,0 +1,98 @@
+# The gpu-simulator DaemonSet advertises fake nvidia.com/gpu capacity on nodes with no real GPU.
+#
+# Design rationale (docs/09_AWS_INFRA_ARCHITECTURE.md, GPU capacity section):
+# on a kind cluster a kubectl patch on the Node status is enough, because
+# nothing there recomputes capacity out from under it.
+#
+# On EKS the kubelet owns node capacity and recomputes it continuously, so a
+# patch is overwritten almost immediately.
+#
+# The only thing the kubelet will not overwrite is capacity it was told about
+# by a registered device plugin, which is what this DaemonSet is.
+#
+# This profile and the real NVIDIA device plugin are mutually exclusive
+# (same table): only one should be enabled at a time, toggled manually in the
+# Argo CD Application.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gpu-simulator
+  namespace: system
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: gpu-simulator
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gpu-platform-control-plane
+      app.kubernetes.io/component: gpu-simulator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gpu-platform-control-plane
+        app.kubernetes.io/component: gpu-simulator
+    spec:
+      # system-node-critical keeps this pod off the eviction list under node
+      # pressure, matching the convention real device plugins (including
+      # NVIDIA's own) rely on to stay registered with the kubelet.
+      priorityClassName: system-node-critical
+      # A device plugin has to run wherever fake GPU capacity should be
+      # advertised, not merely where the scheduler would place it by default.
+      #
+      # Tolerating everything is what makes that true regardless of which
+      # taints a given node carries, including the GPU node group's own
+      # nvidia.com/gpu=present:NoSchedule taint when the real node group is
+      # scaled up alongside this profile during a toggle window.
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: gpu-simulator
+        image: gpu-simulator:latest
+        command:
+        - /gpu-simulator
+        env:
+        # FAKE_GPU_COUNT controls how many fake devices this node advertises.
+        #
+        # One is enough to make nvidia.com/gpu schedulable at all, which is
+        # the only guarantee this simulator makes.
+        - name: FAKE_GPU_COUNT
+          value: "1"
+        # The kubelet only accepts a device-plugin registration from a
+        # process that can write into its own device-plugins directory on
+        # the host, which is why this container needs more than the
+        # restricted defaults the rest of config/ uses.
+        #
+        # privileged is broader than the socket write strictly requires, but
+        # the kubelet does not expose a narrower capability for this
+        # directory, so privileged is the mechanism every device plugin
+        # (including NVIDIA's own) uses to get it.
+        securityContext:
+          privileged: true
+          # The image defaults to a nonroot user, but the registration socket lives in a root-owned host directory.
+          #
+          # The plugin must run as root to create that socket, which is what every real device plugin does.
+          runAsUser: 0
+          runAsNonRoot: false
+        volumeMounts:
+        # hostPath, not a PVC: the kubelet looks for the registration socket
+        # on the node's own filesystem, so the plugin's view of that
+        # directory has to be the same directory the kubelet reads, not a
+        # copy.
+        - name: device-plugins
+          mountPath: /var/lib/kubelet/device-plugins
+        # This process holds one gRPC connection and streams a fixed device
+        # list, so its resource footprint is close to idle.
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      volumes:
+      - name: device-plugins
+        hostPath:
+          path: /var/lib/kubelet/device-plugins
+          type: Directory
+      terminationGracePeriodSeconds: 5

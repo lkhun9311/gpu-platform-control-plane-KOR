@@ -55,10 +55,12 @@ spec:
               gpuClass:
                 description: |-
                   gpuClass records the GPU class (e.g. "l40s") this policy is intended for.
+
                   Empty means all classes.
+
                   NOTE: per-class quota scoping is not yet enforced.
-                  This milestone caps a single aggregate ceiling (requests.nvidia.com/gpu) regardless of class;
-                  the field is recorded for a later milestone that will enforce per-class resource keys (see the gpuClass note in the reconciler).
+
+                  This milestone caps a single aggregate ceiling (requests.nvidia.com/gpu) regardless of class; the field is recorded for a later milestone that will enforce per-class resource keys (see the gpuClass note in the reconciler).
                 type: string
               limits:
                 description: limits is the quota ceiling for this tenant in the target
@@ -67,6 +69,7 @@ spec:
                   gpuCount:
                     description: |-
                       gpuCount is the maximum number of GPUs (nvidia.com/gpu) allowed.
+
                       Locally this is backed by simulated capacity, not real hardware.
                     format: int32
                     minimum: 0
@@ -77,6 +80,7 @@ spec:
               rateLimit:
                 description: |-
                   rateLimit caps the per-tenant serving request rate enforced at the gateway (admission Layer 4).
+
                   It is optional: a policy without rateLimit means the tenant has no gateway rate limit.
                 properties:
                   burst:
@@ -98,10 +102,10 @@ spec:
               targetNamespace:
                 description: |-
                   targetNamespace is the namespace into which quota objects are synced.
+
                   It is immutable: a policy enforces quota in exactly one namespace for its lifetime.
-                  Changing it would orphan the ResourceQuota already synced into the old namespace
-                  (the reconciler only ever reconciles the namespace named here),
-                  so migration is done by deleting and recreating the policy rather than mutating this field.
+
+                  Changing it would orphan the ResourceQuota already synced into the old namespace (the reconciler only ever reconciles the namespace named here), so migration is done by deleting and recreating the policy rather than mutating this field.
                 type: string
                 x-kubernetes-validations:
                 - message: targetNamespace is immutable
@@ -109,8 +113,15 @@ spec:
               tenant:
                 description: |-
                   tenant is the logical tenant (team/org) this policy applies to.
+
                   A tenant may own multiple namespaces, so this is distinct from targetNamespace.
                 type: string
+              trainingQuota:
+                description: |-
+                  trainingQuota, when true, also publishes this tenant's GPU ceiling as a Kueue ClusterQueue for training admission.
+
+                  Training GPU quota then lives in Kueue rather than the namespace ResourceQuota, so the same GPUs are not counted twice.
+                type: boolean
             required:
             - limits
             - targetNamespace
@@ -122,6 +133,7 @@ spec:
               conditions:
                 description: |-
                   conditions represent the current state of the GPUQuotaPolicy resource.
+
                   The status of each condition is one of True, False, or Unknown.
                 items:
                   description: Condition contains details for one aspect of the current

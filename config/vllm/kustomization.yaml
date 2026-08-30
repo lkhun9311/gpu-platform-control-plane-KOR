@@ -1,0 +1,7 @@
+# Not part of config/default. A cluster without a GPU node has nothing to schedule this on, and a Pod stuck
+# Pending is a worse default than an absent engine. The M5-b run applies it explicitly.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - deployment.yaml
+  - service.yaml

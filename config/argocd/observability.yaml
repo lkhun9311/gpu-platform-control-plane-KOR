@@ -1,0 +1,28 @@
+# The slim observability profile is disabled until the operator exposes custom metrics.
+#
+# It has no automated sync policy, so it is one manual sync from active.
+#
+# Chart CRDs are never pruned or replaced, so cluster-scoped CRDs are not silently upgraded.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gpu-platform-observability
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/lkhun9311/gpu-platform-control-plane.git
+    targetRevision: main
+    path: config/prometheus
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gpu-platform-control-plane-system
+  syncPolicy:
+    syncOptions:
+      - Prune=false
+      - Replace=false
+      - CreateNamespace=true

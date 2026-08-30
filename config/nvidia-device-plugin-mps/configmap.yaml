@@ -1,0 +1,29 @@
+# The MPS arm's sharing configuration.
+#
+# Same replica count as the time-slicing arm, and that is the point: the matrix varies the MECHANISM and
+# holds the number of tenants fixed. A comparison where one arm hosted two engines and the other three would
+# be measuring the count.
+#
+# MPS differs from time-slicing in a way that matters to the sizing, and it was read out of the pinned
+# binary rather than the documentation: mps-control-daemon issues set_default_device_pinned_mem_limit, so
+# each client is HARD CAPPED at total/replicas. Under time-slicing nothing enforces the split and the
+# engines' --gpu-memory-utilization only has to sum below 1 by convention. config/vllm-shared asks for 0.475
+# each against an MPS cap of 0.5, so the margin is 2.5 percent of the card -- about 575 MiB on an A10G.
+# Positive, and thin: if an engine fails to profile under MPS and starts under time-slicing, this is the
+# first place to look.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-device-plugin-sharing-mps
+  namespace: system
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: nvidia-device-plugin-mps
+data:
+  config.yaml: |
+    version: v1
+    sharing:
+      mps:
+        resources:
+          - name: nvidia.com/gpu
+            replicas: 2

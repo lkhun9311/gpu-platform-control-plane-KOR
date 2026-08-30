@@ -1,0 +1,233 @@
+name: Destroy
+
+on:
+  schedule:
+    # Nightly at 03:00 UTC so ephemeral clusters do not survive overnight.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  AWS_REGION: ap-northeast-2
+  TF_VERSION: 1.16.0
+  CLUSTER_NAME: gpu-platform
+
+jobs:
+  destroy:
+    name: Ordered teardown
+    runs-on: ubuntu-latest
+    # This job uses the infra-apply environment so the OIDC token sub matches the apply role trust.
+    #
+    # If that environment has a required-reviewer rule, this scheduled run pauses for manual approval.
+    #
+    # For fully unattended nightly teardown, provision a separate infra-destroy environment and role without a reviewer gate.
+    #
+    # Skip cleanly until the bootstrap state bucket exists, so the nightly cron does not fail before AWS is provisioned.
+    if: vars.TF_STATE_BUCKET != ''
+    environment: infra-apply
+    timeout-minutes: 45
+    concurrency:
+      group: terraform-cluster-state
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials via OIDC (apply role)
+        uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
+        with:
+          role-to-assume: ${{ secrets.CI_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # A re-run after the cluster is gone should no-op, not fail into break-glass.
+      #
+      # This sets an output the Argo and argo-bootstrap steps condition on.
+      - name: Check whether the cluster still exists
+        id: cluster
+        run: |
+          set +e
+          OUT=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" 2>&1)
+          RC=$?
+          set -e
+          if [ "$RC" -eq 0 ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          elif printf '%s' "$OUT" | grep -q "ResourceNotFoundException"; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Cluster $CLUSTER_NAME not found; skipping Argo and argo-bootstrap teardown."
+          else
+            echo "describe-cluster failed for a reason other than not-found; failing closed so real cleanup is not skipped." >&2
+            printf '%s\n' "$OUT" >&2
+            exit 1
+          fi
+
+      # Whether the Kubernetes API is reachable from THIS runner, which is a different question from whether
+      # the cluster exists.
+      #
+      # The cluster defaults to a private-only endpoint (api_public_access_cidrs = []). A GitHub-hosted runner
+      # is not in the VPC and not on a connected network, so `describe-cluster` succeeds -- it is an AWS API
+      # call -- and `update-kubeconfig` succeeds, and then every kubectl call hangs until it times out.
+      # IAM cluster-admin grants authorization, not a network path.
+      #
+      # Without this probe the two Kubernetes-dependent steps below fail the job, and a failed job means the
+      # cluster is never destroyed: the thing this workflow exists to guarantee is exactly what a private
+      # endpoint takes away.
+      #
+      # So the probe is explicit and the steps become conditional. An unreachable API is logged loudly rather
+      # than silently skipped, because the ordered phase is a real control -- deleting Argo Applications
+      # first is what stops Argo recreating resources mid-teardown and what removes any LoadBalancer that
+      # would otherwise block the VPC destroy -- and losing it is a fact the operator must see.
+      #
+      # `terraform destroy` on the cluster state does NOT need the Kubernetes API. It is all AWS calls, and it
+      # takes the cluster with Argo inside it. The residue check at the end is the backstop that says whether
+      # anything survived.
+      - name: Check whether the Kubernetes API is reachable from this runner
+        id: api
+        if: steps.cluster.outputs.exists == 'true'
+        run: |
+          set +e
+          aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
+          kubectl --request-timeout=20s get --raw /readyz >/dev/null 2>&1
+          RC=$?
+          set -e
+          if [ "$RC" -eq 0 ]; then
+            echo "reachable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Kubernetes API is not reachable from this runner. The cluster endpoint is private and this runner is outside the VPC."
+            echo "::warning::Skipping the ordered Argo teardown. terraform destroy still runs; the residue check at the end is the backstop."
+            echo "::warning::To restore ordered teardown, run this workflow from a VPC-attached runner or open the endpoint to a known CIDR first."
+          fi
+
+      # Delete the Argo CD Applications first so Argo stops reconciling as resources are removed.
+      #
+      # The apply role reaches the cluster through the access entry created in the cluster root.
+      #
+      # Teardown halts here if the Applications do not finish deleting within the timeout.
+      - name: Delete Argo CD applications
+        if: steps.cluster.outputs.exists == 'true' && steps.api.outputs.reachable == 'true'
+        run: |
+          # Delete the root app first so it stops re-creating the children mid-teardown.
+          #
+          # The cascade finalizer on each Application then removes the underlying workloads, including any LoadBalancer that would otherwise block the VPC destroy.
+          kubectl delete application gpu-platform-root -n argocd --ignore-not-found=true --wait=true
+          kubectl delete applications --all -n argocd --ignore-not-found=true --wait=true
+          kubectl wait --for=delete application --all -n argocd --timeout=300s
+
+      # Destroy argo-bootstrap before cluster, or the Argo Helm release state is orphaned.
+      # Skipped when the API is unreachable: the helm and kubernetes providers cannot plan a destroy they
+      # cannot connect to. The Argo release lives inside the cluster, so destroying the cluster state removes
+      # it -- what is left behind is the argo-bootstrap STATE FILE describing resources that no longer exist,
+      # which the next run must `terraform state rm` or re-init from empty. That is a known, visible cost of
+      # the private endpoint rather than a silent one.
+      - name: Destroy argo-bootstrap state
+        if: steps.cluster.outputs.exists == 'true' && steps.api.outputs.reachable == 'true'
+        working-directory: infra/aws/argo-bootstrap
+        run: |
+          # The argo-bootstrap providers need the cluster connection to plan the helm_release destroy.
+          #
+          # The cluster still exists at this point, so read its endpoint and CA from the EKS API.
+          ENDPOINT=$(aws eks describe-cluster --name "$CLUSTER_NAME" --query 'cluster.endpoint' --output text)
+          CA=$(aws eks describe-cluster --name "$CLUSTER_NAME" --query 'cluster.certificateAuthority.data' --output text)
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="kms_key_id=${{ vars.TF_STATE_KMS_KEY }}"
+          terraform destroy -input=false -auto-approve \
+            -var "cluster_endpoint=$ENDPOINT" \
+            -var "cluster_ca=$CA"
+
+      # `!cancelled()` rather than the default, because the step that must not be skipped is the one after a
+      # failure.
+      #
+      # Every preceding step is a preparation for this one. If the ordered Argo phase times out, or the
+      # argo-bootstrap destroy errors, the default behaviour skips this step -- and then the cluster, its NAT
+      # gateway and any node group left running survive the night while the run shows a red X that says
+      # teardown "failed" rather than "did not happen". A red X plus a destroyed cluster is a far better
+      # outcome than a red X plus a billing one.
+      #
+      # It is not `always()`: a cancelled run is a human deciding to stop, and destroying infrastructure
+      # after that decision is not this workflow's call to make.
+      - name: Destroy cluster state
+        if: ${{ !cancelled() }}
+        working-directory: infra/aws/cluster
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="kms_key_id=${{ vars.TF_STATE_KMS_KEY }}"
+          terraform destroy -input=false -auto-approve
+
+      # Inventory what commonly lingers, so a failed destroy is visible rather than silent.
+      #
+      # This ran BEFORE the destroy until 2026-08-27, which made it useless in the one situation it exists
+      # for: everything it listed was the cluster that had not been destroyed yet, so the output looked
+      # identical whether the teardown was about to succeed or about to fail. It runs after now, where a
+      # non-empty line means something survived.
+      #
+      # `if: always()` matters as much as the ordering. The step that most needs an inventory is the one that
+      # follows a FAILED destroy, and a step that only runs on success would be silent exactly then.
+      #
+      # The list gained NAT gateways, Elastic IPs and network interfaces when the nodes moved into private
+      # subnets. Those are the residues that bill: a NAT gateway is $0.059/hour whether or not anything
+      # routes through it, and an unassociated EIP is charged by the hour precisely because it is idle. An
+      # ENI left behind by a load balancer or a VPC endpoint also blocks the subnet and VPC from ever being
+      # deleted, which turns a residue into a stuck state.
+      #
+      # The load-balancer query is scoped to this VPC. It used to list every load balancer in the account,
+      # so an unrelated one anywhere in the region read as residue from this cluster.
+      - name: Residue check
+        if: always()
+        run: |
+          set +e
+          VPC=$(aws ec2 describe-vpcs \
+            --filters "Name=tag:Name,Values=gpu-platform-vpc" \
+            --query 'Vpcs[].VpcId' --output text)
+          EC2=$(aws ec2 describe-instances --filters 'Name=tag:project,Values=gpu-platform-control-plane' 'Name=instance-state-name,Values=pending,running,stopping,stopped' --query 'Reservations[].Instances[].InstanceId' --output text)
+          EBS=$(aws ec2 describe-volumes --filters 'Name=tag:project,Values=gpu-platform-control-plane' --query 'Volumes[].VolumeId' --output text)
+          NAT=$(aws ec2 describe-nat-gateways --filter 'Name=state,Values=pending,available,deleting' --query 'NatGateways[].NatGatewayId' --output text)
+          EIP=$(aws ec2 describe-addresses --query 'Addresses[?AssociationId==null].AllocationId' --output text)
+          LB=""
+          ENI=""
+          if [ -n "$VPC" ]; then
+            LB=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?VpcId=='$VPC'].LoadBalancerArn" --output text)
+            ENI=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC" --query 'NetworkInterfaces[].NetworkInterfaceId' --output text)
+          fi
+
+          echo "VPC:               ${VPC:-<none>}"
+          echo "EC2 instances:     ${EC2:-<none>}"
+          echo "EBS volumes:       ${EBS:-<none>}"
+          echo "NAT gateways:      ${NAT:-<none>}"
+          echo "Unassociated EIPs: ${EIP:-<none>}"
+          echo "Load balancers:    ${LB:-<none>}"
+          echo "Network ifaces:    ${ENI:-<none>}"
+
+          # A check that cannot fail is not a check.
+          #
+          # This step printed the inventory and always exited 0, so a run that listed a surviving NAT gateway
+          # showed a green tick -- and it is described elsewhere in this repository as "the backstop". A NAT
+          # gateway bills $0.059/hour whether or not anything routes through it, and an unassociated EIP is
+          # charged BECAUSE it is idle, so the two residues that cost money were the ones most likely to be
+          # scrolled past.
+          #
+          # Any non-empty line now fails the job. The teardown has already run at this point, so failing here
+          # cannot prevent a destroy -- it can only make a surviving resource impossible to miss.
+          RESIDUE=""
+          for pair in "vpc:$VPC" "ec2:$EC2" "ebs:$EBS" "nat:$NAT" "eip:$EIP" "elb:$LB" "eni:$ENI"; do
+            case "$pair" in *:) continue ;; esac
+            RESIDUE="$RESIDUE ${pair%%:*}"
+          done
+          if [ -n "$RESIDUE" ]; then
+            echo "::error::teardown left billable or blocking residue:$RESIDUE"
+            echo "Follow the break-glass runbook in docs/09. A NAT gateway and an unassociated EIP bill by the hour."
+            exit 1
+          fi
+          echo "no residue"

@@ -1,0 +1,38 @@
+# The admission guards as a shared component, so both deployment paths turn them on the same way.
+#
+# It exists because they previously did not. config/webhook-enabled had the webhook and config/operator --
+# the overlay Argo CD reconciles -- did not, so a cluster built on a laptop refused an unaccounted device
+# holder and the GitOps-managed one admitted it. The obvious fix, copying three patch files into the second
+# overlay, would have made the two paths agree on the day of the copy and drift apart afterwards, which is
+# the failure mode this repository has met often enough to stop choosing it.
+#
+# A Component rather than a plain directory because kustomize refuses a patch path outside the kustomization
+# root: an overlay cannot reach `../webhook-enabled/manager_webhook_patch.yaml`, but it can include a
+# component whose patches are resolved relative to the component itself.
+#
+# cert-manager is a hard dependency. Without it the Certificate is never issued, the manager never gets a
+# serving certificate, and -- because failurePolicy is Fail -- every governed write is refused. That is the
+# correct direction for the rule and a confusing way to discover a missing dependency, so install
+# cert-manager before applying anything that includes this.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - ../webhook
+  - ../certmanager
+
+patches:
+  # Point the manager at the certificate. Without --webhook-cert-path it logs that admission validation is
+  # NOT running and starts anyway, which is right for config/default and wrong wherever this is included.
+  - path: manager_webhook_patch.yaml
+    target:
+      kind: Deployment
+      name: controller-manager
+
+  # Mount the certificate the flag above refers to.
+  - path: manager_webhook_volume_patch.yaml
+
+  # The CA annotation is a static patch because the Certificate's name and namespace are fixed. An earlier
+  # version derived it with a replacements block and produced "system/serving-cert", a reference to a
+  # namespace that does not exist.
+  - path: webhook_cainjection_patch.yaml

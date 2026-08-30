@@ -1,0 +1,21 @@
+# The metric set the exporter collects.
+#
+# One series, because one is what the verdict reads (internal/queuelab/dcgm.go). Collecting the default set
+# would not break anything -- the parser ignores every line that is not utilisation -- but a manifest naming
+# exactly what the code consumes is a manifest a reader can check against the code.
+#
+# DCGM_FI_DEV_GPU_UTIL is DEVICE utilisation, and the verdict is explicit that this is not the same as work
+# attributable to a Pod. What closes that gap is the exclusivity clause in device.go, not a different metric:
+# there is no DCGM series that says "this container's process caused this".
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dcgm-exporter-metrics
+  namespace: system
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: dcgm-exporter
+data:
+  queuelab-metrics.csv: |
+    # Format,          Prometheus metric type, help message
+    DCGM_FI_DEV_GPU_UTIL, gauge, GPU utilization (in %).

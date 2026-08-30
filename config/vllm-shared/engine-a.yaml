@@ -1,0 +1,104 @@
+# Two engines on one card, which is the whole of what M5-c varies.
+#
+# Each takes 0.475 of the card because time-slicing does not partition memory: the plugin advertises two
+# nvidia.com/gpu and both processes still draw on one pool, so the utilizations are slices of the same total
+# and have to sum below 1. internal/bench.SharingPlan holds this manifest to that arithmetic, and refuses
+# the plan that this pair would form on a T4 -- 10 MiB of KV each, less than one contender prompt. The card
+# is an A10G for that reason and no other.
+#
+# --dtype=half rather than bfloat16, which an A10G would accept. The point of this matrix is to compare
+# sharing modes against M5-b's exclusive result, and an engine that differed in dtype would differ in two
+# things at once.
+#
+# No /dev/shm surprise here either: the engine needs 160 MiB for one worker against a container default of
+# 64 MiB, and dies during startup without it.
+#
+# No explicit namespace. hack/m5c-matrix.sh places each engine in its OWN namespace, because the gateway
+# resolves a backend from the GPUQuotaPolicy's targetNamespace -- which is how one tenant is routed to one
+# engine and the other to the other. That routing is the whole of what the time-slicing arm varies, and it
+# is built from mechanisms this control plane already has rather than a new one.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-shared-a
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: vllm-shared
+    platform.lkhun9311.github.io/engine: "a"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: vllm-shared
+      platform.lkhun9311.github.io/engine: "a"
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gpu-platform-control-plane
+        app.kubernetes.io/component: vllm-shared
+        platform.lkhun9311.github.io/engine: "a"
+    spec:
+      # The sharing node group, which is the one the time-slicing plugin runs on. Its max_size is 1, and
+      # that is what makes co-location certain: two engines on two nodes would not be sharing anything, and
+      # nothing downstream could tell that apart from a sharing result.
+      nodeSelector:
+        platform.lkhun9311.github.io/gpu-sharing: "true"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: present
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967
+          args:
+            - Qwen/Qwen2.5-3B-Instruct
+            - --dtype=half
+            - --max-model-len=16384
+            - --max-num-seqs=32
+            - --gpu-memory-utilization=0.475
+            - --port=8000
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: hf-cache
+              mountPath: /root/.cache/huggingface
+          startupProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            failureThreshold: 90
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 5
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+        - name: hf-cache
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-shared-a
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: vllm-shared
+spec:
+  selector:
+    app.kubernetes.io/component: vllm-shared
+    platform.lkhun9311.github.io/engine: "a"
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

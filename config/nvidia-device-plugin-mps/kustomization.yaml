@@ -1,0 +1,7 @@
+# Applied only for the MPS arm of an M5-c session, and NEVER alongside config/nvidia-device-plugin-timeslicing:
+# they select the same node and would both register nvidia.com/gpu against one kubelet socket.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - configmap.yaml
+  - daemonset.yaml

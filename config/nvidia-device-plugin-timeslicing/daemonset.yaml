@@ -1,0 +1,73 @@
+# The device plugin for the sharing matrix, kept SEPARATE from config/nvidia-device-plugin rather than
+# replacing it.
+#
+# The exclusive config is what queuelab's device evidence rests on: under time-slicing a card's utilisation
+# belongs to no single Pod, and the exclusivity clause refuses to attribute it, so a session that
+# reconfigured the plugin in place would spend hardware to produce "not attributable" on every run. Two
+# configurations, two node groups, and a node belongs to exactly one of them.
+#
+# The separation is enforced by the node selector, not by a promise. This DaemonSet selects
+# platform.lkhun9311.github.io/gpu-sharing; the exclusive one selects platform.lkhun9311.github.io/gpu; and
+# infra/aws/cluster/eks.tf gives the sharing node group only the first. Two plugins registering
+# nvidia.com/gpu against one kubelet socket is not a configuration this repository has any interest in
+# debugging on a rented card.
+#
+# The observer is absent here for the same reason, and it is a design decision rather than an omission: DCGM
+# cannot say which engine a busy SM belonged to under sharing. The matrix reports what the clients measured.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin-timeslicing
+  namespace: system
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: nvidia-device-plugin-timeslicing
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gpu-platform-control-plane
+      app.kubernetes.io/component: nvidia-device-plugin-timeslicing
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gpu-platform-control-plane
+        app.kubernetes.io/component: nvidia-device-plugin-timeslicing
+    spec:
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      nodeSelector:
+        platform.lkhun9311.github.io/gpu-sharing: "true"
+      priorityClassName: system-node-critical
+      containers:
+        - name: nvidia-device-plugin
+          # The same digest the exclusive plugin runs. Sharing is a configuration of this binary, not a
+          # different one, and pinning both to one digest keeps the matrix's two arms from differing in the
+          # plugin as well as in the mode.
+          image: nvcr.io/nvidia/k8s-device-plugin:v0.16.2@sha256:ed39e22c8b71343fb996737741a99da88ce6c75dd83b5c520e0b3d8e8a884c47
+          env:
+            - name: FAIL_ON_INIT_ERROR
+              value: "true"
+            # Without this the plugin ignores the mounted file and advertises one device per card, which is
+            # the EXCLUSIVE behaviour under a manifest that says time-slicing. The arms would then differ in
+            # name only, and the report would compare a mode against itself.
+            - name: CONFIG_FILE
+              value: /etc/nvidia-device-plugin/config.yaml
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+            - name: sharing-config
+              mountPath: /etc/nvidia-device-plugin
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+        - name: sharing-config
+          configMap:
+            name: nvidia-device-plugin-sharing

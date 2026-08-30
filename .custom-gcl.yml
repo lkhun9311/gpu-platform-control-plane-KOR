@@ -1,10 +1,20 @@
-# plugin을 포함한 custom golangci-lint binary를 빌드하기 위한 manifest,
-# 'make golangci-lint'에서 사용한다.
+# This file configures golangci-lint with module plugins.
+# When you run 'make lint', it will automatically build a custom golangci-lint binary
+# with all the plugins listed below.
 #
 # See: https://golangci-lint.run/plugins/module-plugins/
 version: v2.11.4
 plugins:
-  # 구조적 로깅 규칙을 검사하는 logcheck plugin
+  # logcheck validates structured logging calls and parameters (e.g., balanced key-value pairs)
+  # Pinned rather than `latest`, because this binary IS the lint gate and `golangci-lint custom` resolves the
+  # whole dependency graph -- golangci-lint's own linters included -- against whatever the plugin pulls in.
+  # An unpinned plugin therefore lets the gate change with no commit: CI rebuilds it on every run, so two
+  # identical trees can lint differently on different days.
+  #
+  # That is not hypothetical here. A goconst finding on internal/queuelab/provenance.go was reported by CI and
+  # not by a local run of the same code with a cold cache, and the two binaries were built from the same
+  # golangci-lint version. The cause was not proven, but a lint gate that cannot be reproduced locally is not
+  # a gate anyone can work against, so it is pinned to what resolves today.
   - module: "sigs.k8s.io/logtools"
     import: "sigs.k8s.io/logtools/logcheck/gclplugin"
-    version: latest
+    version: v0.10.1

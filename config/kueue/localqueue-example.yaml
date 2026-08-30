@@ -1,0 +1,15 @@
+# This LocalQueue is a reference showing what the GPUQuotaPolicy controller generates.
+#
+# When a GPUQuotaPolicy sets trainingQuota true, the controller creates a ClusterQueue named gpu-<tenant> and a LocalQueue of the same name in the tenant namespace bound to it.
+#
+# It is included here so the queue wiring can be read without the operator running; applying it by hand is not required when the operator is installed.
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: gpu-tenant-a
+  namespace: tenant-a
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: kueue
+spec:
+  clusterQueue: gpu-tenant-a

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "arm": "A-honor",
+  "n": 6,
+  "runIDs": [
+    "e17gh1",
+    "e17gh2",
+    "e17wh1",
+    "e17wh2",
+    "e17sh1",
+    "e17sh2"
+  ],
+  "doses": [
+    "grace-bounded",
+    "self-completing"
+  ],
+  "nodes": [
+    "platform-worker",
+    "platform-worker2"
+  ],
+  "ownerWaitSecondsMean": 2.3487251936666667,
+  "ownerWaitSecondsMin": 1.207775427,
+  "ownerWaitSecondsMax": 3.21038564,
+  "ownerWaitSpreadSeconds": 2.002610213,
+  "floorSeconds": 3.413560434,
+  "bounded": true,
+  "deviceEvidence": "device-not-observed",
+  "interleaved": true,
+  "statement": "under A-honor the quota owner was running 2.349 s after admission, over 6 runs spanning 2 dose regime(s) and 2 node(s), with a spread of 2003 ms against a worst-run floor of 3.414 s. A session differencing against this must add its own floor to that one; the difference of two independently measured means carries both of their errors"
+}
