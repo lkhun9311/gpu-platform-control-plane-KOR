@@ -1,29 +1,29 @@
-# Builds the gateway binary
+# 게이트웨이 바이너리 빌드
 #
-# Why a separate Dockerfile:
-# The existing Dockerfile builds cmd/main.go (the controller) into the manager binary.
-# The gateway is a separate process running as a separate Deployment, so its image must be separate too.
-# Putting both binaries in one image would redeploy both when only one changes, and would bloat the image needlessly.
+# 왜 Dockerfile을 따로 두는가:
+# 기존 Dockerfile은 cmd/main.go(컨트롤러)를 빌드해 manager 바이너리를 만든다.
+# 게이트웨이는 별도의 프로세스이고 별도의 Deployment로 뜨므로 이미지도 따로여야 한다.
+# 하나의 이미지에 두 바이너리를 넣으면 한쪽만 고쳐도 양쪽이 함께 재배포되고, 이미지도 불필요하게 커진다.
 FROM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
 WORKDIR /workspace
-# Copy go.mod/go.sum first to cache the dependency layer.
-# This avoids re-downloading dependencies when only the source changes.
+# go.mod/go.sum을 먼저 복사해 의존성 레이어를 캐시한다.
+# 소스만 바뀔 때 의존성을 다시 내려받지 않게 해준다.
 COPY go.mod go.mod
 COPY go.sum go.sum
 RUN go mod download
 
-# Copy the source (.dockerignore filters it).
+# 소스 복사(.dockerignore가 걸러낸다).
 COPY . .
 
-# GOARCH is left without a default for the same reason as in the existing Dockerfile.
-# Left empty, the build targets the platform of the host that runs it.
+# GOARCH에 기본값을 두지 않는 이유는 기존 Dockerfile과 같다.
+# 비워 두면 빌드를 실행한 호스트의 플랫폼에 맞춰 만들어진다.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o gateway cmd/gateway/main.go
 
-# distroless: a minimal base image with no shell and no package manager.
-# The gateway takes external traffic directly, so shrinking the attack surface matters especially here.
+# distroless: 셸도 패키지 관리자도 없는 최소 베이스 이미지다.
+# 게이트웨이는 외부 트래픽을 직접 받는 컴포넌트라 공격 표면을 최대한 줄이는 것이 특히 중요하다.
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /
 COPY --from=builder /workspace/gateway .
