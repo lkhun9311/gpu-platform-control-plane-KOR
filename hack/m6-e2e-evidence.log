@@ -1,0 +1,392 @@
+
+===== 1. create kind cluster (platform) =====
+Creating cluster "platform" ...
+ • Ensuring node image (kindest/node:v1.31.0) 🖼  ...
+ ✓ Ensuring node image (kindest/node:v1.31.0) 🖼
+ • Preparing nodes 📦 📦 📦   ...
+ ✓ Preparing nodes 📦 📦 📦 
+ • Writing configuration 📜  ...
+ ✓ Writing configuration 📜
+ • Starting control-plane 🕹️  ...
+ ✓ Starting control-plane 🕹️
+ • Installing CNI 🔌  ...
+ ✓ Installing CNI 🔌
+ • Installing StorageClass 💾  ...
+ ✓ Installing StorageClass 💾
+ • Joining worker nodes 🚜  ...
+ ✓ Joining worker nodes 🚜
+Set kubectl context to "kind-platform"
+You can now use your cluster with:
+
+kubectl cluster-info --context kind-platform
+
+Thanks for using kind! 😊
++ k cluster-info
+Kubernetes control plane is running at https://127.0.0.1:37163
+CoreDNS is running at https://127.0.0.1:37163/api/v1/namespaces/kube-system/services/kube-dns:dns/proxy
+
+To further debug and diagnose cluster problems, use 'kubectl cluster-info dump'.
+
+===== 2. install Kueue v0.18.3 =====
+namespace/kueue-system serverside-applied
+customresourcedefinition.apiextensions.k8s.io/admissionchecks.kueue.x-k8s.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/clusterqueues.kueue.x-k8s.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/cohorts.kueue.x-k8s.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/localqueues.kueue.x-k8s.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/multikueueclusters.kueue.x-k8s.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/multikueueconfigs.kueue.x-k8s.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/provisioningrequestconfigs.kueue.x-k8s.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/resourceflavors.kueue.x-k8s.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/topologies.kueue.x-k8s.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/workloadpriorityclasses.kueue.x-k8s.io serverside-applied
+customresourcedefinition.apiextensions.k8s.io/workloads.kueue.x-k8s.io serverside-applied
+serviceaccount/kueue-controller-manager serverside-applied
+role.rbac.authorization.k8s.io/kueue-leader-election-role serverside-applied
+role.rbac.authorization.k8s.io/kueue-manager-clusterprofiles-role serverside-applied
+role.rbac.authorization.k8s.io/kueue-manager-secrets-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-batch-admin-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-batch-user-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-clusterqueue-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-clusterqueue-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-cohort-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-cohort-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-jaxjob-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-jaxjob-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-job-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-job-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-jobset-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-jobset-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-leaderworkerset-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-leaderworkerset-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-localqueue-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-localqueue-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-manager-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-metrics-auth-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-metrics-reader serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-mpijob-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-mpijob-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-paddlejob-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-paddlejob-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-pending-workloads-cq-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-pending-workloads-lq-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-pytorchjob-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-pytorchjob-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-raycluster-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-raycluster-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-rayjob-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-rayjob-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-rayservice-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-rayservice-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-resourceflavor-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-resourceflavor-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-sparkapplication-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-sparkapplication-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-tfjob-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-tfjob-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-topology-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-topology-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-trainjob-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-trainjob-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-workload-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-workload-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-xgboostjob-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/kueue-xgboostjob-viewer-role serverside-applied
+rolebinding.rbac.authorization.k8s.io/kueue-visibility-server-auth-reader serverside-applied
+rolebinding.rbac.authorization.k8s.io/kueue-leader-election-rolebinding serverside-applied
+rolebinding.rbac.authorization.k8s.io/kueue-manager-clusterprofiles-rolebinding serverside-applied
+rolebinding.rbac.authorization.k8s.io/kueue-manager-secrets-rolebinding serverside-applied
+clusterrolebinding.rbac.authorization.k8s.io/kueue-manager-rolebinding serverside-applied
+clusterrolebinding.rbac.authorization.k8s.io/kueue-metrics-auth-rolebinding serverside-applied
+configmap/kueue-manager-config serverside-applied
+secret/kueue-webhook-server-cert serverside-applied
+service/kueue-controller-manager-metrics-service serverside-applied
+service/kueue-visibility-server serverside-applied
+service/kueue-webhook-service serverside-applied
+deployment.apps/kueue-controller-manager serverside-applied
+apiservice.apiregistration.k8s.io/v1beta1.visibility.kueue.x-k8s.io serverside-applied
+apiservice.apiregistration.k8s.io/v1beta2.visibility.kueue.x-k8s.io serverside-applied
+mutatingwebhookconfiguration.admissionregistration.k8s.io/kueue-mutating-webhook-configuration serverside-applied
+validatingwebhookconfiguration.admissionregistration.k8s.io/kueue-validating-webhook-configuration serverside-applied
+waiting for kueue-controller-manager to become Available...
+deployment.apps/kueue-controller-manager condition met
++ k -n kueue-system get pods
+NAME                                        READY   STATUS    RESTARTS   AGE
+kueue-controller-manager-788fb4b79f-njst4   1/1     Running   0          31s
+
+===== 3. build and load operator + gpu-simulator images =====
++ make docker-build IMG=controller:latest
+docker build -t controller:latest .
+DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+            Install the buildx component to build images with BuildKit:
+            https://docs.docker.com/go/buildx/
+
+Sending build context to Docker daemon  579.6kB
+Step 1/14 : FROM golang:1.26 AS builder
+ ---> ae5a2316d12f
+Step 2/14 : ARG TARGETOS
+ ---> Using cache
+ ---> b895f7e0385c
+Step 3/14 : ARG TARGETARCH
+ ---> Using cache
+ ---> e15038479dfc
+Step 4/14 : WORKDIR /workspace
+ ---> Using cache
+ ---> 8ede8b3c1fc8
+Step 5/14 : COPY go.mod go.mod
+ ---> Using cache
+ ---> 8f73382e93c0
+Step 6/14 : COPY go.sum go.sum
+ ---> Using cache
+ ---> 36d31b09b2a9
+Step 7/14 : RUN go mod download
+ ---> Using cache
+ ---> b2a736bb51f8
+Step 8/14 : COPY . .
+ ---> Using cache
+ ---> 0ed75dbf1a25
+Step 9/14 : RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o manager cmd/main.go
+ ---> Using cache
+ ---> 0bc37069b966
+Step 10/14 : FROM gcr.io/distroless/static:nonroot
+ ---> f7f8f729987a
+Step 11/14 : WORKDIR /
+ ---> Using cache
+ ---> a90f61dacaf8
+Step 12/14 : COPY --from=builder /workspace/manager .
+ ---> Using cache
+ ---> 75646da2e610
+Step 13/14 : USER 65532:65532
+ ---> Using cache
+ ---> efc54373c709
+Step 14/14 : ENTRYPOINT ["/manager"]
+ ---> Using cache
+ ---> 7ac07176fc64
+Successfully built 7ac07176fc64
+Successfully tagged controller:latest
++ make docker-build-gpu-simulator GPU_SIMULATOR_IMG=gpu-simulator:latest
+docker build -t gpu-simulator:latest -f Dockerfile.gpu-simulator .
+DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+            Install the buildx component to build images with BuildKit:
+            https://docs.docker.com/go/buildx/
+
+Sending build context to Docker daemon  579.6kB
+Step 1/14 : FROM golang:1.26 AS builder
+ ---> ae5a2316d12f
+Step 2/14 : ARG TARGETOS
+ ---> Using cache
+ ---> b895f7e0385c
+Step 3/14 : ARG TARGETARCH
+ ---> Using cache
+ ---> e15038479dfc
+Step 4/14 : WORKDIR /workspace
+ ---> Using cache
+ ---> 8ede8b3c1fc8
+Step 5/14 : COPY go.mod go.mod
+ ---> Using cache
+ ---> 8f73382e93c0
+Step 6/14 : COPY go.sum go.sum
+ ---> Using cache
+ ---> 36d31b09b2a9
+Step 7/14 : RUN go mod download
+ ---> Using cache
+ ---> b2a736bb51f8
+Step 8/14 : COPY . .
+ ---> Using cache
+ ---> 0ed75dbf1a25
+Step 9/14 : RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o gpu-simulator cmd/gpu-simulator/main.go
+ ---> Using cache
+ ---> 1b3a541eae73
+Step 10/14 : FROM gcr.io/distroless/static:nonroot
+ ---> f7f8f729987a
+Step 11/14 : WORKDIR /
+ ---> Using cache
+ ---> a90f61dacaf8
+Step 12/14 : COPY --from=builder /workspace/gpu-simulator .
+ ---> Using cache
+ ---> b9c2f730b879
+Step 13/14 : USER 65532:65532
+ ---> Using cache
+ ---> 95a572f0664d
+Step 14/14 : ENTRYPOINT ["/gpu-simulator"]
+ ---> Using cache
+ ---> 6a490509e090
+Successfully built 6a490509e090
+Successfully tagged gpu-simulator:latest
++ kind load docker-image controller:latest --name platform
+Image: "controller:latest" with ID "sha256:7ac07176fc64166133c862667250942a30073f536f3f83ebb3e35f5f04391f55" not yet present on node "platform-control-plane", loading...
+Image: "controller:latest" with ID "sha256:7ac07176fc64166133c862667250942a30073f536f3f83ebb3e35f5f04391f55" not yet present on node "platform-worker", loading...
+Image: "controller:latest" with ID "sha256:7ac07176fc64166133c862667250942a30073f536f3f83ebb3e35f5f04391f55" not yet present on node "platform-worker2", loading...
++ kind load docker-image gpu-simulator:latest --name platform
+Image: "gpu-simulator:latest" with ID "sha256:6a490509e090e9cfe280f2334cb13e3a9e5620b66d1f5d50a293c337e0a7931b" not yet present on node "platform-control-plane", loading...
+Image: "gpu-simulator:latest" with ID "sha256:6a490509e090e9cfe280f2334cb13e3a9e5620b66d1f5d50a293c337e0a7931b" not yet present on node "platform-worker", loading...
+Image: "gpu-simulator:latest" with ID "sha256:6a490509e090e9cfe280f2334cb13e3a9e5620b66d1f5d50a293c337e0a7931b" not yet present on node "platform-worker2", loading...
+
+===== 4. install CRDs, deploy operator and fake GPU device plugin =====
++ make install
+"/home/lkhun9311/workspace/gpu-platform-control-plane/bin/controller-gen" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+customresourcedefinition.apiextensions.k8s.io/gpuquotapolicies.platform.lkhun9311.github.io created
+customresourcedefinition.apiextensions.k8s.io/inferencedeployments.platform.lkhun9311.github.io created
+customresourcedefinition.apiextensions.k8s.io/mltrainingjobs.platform.lkhun9311.github.io created
+customresourcedefinition.apiextensions.k8s.io/nodehealths.platform.lkhun9311.github.io created
+namespace/gpu-platform-control-plane-system serverside-applied
+serviceaccount/gpu-platform-control-plane-controller-manager serverside-applied
+role.rbac.authorization.k8s.io/gpu-platform-control-plane-leader-election-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-gpuquotapolicy-admin-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-gpuquotapolicy-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-gpuquotapolicy-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-inferencedeployment-admin-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-inferencedeployment-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-inferencedeployment-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-manager-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-metrics-auth-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-metrics-reader serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-mltrainingjob-admin-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-mltrainingjob-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-mltrainingjob-viewer-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-nodehealth-admin-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-nodehealth-editor-role serverside-applied
+clusterrole.rbac.authorization.k8s.io/gpu-platform-control-plane-nodehealth-viewer-role serverside-applied
+rolebinding.rbac.authorization.k8s.io/gpu-platform-control-plane-leader-election-rolebinding serverside-applied
+clusterrolebinding.rbac.authorization.k8s.io/gpu-platform-control-plane-manager-rolebinding serverside-applied
+clusterrolebinding.rbac.authorization.k8s.io/gpu-platform-control-plane-metrics-auth-rolebinding serverside-applied
+deployment.apps/gpu-platform-control-plane-controller-manager serverside-applied
+operator deployment: deployment.apps/gpu-platform-control-plane-controller-manager
+deployment.apps/gpu-platform-control-plane-controller-manager patched
+daemonset.apps/gpu-simulator created
+daemonset.apps/gpu-simulator env updated
+daemonset.apps/gpu-simulator patched
+deployment.apps/gpu-platform-control-plane-controller-manager restarted
+daemonset.apps/gpu-simulator restarted
+waiting for operator and device plugin rollouts...
+Waiting for deployment "gpu-platform-control-plane-controller-manager" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "gpu-platform-control-plane-controller-manager" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "gpu-platform-control-plane-controller-manager" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "gpu-platform-control-plane-controller-manager" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "gpu-platform-control-plane-controller-manager" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "gpu-platform-control-plane-controller-manager" rollout to finish: 1 old replicas are pending termination...
+deployment "gpu-platform-control-plane-controller-manager" successfully rolled out
+daemon set "gpu-simulator" successfully rolled out
+waiting for a node to advertise nvidia.com/gpu...
+  node advertises nvidia.com/gpu=2
++ k get nodes -o custom-columns=NODE:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu
+NODE                     GPU
+platform-control-plane   2
+platform-worker          2
+platform-worker2         2
+
+===== 5. apply gpu ResourceFlavor, tenant namespaces, and two GPUQuotaPolicy =====
++ k apply -f config/kueue/namespaces.yaml
+namespace/tenant-a created
+namespace/tenant-b created
++ k apply -f config/kueue/resourceflavor.yaml
+Warning: This version is deprecated. Use v1beta2 instead.
+resourceflavor.kueue.x-k8s.io/gpu created
+gpuquotapolicy.platform.lkhun9311.github.io/tenant-a-quota created
++ applied GPUQuotaPolicy tenant-a-quota (ceiling 1)
+gpuquotapolicy.platform.lkhun9311.github.io/tenant-b-quota created
++ applied GPUQuotaPolicy tenant-b-quota (ceiling 1)
+waiting for the operator to create both ClusterQueues with nominal quota 1...
+  both ClusterQueues present, nominal quota 1 each, cohort total 2
++ k get clusterqueue -o custom-columns=NAME:.metadata.name,COHORT:.spec.cohortName,NOMINAL:.spec.resourceGroups[0].flavors[0].resources[0].nominalQuota,RECLAIM:.spec.preemption.reclaimWithinCohort
+NAME           COHORT         NOMINAL   RECLAIM
+gpu-tenant-a   gpu-platform   1         Any
+gpu-tenant-b   gpu-platform   1         Any
++ k get localqueue -A
+NAMESPACE   NAME           CLUSTERQUEUE   PENDING WORKLOADS   ADMITTED WORKLOADS
+tenant-a    gpu-tenant-a   gpu-tenant-a   0                   0
+tenant-b    gpu-tenant-b   gpu-tenant-b   0                   0
++ k get resourcequota -A
+No resources found
+
+===== 6. FAIR SHARING: two tenant-a jobs while tenant-b is idle =====
+clearing any MLTrainingJobs from a previous run so the demo starts from an empty cohort...
+No resources found
+No resources found
+  all Workloads cleared
+a1 uses tenant-a's own nominal unit; a2 borrows tenant-b's idle unit from the cohort.
+mltrainingjob.platform.lkhun9311.github.io/a1 created
++ submitted MLTrainingJob tenant-a/a1 (queue gpu-tenant-a)
+mltrainingjob.platform.lkhun9311.github.io/a2 created
++ submitted MLTrainingJob tenant-a/a2 (queue gpu-tenant-a)
+  tenant-a/a1 reached phase Running after 3s
+  tenant-a/a2 reached phase Running after 0s
+
+[EVIDENCE] fair sharing: tenant-a borrows past its nominal (a1 + a2 both Running)
+--- MLTrainingJob phases ---
+NS         NAME   PHASE
+tenant-a   a1     Running
+tenant-a   a2     Running
+--- Workloads (admitted) ---
+NS         NAME           QUEUE          ADMITTED
+tenant-a   job-a1-70913   gpu-tenant-a   True
+tenant-a   job-a2-de0c0   gpu-tenant-a   True
+--- ClusterQueue usage ---
+NAME           COHORT         PENDING   ADMITTED
+gpu-tenant-a   gpu-platform   0         2
+gpu-tenant-b   gpu-platform   0         0
+
+===== 7. PREEMPTION: tenant-b reclaims its nominal unit =====
+b1 makes tenant-b claim its own unit; reclaimWithinCohort=Any preempts the borrowed tenant-a job.
+mltrainingjob.platform.lkhun9311.github.io/b1 created
++ submitted MLTrainingJob tenant-b/b1 (queue gpu-tenant-b)
+  tenant-b/b1 reached phase Running after 3s
+waiting for a borrowed tenant-a job to be preempted back to Pending...
+  [EVIDENCE] preemption: tenant-a/a2 was reclaimed back to Pending after b1 admitted
+
+[EVIDENCE] preemption result
+--- MLTrainingJob phases ---
+NS         NAME   PHASE
+tenant-a   a1     Running
+tenant-a   a2     Pending
+tenant-b   b1     Running
+--- Workloads (admitted) ---
+NS         NAME           QUEUE          ADMITTED
+tenant-a   job-a1-70913   gpu-tenant-a   True
+tenant-a   job-a2-de0c0   gpu-tenant-a   False
+tenant-b   job-b1-43555   gpu-tenant-b   True
+--- ClusterQueue usage ---
+NAME           COHORT         PENDING   ADMITTED
+gpu-tenant-a   gpu-platform   1         1
+gpu-tenant-b   gpu-platform   0         1
+
+--- recent Kueue / preemption events ---
++ k get events -A --field-selector reason=Preempted
+NAMESPACE   LAST SEEN   TYPE     REASON      OBJECT                  MESSAGE
+tenant-a    3s          Normal   Preempted   workload/job-a2-de0c0   Preempted to accommodate a workload (UID: f132db57-d01a-483e-a8ec-e8997f9c47f4, JobUID: 7183b603-1fc6-48a7-8bb7-65bd32f7c670) due to reclamation within the cohort; preemptor path: /gpu-platform/gpu-tenant-b; preemptee path: /gpu-platform/gpu-tenant-a; preemptor effective priority: 0 (base: 0, boost: 0); preemptee effective priority: 0 (base: 0, boost: 0)
++ k -n tenant-a get events --sort-by=.lastTimestamp
+LAST SEEN   TYPE      REASON                  OBJECT                  MESSAGE
+6s          Normal    CreatedWorkload         job/a1                  Created Workload: tenant-a/job-a1-70913
+6s          Normal    QuotaReserved           workload/job-a2-de0c0   Quota reserved in ClusterQueue gpu-tenant-a, wait time since queued was 0s
+3s          Warning   Pending                 workload/job-a2-de0c0   couldn't assign flavors to pod set main: insufficient unused quota for nvidia.com/gpu in flavor gpu, 1 more needed
+3s          Warning   Pending                 workload/job-a2-de0c0   Workload no longer fits after processing another workload
+3s          Normal    Preempted               workload/job-a2-de0c0   Preempted to accommodate a workload (UID: f132db57-d01a-483e-a8ec-e8997f9c47f4, JobUID: 7183b603-1fc6-48a7-8bb7-65bd32f7c670) due to reclamation within the cohort; preemptor path: /gpu-platform/gpu-tenant-b; preemptee path: /gpu-platform/gpu-tenant-a; preemptor effective priority: 0 (base: 0, boost: 0); preemptee effective priority: 0 (base: 0, boost: 0)
+6s          Normal    Started                 job/a2                  Admitted by clusterQueue gpu-tenant-a
+2s          Warning   Pending                 workload/job-a2-de0c0   couldn't assign flavors to pod set main: insufficient unused quota for nvidia.com/gpu in flavor gpu, 1 more needed
+3s          Normal    EvictedDueToPreempted   workload/job-a2-de0c0   Preempted to accommodate a workload (UID: f132db57-d01a-483e-a8ec-e8997f9c47f4, JobUID: 7183b603-1fc6-48a7-8bb7-65bd32f7c670) due to reclamation within the cohort; preemptor path: /gpu-platform/gpu-tenant-b; preemptee path: /gpu-platform/gpu-tenant-a
+6s          Normal    CreatedWorkload         job/a2                  Created Workload: tenant-a/job-a2-de0c0
+6s          Normal    Admitted                workload/job-a2-de0c0   Admitted by ClusterQueue gpu-tenant-a, wait time since reservation was 0s
+6s          Normal    Started                 job/a1                  Admitted by clusterQueue gpu-tenant-a
+6s          Normal    Admitted                workload/job-a1-70913   Admitted by ClusterQueue gpu-tenant-a, wait time since reservation was 0s
+6s          Normal    QuotaReserved           workload/job-a1-70913   Quota reserved in ClusterQueue gpu-tenant-a, wait time since queued was 0s; Flavors considered: main: gpu(Fit;borrow=1)
+3s          Normal    Stopped                 job/a2                  Preempted to accommodate a workload (UID: f132db57-d01a-483e-a8ec-e8997f9c47f4, JobUID: 7183b603-1fc6-48a7-8bb7-65bd32f7c670) due to reclamation within the cohort; preemptor path: /gpu-platform/gpu-tenant-b; preemptee path: /gpu-platform/gpu-tenant-a
+7s          Normal    Suspended               job/a1                  Job suspended
+6s          Normal    SuccessfulCreate        job/a1                  Created pod: a1-zm2dr
+6s          Normal    Pulling                 pod/a2-nhsmq            Pulling image "busybox:1.36"
+6s          Normal    Pulling                 pod/a1-zm2dr            Pulling image "busybox:1.36"
+6s          Normal    Scheduled               pod/a1-zm2dr            Successfully assigned tenant-a/a1-zm2dr to platform-worker
+6s          Normal    SuccessfulCreate        job/a2                  Created pod: a2-nhsmq
+6s          Normal    Resumed                 job/a2                  Job resumed
+6s          Normal    Resumed                 job/a1                  Job resumed
+6s          Normal    Scheduled               pod/a2-nhsmq            Successfully assigned tenant-a/a2-nhsmq to platform-worker
+3s          Normal    Suspended               job/a2                  Job suspended
+3s          Normal    SuccessfulDelete        job/a2                  Deleted pod: a2-nhsmq
+2s          Normal    Pulled                  pod/a2-nhsmq            Successfully pulled image "busybox:1.36" in 3.628s (3.628s including waiting). Image size: 2217006 bytes.
+2s          Normal    Created                 pod/a2-nhsmq            Created container trainer
+2s          Normal    Started                 pod/a2-nhsmq            Started container trainer
+2s          Normal    Killing                 pod/a2-nhsmq            Stopping container trainer
+1s          Normal    Started                 pod/a1-zm2dr            Started container trainer
+1s          Normal    Created                 pod/a1-zm2dr            Created container trainer
+1s          Normal    Pulled                  pod/a1-zm2dr            Successfully pulled image "busybox:1.36" in 1.114s (4.684s including waiting). Image size: 2217006 bytes.
+
+===== DONE =====
+Cluster 'platform' left running for inspection. Tear down with: kind delete cluster --name platform

@@ -1,0 +1,120 @@
+# The engine the M5-b admission arms are measured against.
+#
+# Every flag below is load-bearing, and three of them were set by something that failed rather than by
+# something the documentation said:
+#
+#   --dtype=half        A CHOICE now, and it was a startup condition before, which is worth keeping straight.
+#                       On a T4 (sm_75) vLLM's own platforms/cuda.py raises "Bfloat16 is only supported on
+#                       GPUs with compute capability of at least 8.0" and refuses to start. This runs on an
+#                       A10G (sm_86), which accepts bfloat16 -- so fp16 is no longer forced, and it stays
+#                       because config/vllm-shared serves the same model and the matrix's exclusive arm IS
+#                       this configuration. Two engines that differed in dtype would differ in two things.
+#   /dev/shm            The engine allocates its inter-process ring buffer there and needs 160 MiB for a
+#                       single worker. A container's default /dev/shm is 64 MiB, and the engine dies during
+#                       startup with "Insufficient space in /dev/shm" -- which is how this line came to
+#                       exist. 1Gi rather than 256Mi because the requirement scales with worker count and
+#                       only the one-worker case has been measured.
+#   replicas: 1         The KV-aware arm scrapes ONE /metrics endpoint and admits against what it reads.
+#                       Two replicas behind this Service means sampling one engine's cache while requests
+#                       land on the other's, so the guard would be reacting to a pool it is not protecting.
+#                       The design spec calls this the single KV pool assertion; this is where it is
+#                       enforced, because nothing downstream can detect the violation.
+#
+# Sizing is derived in hack/m5b-vllm-sizing.md from measured inputs, not chosen by feel. The short version:
+# 3B fp16 weights are 5,886 MiB of an A10G's 23,028 MiB, which leaves roughly 382,000 tokens of KV cache,
+# and a contender prompt is 7,695 tokens, so about 42 concurrent contenders drive usage to the 0.85 engage
+# threshold. --max-num-seqs is set well above that on purpose: the block manager, not the sequence cap,
+# must be what limits admission, or the experiment measures a queue length it configured itself.
+#
+# The card is an A10G because M5-c forced it: two of these engines leave 10 MiB of KV each on a T4, so the
+# sharing matrix cannot run there, and the matrix's exclusive arm is this exact configuration. One card
+# class for both means that arm is measured once. g5.xlarge is four vCPU, the same as g4dn.xlarge.
+#
+# Qwen2.5-7B was ruled out by arithmetic rather than by preference: 15.2 GB of fp16 weights leave too
+# little for a cache once two of them have to fit for the matrix, and quantising to fit would put a
+# quantisation confound inside an experiment about admission control.
+# No namespace here, deliberately. hack/m5b-gpu-session.sh and hack/m5c-matrix.sh each place this engine
+# where their run needs it, and a pinned `namespace: system` silently defeated that: `kubectl apply -k`
+# keeps a namespace the object already carries, so the M5-b session would have deployed into system while
+# waiting for a rollout in its own namespace, and `apply -f -n` refuses outright. The matrix needs the
+# freedom for a further reason -- it puts one engine per namespace so the gateway can route one tenant to
+# each, which is the whole of what its time-slicing arm varies.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-qwen25-3b
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: vllm
+spec:
+  # See the header: this 1 is an assertion the experiment depends on, not a starting point to scale from.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gpu-platform-control-plane
+      app.kubernetes.io/component: vllm
+  strategy:
+    # A second Pod during a rollout is a second KV pool, which is the one thing this Deployment must not
+    # have. Recreate accepts downtime instead.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gpu-platform-control-plane
+        app.kubernetes.io/component: vllm
+    spec:
+      # Matches the taint infra/aws/cluster/eks.tf puts on the GPU node group. Without it the Pod stays
+      # Pending while every arm reports a backend that never became ready.
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: present
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          # Digest of the v0.27.1 manifest list, read from the registry. The tag is recorded only so a human
+          # can tell which release this is; the digest is what runs, and the captured /metrics and SSE
+          # fixtures in internal/gateway/testdata and internal/bench/testdata name the same release.
+          image: vllm/vllm-openai@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967
+          args:
+            - Qwen/Qwen2.5-3B-Instruct
+            - --dtype=half
+            - --max-model-len=16384
+            - --max-num-seqs=64
+            - --gpu-memory-utilization=0.90
+            - --port=8000
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: hf-cache
+              mountPath: /root/.cache/huggingface
+          # Weights are pulled on first start and the engine profiles memory before it serves, so the
+          # startup budget is minutes. Splitting startup from readiness keeps a slow first boot from being
+          # read as a crash loop, and keeps a wedged engine from being read as a slow one.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 90
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+        - name: hf-cache
+          # Node-local and lost with the Pod. That is a deliberate cost: a cache that survives would make
+          # one arm's first request pay a download the other arms do not, and the arms are compared on
+          # latency. Every arm starts cold in the same way.
+          emptyDir: {}

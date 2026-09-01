@@ -14,300 +14,303 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// package main: 이 패키지는 라이브러리가 아니라 "실행 가능한 프로그램"이라는 뜻이다.
-//
-// 이 파일은 서빙 게이트웨이 바이너리의 진입점이며, cmd/main.go(controller-manager)와는 별개의 실행 파일로 빌드된다.
-//
-// 디렉터리가 다르면(cmd/ 와 cmd/gateway/) 같은 package main이라도 서로 다른 바이너리가 된다.
-//
-// 설계 근거(설계서 Components 절): 게이트웨이는 데이터 플레인이고 controller-manager는 컨트롤 플레인이다.
-//
-// 게이트웨이는 사용자 추론 요청을 받아 인증하고, 테넌트를 식별하고, rate limit을 적용한 뒤 백엔드로 넘긴다.
-//
-// 이 경로는 요청마다 지연시간이 곧바로 사용자에게 보이는 실시간 경로다.
-//
-// 반면 컨트롤러의 reconcile은 초 단위로 느려도 되는 비동기 경로다.
-//
-// 두 워크로드를 한 프로세스에 두면 무거운 reconcile 루프가 추론 요청의 꼬리 지연시간을 밀어 올린다.
-//
-// 또 게이트웨이는 트래픽에 맞춰 여러 replica로 늘려야 하지만 컨트롤러는 leader election으로 하나만 활성이어야 한다.
-//
-// 즉 확장 단위 자체가 다르다.
-//
-// 그래서 바이너리를 분리하고 CRD 타입 정의(api/v1)만 공유한다.
-//
-// gateway command, tenant 인식 OpenAI 호환 서빙 gateway 구동
+// Command gateway runs the tenant-aware OpenAI-compatible serving gateway.
 package main
 
-// import 블록: 이 파일이 사용하는 외부 패키지들을 선언한다.
 import (
-	// net/http: HTTP 서버와 클라이언트를 담은 표준 패키지다.
-	//
-	// 여기서는 http.ListenAndServe로 서버를 띄운다.
+	"context"
+	"errors"
+	"flag"
+	"fmt"
 	"net/http"
-	// os: 운영체제와 상호작용하는 표준 패키지이며, os.Exit와 os.Getenv에 쓴다.
 	"os"
+	"time"
 
-	// platformv1: 우리 프로젝트가 정의한 CRD 타입들이며, 원래 패키지 이름 v1 대신 별칭으로 부른다.
 	platformv1 "github.com/lkhun9311/gpu-mlops-platform-control-plane/api/v1"
-	// gateway: 게이트웨이의 실제 구현(Server, NewCache, 레이트 리밋 등)이 있는 내부 패키지다.
-	//
-	// 이 main.go는 배선(wiring)만 담당하고 로직은 전부 이 패키지에 있다.
 	"github.com/lkhun9311/gpu-mlops-platform-control-plane/internal/gateway"
-	// runtime: runtime.Scheme(쿠버네티스 타입 등록표) 타입이 정의된 패키지다.
 	"k8s.io/apimachinery/pkg/runtime"
-	// clientgoscheme: Secret, Pod 같은 쿠버네티스 기본(core) 타입들의 등록 함수를 제공한다.
-	//
-	// 원래 이름이 scheme이라 헷갈리지 않게 별칭을 붙였다.
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	// ctrl: controller-runtime 최상위 패키지이며, 관례상 ctrl로 짧게 부른다.
-	//
-	// 게이트웨이는 컨트롤러가 아니지만 로거, 시그널 핸들러, 접속 설정 로딩은 그대로 재사용한다.
 	ctrl "sigs.k8s.io/controller-runtime"
-	// zap: 구조화 로깅 구현체다.
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
-// main: 프로그램이 시작되는 지점이다.
+// defaultAdmissionStaticRate and its siblings are static-cap's tuning defaults.
 //
-// package main 안의 func main()은 Go 런타임이 자동으로 호출하며, 이 함수가 반환하면 프로세스가 종료된다.
+// Design rationale (design spec Arm B section, "Tuning procedure"): the real values come from an
+// offline simulation against a C pilot's admitted-work fraction and are frozen before the
+// confirmatory run, not chosen here.
 //
-// 전체 흐름은 (1)로거/시그널 설정 → (2)scheme 등록 → (3)cache 생성 → (4)Server 조립 순이다.
+// These defaults exist only so the flag has some starting value; every real run overrides them
+// explicitly via --admission-static-rate/--admission-static-burst.
+const (
+	defaultAdmissionStaticRate    = 2000.0 // tokens/sec
+	defaultAdmissionStaticBurst   = 8192   // tokens
+	defaultAdmissionLongThreshold = 4096   // tokens; shared by static-cap and kv-aware
+)
+
+// defaultAdmissionKV* are kv-aware's tuning defaults.
 //
-// 그다음 (5)cache와 metrics 서버를 고루틴으로 시작 → (6)메인 API 서버 시작(블로킹) 순이다.
+// Design rationale (design spec v1 Mechanism section; v2 Arm C, "Wire mode + flags"): these are
+// test/dev starting points only, not tuned numbers. W (waiting threshold) in particular is
+// model/hardware/max-num-seqs dependent and calibrated from the saturation sweep on the paid
+// GPU pilot; maxStaleness defaults to 3x the scrape interval, matching the design spec's own
+// example.
+const (
+	defaultAdmissionKVEngageUsage    = 0.85
+	defaultAdmissionKVReleaseUsage   = 0.75
+	defaultAdmissionKVWaitingThresh  = 8 // W; test/dev only, see design spec v1 Mechanism section
+	defaultAdmissionKVReleaseSustain = 30 * time.Second
+	defaultAdmissionKVScrapeInterval = 2 * time.Second
+	defaultAdmissionKVMaxStaleness   = 6 * time.Second // 3x defaultAdmissionKVScrapeInterval
+	// A backend under steady traffic is routed to constantly, so this only ever expires one that has stopped
+	// receiving requests: it has either been deleted or has nothing to be under pressure about, and both want
+	// its scraper stopped and its gauges gone. Far above maxStaleness so a backend cannot be evicted while the
+	// guard is still treating its last reading as usable.
+	defaultAdmissionKVIdleTimeout = 15 * time.Minute
+	// shutdownGrace bounds how long in-flight requests are given after a signal. Under a default 30s
+	// terminationGracePeriodSeconds, so the decision to cut a request belongs to this program rather than to
+	// the kubelet's SIGKILL.
+	shutdownGrace                   = 25 * time.Second
+	defaultAdmissionKVScrapeTimeout = 1 * time.Second
+)
+
 func main() {
-	// 게이트웨이 전역 로거를 설정한다.
-	//
-	// zap.UseDevMode(true)는 사람이 읽기 좋은 개발용 콘솔 형식을 쓰겠다는 뜻이다.
-	//
-	// cmd/main.go와 달리 여기서는 플래그로 로그 설정을 받지 않고 코드에 고정한다.
-	//
-	// 게이트웨이는 설정 표면을 최소로 유지하고 필요한 값은 아래처럼 환경변수로만 받기 때문이다.
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
-	// log: 이 바이너리 전용 로거이며, WithName("gateway")로 모든 로그에 logger=gateway 필드가 붙는다.
-	//
-	// Go 문법 설명.
-	//
-	//   - := 는 선언과 대입을 동시에 하는 짧은 변수 선언이며, 타입은 우변에서 추론된다.
-	//   - 함수 안에서만 쓸 수 있고, 패키지 전역에서는 var를 써야 한다.
 	log := ctrl.Log.WithName("gateway")
-	// ctx: 프로세스 종료 신호를 전파하는 context다.
-	//
-	// ctrl.SetupSignalHandler()가 돌려주는 이 context는 SIGTERM이나 SIGINT(Ctrl+C)를 받으면 자동으로 취소된다.
-	//
-	// 아래에서 cache와 cache sync 대기에 이 ctx를 넘기므로, 종료 신호 하나로 그것들이 함께 멈춘다.
 	ctx := ctrl.SetupSignalHandler()
 
-	// scheme: 이 프로그램이 다룰 줄 아는 쿠버네티스 타입의 등록표다.
-	//
-	// cmd/main.go는 이를 전역 변수와 init()으로 만들었지만, 여기서는 main() 안의 지역 변수로 둔다.
-	//
-	// 게이트웨이는 이 값을 쓰는 곳이 아래 NewCache 한 군데뿐이라 굳이 전역으로 노출할 이유가 없다.
-	//
-	// 변수의 유효 범위는 좁을수록 좋다는 원칙에 따른 것이다.
-	//
-	// gateway가 읽는 core 및 platform type 등록
+	var (
+		admissionModeFlag      string
+		admissionStaticRate    float64
+		admissionStaticBurst   int
+		admissionLongThreshold int
+
+		admissionKVEngageUsage    float64
+		admissionKVReleaseUsage   float64
+		admissionKVWaitingThresh  int
+		admissionKVReleaseSustain time.Duration
+		admissionKVScrapeInterval time.Duration
+		admissionKVMaxStaleness   time.Duration
+		admissionKVScrapeTimeout  time.Duration
+		admissionKVIdleTimeout    time.Duration
+	)
+	flag.StringVar(&admissionModeFlag, "admission-mode", string(gateway.AdmissionOff),
+		"Admission control mode on the inference path: off, static-cap, or kv-aware.")
+	flag.Float64Var(&admissionStaticRate, "admission-static-rate", defaultAdmissionStaticRate,
+		"static-cap mode: sustained per-backend input-token refill rate, in tokens/sec.")
+	flag.IntVar(&admissionStaticBurst, "admission-static-burst", defaultAdmissionStaticBurst,
+		"static-cap mode: per-backend input-token bucket burst capacity, in tokens.")
+	flag.IntVar(&admissionLongThreshold, "admission-long-threshold", defaultAdmissionLongThreshold,
+		"static-cap and kv-aware modes: minimum estimated input tokens for a standard-tier "+
+			"request to enter the eligible population.")
+	flag.Float64Var(&admissionKVEngageUsage, "admission-kv-engage-usage", defaultAdmissionKVEngageUsage,
+		"kv-aware mode: KV-cache usage fraction above which a backend engages. Test/dev "+
+			"default; real value is tuned on the paid GPU pilot.")
+	flag.Float64Var(&admissionKVReleaseUsage, "admission-kv-release-usage", defaultAdmissionKVReleaseUsage,
+		"kv-aware mode: KV-cache usage fraction below which a backend may release. Test/dev "+
+			"default; real value is tuned on the paid GPU pilot.")
+	flag.IntVar(&admissionKVWaitingThresh, "admission-kv-waiting-threshold", defaultAdmissionKVWaitingThresh,
+		"kv-aware mode: waiting-queue depth (W) above which a backend engages. "+
+			"Model/hardware/max-num-seqs dependent; test/dev default only, real value comes "+
+			"from the saturation sweep.")
+	flag.DurationVar(&admissionKVReleaseSustain, "admission-kv-release-sustain", defaultAdmissionKVReleaseSustain,
+		"kv-aware mode: how long usage and waiting must stay under the release thresholds "+
+			"before a backend releases.")
+	flag.DurationVar(&admissionKVScrapeInterval, "admission-kv-scrape-interval", defaultAdmissionKVScrapeInterval,
+		"kv-aware mode: how often each registered backend's /metrics endpoint is scraped.")
+	flag.DurationVar(&admissionKVMaxStaleness, "admission-kv-max-staleness", defaultAdmissionKVMaxStaleness,
+		"kv-aware mode: how long since the last successful scrape before the guard bypasses "+
+			"(admits) rather than acting on stale telemetry.")
+	flag.DurationVar(&admissionKVIdleTimeout, "admission-kv-idle-timeout", defaultAdmissionKVIdleTimeout,
+		"how long a backend may go unrouted before its scraper is stopped and its gauges removed; "+
+			"must be well above --admission-kv-scrape-interval")
+	flag.DurationVar(&admissionKVScrapeTimeout, "admission-kv-scrape-timeout", defaultAdmissionKVScrapeTimeout,
+		"kv-aware mode: HTTP timeout for a single /metrics scrape.")
+	flag.Parse()
+
+	// Register the core and platform types the gateway reads.
 	scheme := runtime.NewScheme()
-	// core 타입 등록: 게이트웨이는 API 키가 담긴 Secret을 읽으므로 이 등록이 필요하다.
-	//
-	// Go 문법 설명.
-	//
-	//   - if err := 호출(); err != nil { ... } 는 호출과 동시에 err을 만들고 즉시 검사하는 관용구다.
-	//     이렇게 만든 err은 이 if 블록 안에서만 유효해서 아래 다른 err과 이름이 겹쳐도 문제없다.
-	//   - cmd/main.go의 init()은 utilruntime.Must로 panic을 냈지만 여기서는 직접 검사한다.
-	//     init()과 달리 main() 안에서는 로그를 남기고 os.Exit로 깔끔히 끝낼 수 있다.
-	//     그래서 panic 스택트레이스보다 읽기 좋은 실패 메시지를 줄 수 있다.
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		log.Error(err, "register client-go scheme")
-		// os.Exit(1)은 프로세스를 즉시 끝내며, 1은 비정상 종료를 뜻하는 종료 코드다(0이 정상).
 		os.Exit(1)
 	}
-	// CRD 타입 등록: 게이트웨이는 GPUQuotaPolicy를 읽어 테넌트별 rate limit을 적용하므로 이 등록이 필요하다.
 	if err := platformv1.AddToScheme(scheme); err != nil {
 		log.Error(err, "register platform scheme")
 		os.Exit(1)
 	}
 
-	// cfg: API 서버 접속 설정(rest.Config)이다.
+	// Resolve the flag to an Admitter before touching the cache or apiserver, so a bad flag fails
+	// fast rather than after the gateway has already started reading Kubernetes.
+	admissionMode := gateway.AdmissionMode(admissionModeFlag)
+	admitter, stopAdmitter, err := newAdmitter(admissionMode, admitterFlags{
+		staticRate:    admissionStaticRate,
+		staticBurst:   admissionStaticBurst,
+		longThreshold: admissionLongThreshold,
+		kv: gateway.KVAwareConfig{
+			EngageUsage:    admissionKVEngageUsage,
+			ReleaseUsage:   admissionKVReleaseUsage,
+			WaitingThresh:  admissionKVWaitingThresh,
+			ReleaseSustain: admissionKVReleaseSustain,
+			ScrapeInterval: admissionKVScrapeInterval,
+			MaxStaleness:   admissionKVMaxStaleness,
+			IdleTimeout:    admissionKVIdleTimeout,
+			HTTPTimeout:    admissionKVScrapeTimeout,
+			LongThreshold:  admissionLongThreshold,
+		},
+	})
+	if err != nil {
+		log.Error(err, "configure admission control", "mode", admissionModeFlag)
+		os.Exit(1)
+	}
+	// stopAdmitter is called by the shutdown sequence below rather than from a goroutine of its own here.
 	//
-	// ctrl.GetConfigOrDie()는 클러스터 안에서는 ServiceAccount 토큰을, 밖에서는 ~/.kube/config를 자동으로 쓴다.
-	//
-	// 이름 끝의 OrDie가 뜻하듯 찾지 못하면 에러를 돌려주는 대신 그 자리에서 프로그램을 죽인다.
+	// Two goroutines both waking on ctx.Done() raced, and the losing order was the likely one: the scrapers
+	// stopped while requests were still draining, so every completion still in flight was admitted by a guard
+	// that had lost its telemetry and failed open. Shutdown is one sequence — stop accepting, drain, then
+	// stop the machinery the drained requests were using.
+
 	cfg := ctrl.GetConfigOrDie()
-	// namespace를 cache 생성 전에 확정한다.
+	// Settle the namespace before building the cache.
 	//
-	// 왜 여기로 끌어올렸는가.
+	// It is hoisted here because NewCache needs it to confine the Secret watch.
 	//
-	// 이 값은 아래 Server의 Namespace 필드에도 쓰이지만, NewCache가 Secret 감시 범위를 가두는 데에도 필요하다.
+	// Server.Namespace needs the same value below.
 	//
-	// 두 곳이 서로 다른 namespace를 보면 게이트웨이는 A를 감시하면서 B에서 Secret을 찾게 되어 모든 요청이 401로 떨어진다.
+	// Were the two to disagree, the gateway would watch one namespace and look for the Secret in another.
 	//
-	// 한 변수에서 갈라 쓰면 그런 어긋남이 생길 수 없다.
+	// Every request would fall to 401.
+	//
+	// Deriving both from one variable makes that mismatch impossible.
 	namespace := envOr("GATEWAY_NAMESPACE", "default")
-	// gateway.NewCache(...)는 반환값을 세 개 돌려준다.
-	//
-	//   - ca: cache 인스턴스이며, 아래에서 고루틴으로 Start를 호출해 돌린다.
-	//   - cl: 그 cache를 통해 읽는 client이며, Server에 넣어 준다.
-	//   - err: 실패 시의 에러다.
-	//
-	// Go 문법 설명: Go는 값을 여러 개 반환할 수 있고, 관례상 마지막 반환값을 error로 둔다.
-	//
-	// 설계 근거(설계서 Components 절): 게이트웨이는 요청마다 정책과 Secret을 읽어야 한다.
-	//
-	// 매 요청 API 서버를 호출하면 지연시간이 밀리초 단위로 늘고 API 서버에도 부하가 걸린다.
-	//
-	// cache는 watch로 변경을 미리 받아 메모리에 들고 있어서 읽기를 사실상 0에 가까운 비용으로 만든다.
 	ca, cl, err := gateway.NewCache(ctx, cfg, scheme, namespace)
 	if err != nil {
 		log.Error(err, "build cache")
 		os.Exit(1)
 	}
 
-	// s: 게이트웨이 서버 인스턴스다.
-	//
-	// 실제 HTTP 핸들러 로직은 internal/gateway 패키지에 있고, 여기서는 의존성만 주입해 조립한다.
-	//
-	// Go 문법 설명.
-	//
-	//   - &gateway.Server{...} 는 구조체 값을 만든 뒤 그 주소(포인터)를 얻는 표현이다.
-	//     포인터여야 아래 고루틴의 s.MarkReady()와 메인 흐름의 s.Handler()가 같은 인스턴스를 공유한다.
-	//     값으로 두면 고루틴이 복사본에 준비 완료 표시를 해서 메인 쪽은 영영 준비되지 않는다.
-	//
-	// 필드 설명.
-	//
-	//   - Client: 위에서 만든 cache 기반 client다.
-	//   - Namespace: API 키 Secret이 있는 네임스페이스다.
-	//   - APIKeySecret: API 키가 담긴 Secret의 이름이다.
-	//
-	// 설계 근거: 이 두 값은 플래그가 아니라 환경변수로 받는다.
-	//
-	// 쿠버네티스 Deployment의 env 필드로 주입하는 것이 컨테이너 환경의 표준 관례이기 때문이다.
-	//
-	// 또 값이 바뀌어도 이미지나 커맨드 인자를 건드리지 않고 매니페스트만 고치면 된다.
 	s := &gateway.Server{
 		Client:       cl,
 		Namespace:    namespace,
 		APIKeySecret: envOr("GATEWAY_API_KEY_SECRET", "gateway-api-keys"),
 	}
-	// tenant별 token bucket 등록부를 켠다.
+	// Turn on the per-tenant token bucket registry.
 	//
-	// 왜 조립 단계에서 하는가.
+	// It happens here rather than in the struct literal because bucketRegistry is unexported to the gateway package.
 	//
-	// bucketRegistry는 gateway 패키지의 비공개 타입이라 여기서 직접 만들 수 없다.
+	// The package exposes one method and main merely states the intent to rate limit.
 	//
-	// 그래서 gateway 쪽이 공개 메서드 하나를 열어 두고, main은 "속도 제한을 켠다"는 의사만 밝힌다.
-	//
-	// 이 호출을 빠뜨리면 buckets가 nil인 채로 요청을 받게 되므로, gateway 쪽에서 그 경우를 막아 둔다.
+	// Skipping this call would leave buckets nil while serving, so the gateway guards that case.
 	s.InitRateLimiter()
+	// Install the admission-control implementation resolved from --admission-mode above.
+	//
+	// Why here rather than in the struct literal: SetAdmitter is exported for the same reason
+	// InitRateLimiter is (admitter is unexported to the gateway package), and mode travels with it
+	// so the metrics label can never disagree with which Admitter is actually running.
+	s.SetAdmitter(admissionMode, admitter)
 
-	// 아래부터 고루틴 세 개를 띄운다.
-	//
-	// Go 문법 설명.
-	//
-	//   - go func() { ... }() 는 익명 함수를 만들어 즉시 "고루틴"으로 실행하는 관용구다.
-	//     맨 끝의 () 가 호출이고, 앞의 go 키워드가 "이 호출을 별도의 경량 스레드에서 돌려라"는 뜻이다.
-	//   - go로 띄우면 호출한 쪽은 끝나기를 기다리지 않고 다음 줄로 바로 넘어간다.
-	//   - 익명 함수는 바깥 변수(ca, ctx, log, s)를 그대로 참조할 수 있으며 이를 클로저라고 부른다.
-	//   - 고루틴이 필요한 이유는 ca.Start와 http.ListenAndServe가 모두 "블로킹" 함수이기 때문이다.
-	//     즉 한 번 부르면 끝날 때까지 반환하지 않아서, 순서대로 부르면 뒤의 것이 영영 시작되지 않는다.
-	//     그래서 마지막 하나만 메인 흐름에 두고 나머지는 고루틴으로 돌린다.
-
-	// 고루틴 1: cache를 시작한다.
-	//
-	// ca.Start(ctx)는 watch 연결을 열고 ctx가 취소될 때까지 계속 돌며 변경을 받아 메모리를 갱신한다.
-	//
-	// 종료 신호로 ctx가 취소되면 정상적으로 반환하므로 이때는 에러 로그가 남지 않는다.
-	//
-	// cache 시작, sync 완료되면 readiness 전환
+	// Start the cache and flip readiness once it has synced.
 	go func() {
 		if err := ca.Start(ctx); err != nil {
 			log.Error(err, "cache stopped")
 		}
 	}()
-	// 고루틴 2: cache의 최초 sync가 끝나기를 기다렸다가 서버를 "준비 완료"로 표시한다.
-	//
-	// WaitForCacheSync(ctx)는 초기 목록을 다 받을 때까지 블로킹하며, 성공하면 true를, ctx가 먼저 취소되면 false를 준다.
-	//
-	// false면 종료 중이라는 뜻이므로 아무것도 하지 않고 그냥 끝난다.
-	//
-	// 설계 근거: cache가 채워지기 전에 요청을 받으면 정책을 못 찾아 정상 테넌트를 403으로 거절하게 된다.
-	//
-	// 그래서 sync가 끝나기 전에는 readiness를 false로 두어 쿠버네티스가 트래픽을 보내지 않게 막는다.
-	//
-	// 이 대기를 메인 흐름에 두지 않고 고루틴으로 분리한 이유는 그동안에도 :8081의 readiness 엔드포인트가 응답은 해야 하기 때문이다.
-	//
-	// 그렇게 "아직 준비 안 됨"이라고 응답해야 쿠버네티스가 Pod를 죽이지 않고 기다려 준다.
 	go func() {
-		if ca.WaitForCacheSync(ctx) { // cache sync 대기 후 준비 완료 표시
-			// MarkReady()는 Server 내부의 준비 완료 플래그를 켠다.
-			//
-			// 이 고루틴과 요청 처리 고루틴이 동시에 그 플래그를 건드리므로 Server 쪽에서 동시성 안전하게 구현되어 있다.
+		if ca.WaitForCacheSync(ctx) {
 			s.MarkReady()
 			log.Info("cache synced; gateway ready")
 		}
 	}()
 
-	// 고루틴 3: 운영용 엔드포인트(metrics, readiness)를 :8081에서 서빙한다.
+	// Serve metrics/readiness on :8081 and the OpenAI-compatible API on :8080.
 	//
-	// 설계 근거: 포트를 둘로 나눈다.
+	// Both are named servers rather than http.ListenAndServe, so both can be shut down.
 	//
-	//   - :8080은 사용자 추론 트래픽(OpenAI 호환 API)이며 외부에 노출된다.
-	//   - :8081은 metrics와 probe이며 클러스터 내부 전용이다.
-	//
-	// 나누는 이유는 사용량 정보가 담긴 metrics가 사용자에게 노출되면 안 되기 때문이다.
-	//
-	// 또 사용자 트래픽이 폭주해 :8080이 포화돼도 probe는 계속 응답해 Pod가 불필요하게 재시작되지 않아야 한다.
-	//
-	// Go 문법 설명.
-	//
-	//   - http.ListenAndServe(주소, 핸들러)는 그 주소에서 듣기 시작하고 요청이 올 때마다 핸들러를 부른다.
-	//     정상 상황에서는 반환하지 않으며, 반환했다면 그 자체가 무언가 잘못됐다는 뜻이라 항상 에러를 돌려준다.
-	//   - s.MetricsHandler()는 그 서버가 쓸 핸들러(http.Handler)를 만들어 돌려주는 메서드다.
-	//
-	// metric/readiness는 :8081, OpenAI 호환 API는 :8080에서 서빙
+	// A signal previously ended the process while requests were mid-flight: SetupSignalHandler cancelled ctx,
+	// which stopped the cache and the scrapers, and nothing at all told the HTTP servers. Kubernetes sends
+	// SIGTERM and then waits out terminationGracePeriodSeconds, so every completion in flight — some of them
+	// streaming for minutes — was cut at whatever byte it had reached, and the client saw a truncated response
+	// rather than a refused one. On a gateway whose whole job is proxying long generations that is the failure
+	// mode most worth having.
+	api := &http.Server{Addr: ":8080", Handler: s.Handler()}
+	metrics := &http.Server{Addr: ":8081", Handler: s.MetricsHandler()}
+
 	go func() {
-		if err := http.ListenAndServe(":8081", s.MetricsHandler()); err != nil {
+		<-ctx.Done()
+		// Bounded, because Shutdown waits for every in-flight request and a stuck upstream would otherwise
+		// hold the process past the grace period — at which point the kubelet SIGKILLs it and the graceful
+		// path has bought nothing. The bound is deliberately under a default 30s grace period, so the
+		// difference between finishing and being killed belongs to this program rather than to the kubelet.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+		// Metrics first: readiness lives on that listener, so closing it takes this Pod out of Service
+		// endpoints before the API server stops accepting, and new requests stop arriving while the ones
+		// already here finish.
+		if err := metrics.Shutdown(shutdownCtx); err != nil {
+			log.Error(err, "metrics server did not shut down cleanly")
+		}
+		if err := api.Shutdown(shutdownCtx); err != nil {
+			log.Error(err, "in-flight requests were cut short by the shutdown deadline")
+		}
+		// Last, because until Shutdown returns there are requests being admitted, and admission reads what
+		// these scrapers publish. Stopping them first left the guard failing open over the whole drain.
+		stopAdmitter()
+	}()
+
+	go func() {
+		// ErrServerClosed is what Shutdown produces and is not a failure; reporting it would put an error in
+		// the log of every clean stop.
+		if err := metrics.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error(err, "metrics server stopped")
 		}
 	}()
-	// 이제 메인 흐름에서 사용자 트래픽 서버를 시작한다.
-	//
-	// 이 줄부터가 게이트웨이의 본업이므로 고루틴이 아니라 메인 고루틴에 그대로 둔다.
 	log.Info("serving", "addr", ":8080")
-	// 이 호출은 블로킹이라 프로세스가 사는 동안 여기서 머문다.
-	//
-	// main()이 반환하면 Go 런타임이 남은 고루틴을 기다리지 않고 프로세스를 끝낸다.
-	//
-	// 그래서 이렇게 메인 흐름을 붙잡아 두는 것이 곧 프로세스를 살려 두는 방법이다.
-	if err := http.ListenAndServe(":8080", s.Handler()); err != nil {
-		// 여기 도달했다는 것은 서버가 멈췄다는 뜻이며, 게이트웨이는 더 이상 제 역할을 못 한다.
-		//
-		// 조용히 살아 있으면 쿠버네티스가 정상으로 오해하므로 비정상 종료 코드로 끝내 재시작을 유도한다.
+	if err := api.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error(err, "serving stopped")
 		os.Exit(1)
 	}
+	log.Info("stopped serving")
 }
 
-// envOr: key라는 이름의 환경변수를 읽어 돌려주고, 값이 없거나 비어 있으면 기본값 def를 돌려준다.
-//
-// Go 문법 설명.
-//
-//   - 리시버가 없는 일반 함수다(특정 타입에 붙지 않음).
-//   - (key, def string) 처럼 같은 타입 인자는 타입을 한 번만 적어도 된다.
-//   - 소문자로 시작하는 이름이라 이 패키지 안에서만 보이는 "비공개" 함수다.
-//   - os.Getenv(key)는 환경변수가 설정되지 않았으면 빈 문자열("")을 돌려준다.
-//     즉 "설정 안 됨"과 "빈 값으로 설정됨"을 구분하지 않는데, 여기서는 둘 다 기본값을 쓰는 게 맞아 문제되지 않는다.
-//     (구분이 필요하면 os.LookupEnv를 쓴다.)
-//   - if v := ...; v != "" 는 호출과 동시에 v를 만들고 즉시 검사하는 관용구이며, v는 이 if 안에서만 유효하다.
-//
-// key의 환경변수 값 반환, 미설정 시 def 사용
+// envOr returns the environment value for key or def when unset.
 func envOr(key, def string) string {
-	// 환경변수에 실제 값이 있으면 그걸 그대로 쓴다.
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
-	// 값이 없으면 호출자가 준 기본값으로 대체한다.
-	//
-	// 기본값을 두는 덕분에 로컬 개발 시 환경변수를 하나도 설정하지 않아도 바로 실행된다.
 	return def
+}
+
+// admitterFlags bundles every admission-mode flag value newAdmitter needs, since the three modes
+// together take more parameters than reads well as a positional argument list.
+type admitterFlags struct {
+	staticRate    float64
+	staticBurst   int
+	longThreshold int
+	kv            gateway.KVAwareConfig
+}
+
+// noopStop is the stop function newAdmitter returns for modes that start no background work.
+func noopStop() {}
+
+// newAdmitter builds the gateway.Admitter matching mode and a stop function the caller must
+// invoke on shutdown, or an error if mode is not recognized.
+//
+// Design rationale (design spec Build order section, step 2 vs step 3): off and static-cap start
+// no scrapers, so their stop function is a no-op; kv-aware's is scraperManager.Stop, returned by
+// gateway.NewKVAwareAdmitter, so every backend's scrape goroutine actually stops on shutdown
+// rather than leaking.
+//
+// An unrecognized mode string fails startup rather than silently falling back to a different
+// mode: a typo in --admission-mode must stop the gateway, not silently disable the guard.
+func newAdmitter(mode gateway.AdmissionMode, f admitterFlags) (gateway.Admitter, func(), error) {
+	switch mode {
+	case gateway.AdmissionOff:
+		return gateway.NewOffAdmitter(), noopStop, nil
+	case gateway.AdmissionStaticCap:
+		return gateway.NewStaticCapAdmitter(f.staticRate, f.staticBurst, f.longThreshold), noopStop, nil
+	case gateway.AdmissionKVAware:
+		admitter, stop := gateway.NewKVAwareAdmitter(f.kv)
+		return admitter, stop, nil
+	default:
+		return nil, noopStop, fmt.Errorf("unknown admission mode %q", mode)
+	}
 }

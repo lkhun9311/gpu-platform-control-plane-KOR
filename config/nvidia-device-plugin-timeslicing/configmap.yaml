@@ -1,0 +1,23 @@
+# The sharing configuration, and the number in it is the experiment's independent variable.
+#
+# replicas: 2 makes the kubelet advertise two nvidia.com/gpu for one physical card, so two engine Pods can
+# be scheduled where one fit before. It does NOT create memory: both processes draw on the same pool, which
+# is why config/vllm-shared gives each engine half the card and why internal/bench.SharingPlan refuses a
+# plan whose halves do not leave room for a cache. Raising this number without lowering
+# --gpu-memory-utilization to match produces engines that start and thrash.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-device-plugin-sharing
+  namespace: system
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: nvidia-device-plugin-timeslicing
+data:
+  config.yaml: |
+    version: v1
+    sharing:
+      timeSlicing:
+        resources:
+          - name: nvidia.com/gpu
+            replicas: 2

@@ -1,0 +1,6 @@
+resources:
+  - manifests.yaml
+  - service.yaml
+
+# The Service's port name is left off deliberately: the apiserver dials the Service by number, so a name here
+# would be decoration that later drifts from the Deployment's container port.

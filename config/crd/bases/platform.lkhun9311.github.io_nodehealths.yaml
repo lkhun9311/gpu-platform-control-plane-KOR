@@ -52,12 +52,15 @@ spec:
               gpuClass:
                 description: |-
                   gpuClass is the illustrative GPU class of the node (e.g. "l40s").
+
                   Locally this is backed by simulated capacity (see the dev runbook).
                 type: string
               nodeName:
                 description: |-
                   nodeName is the name of the target Node object this resource tracks.
+
                   It is immutable: a NodeHealth manages the unhealthy taint on exactly one node for its lifetime.
+
                   Changing it would orphan the taint already applied to the old node, since cleanup only ever targets the node named here.
                 type: string
                 x-kubernetes-validations:
@@ -72,6 +75,7 @@ spec:
               conditions:
                 description: |-
                   conditions represent the current state of the NodeHealth resource.
+
                   The status of each condition is one of True, False, or Unknown.
                 items:
                   description: Condition contains details for one aspect of the current
@@ -133,8 +137,9 @@ spec:
                 x-kubernetes-list-type: map
               faultSignal:
                 description: |-
-                  faultSignal records the origin of the current fault signal. It is recorded
-                  for honesty: locally the signal is simulated, not a real hardware signal.
+                  faultSignal records the origin of the current fault signal.
+
+                  It is recorded for honesty: locally the signal is simulated, not a real hardware signal.
                 properties:
                   code:
                     description: code is an optional fault code.
@@ -155,7 +160,9 @@ spec:
               phase:
                 description: |-
                   phase is the high-level health state of the node.
+
                   M3 emits Pending, Ready, and Quarantine.
+
                   Intake and Degraded are reserved for the node intake and degrade lifecycle stages (see docs/03) and are not emitted yet.
                 enum:
                 - Pending

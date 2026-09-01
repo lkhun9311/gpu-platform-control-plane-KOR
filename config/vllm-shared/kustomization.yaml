@@ -1,0 +1,9 @@
+# Applied only for an M5-c session, and normally NOT through this kustomization: hack/m5c-matrix.sh applies
+# each engine into its own namespace so the gateway can route one tenant to each. This exists so the pair
+# can be applied together into one namespace for a smoke test.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: system
+resources:
+  - engine-a.yaml
+  - engine-b.yaml

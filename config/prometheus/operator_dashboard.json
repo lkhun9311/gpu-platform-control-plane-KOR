@@ -1,0 +1,514 @@
+{
+  "title": "GPU Platform",
+  "uid": "gpu-platform-operator",
+  "tags": [
+    "gpu-platform"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {
+          "text": "Prometheus",
+          "value": "Prometheus"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Is the operator reconciling at all",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Reconcile errors (since start)",
+      "description": "Cumulative and exact. increase() extrapolates across scrape boundaries, so counting discrete events with it yields fractional answers — this panel read \"2.26 errors\" against a true count of 2. A count that cannot be true undermines every other number on the page, so the rate lives in its own panel and this one stays integral.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "decimals": 0,
+          "noValue": "0"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(controller_runtime_reconcile_errors_total{job=~\".*controller-manager.*\"})",
+          "legendFormat": "errors",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Reconciles per second by controller",
+      "description": "Split by controller so a silent one is visible. An aggregate line stays healthy while a single controller has stopped.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 9,
+        "x": 6,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "sum by (controller) (rate(controller_runtime_reconcile_total{job=~\".*controller-manager.*\"}[5m]))",
+          "legendFormat": "{{controller}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Workqueue depth by controller",
+      "description": "Every reconciler in this operator runs at the controller-runtime default of MaxConcurrentReconciles=1, so the queue drains serially. Depth is where a per-item cost that grows with cluster size becomes visible before latency does.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 9,
+        "x": 15,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "sum by (name) (workqueue_depth{job=~\".*controller-manager.*\"})",
+          "legendFormat": "{{name}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Reconcile error rate",
+      "description": "The cumulative stat cannot say whether errors are still happening. A counter that stopped moving an hour ago looks identical to one incrementing now. Rate answers that; the stat answers how many.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "noValue": "0"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (controller) (rate(controller_runtime_reconcile_errors_total{job=~\".*controller-manager.*\"}[5m]))",
+          "legendFormat": "{{controller}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Node health and quarantine",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 11
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Unhealthy-node taint transitions",
+      "description": "applied and removed are plotted separately on purpose. A net count would sit at zero through a node flapping in and out of quarantine, which is the case worth seeing.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "targets": [
+        {
+          "expr": "sum by (action) (increase(gpuplatform_nodehealth_taint_total[5m]))",
+          "legendFormat": "{{action}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Taint transitions since start",
+      "description": "Cumulative, so the chaos run's applied/removed pair is still readable after the rate window has passed.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 12,
+        "y": 12
+      },
+      "targets": [
+        {
+          "expr": "sum by (action) (gpuplatform_nodehealth_taint_total)",
+          "legendFormat": "{{action}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "0",
+          "decimals": 0
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Quota drift corrections",
+      "description": "A ResourceQuota edited away from its GPUQuotaPolicy and put back. Sustained non-zero means something outside the operator is fighting it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 12
+      },
+      "targets": [
+        {
+          "expr": "sum(gpuplatform_gpuquotapolicy_drift_corrected_total)",
+          "legendFormat": "corrected",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "0",
+          "decimals": 0
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Training admission",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "MLTrainingJob phase transitions",
+      "description": "Transitions, not current occupancy: this counter increments on change, so a flat line means nothing is moving rather than nothing exists.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 19
+      },
+      "targets": [
+        {
+          "expr": "sum by (phase) (increase(gpuplatform_mltrainingjob_phase_total[5m]))",
+          "legendFormat": "{{phase}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Phase transitions since start",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 12,
+        "y": 19
+      },
+      "targets": [
+        {
+          "expr": "sum by (phase) (gpuplatform_mltrainingjob_phase_total)",
+          "legendFormat": "{{phase}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "0",
+          "decimals": 0
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Failed jobs by reason",
+      "description": "Reason is carried because 'a job failed' is not actionable and 'a job failed because its quota is gone' is.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 19
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          },
+          "noValue": "0",
+          "decimals": 0
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (reason) (gpuplatform_mltrainingjob_failed_total)",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Reconcile latency",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Reconcile duration p99 by controller",
+      "description": "p99 rather than a mean. The cost this operator was measured to have — an unindexed lookup proportional to the objects in a namespace — shows up in the tail long before it moves an average.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, controller) (rate(controller_runtime_reconcile_time_seconds_bucket{job=~\".*controller-manager.*\"}[5m])))",
+          "legendFormat": "{{controller}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Gateway",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 33
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests per second by status class",
+      "description": "Split by code, not totalled. A gateway returning 500s at full rate is indistinguishable from a healthy one on a request-rate panel.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 34
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "noValue": "0"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (code) (rate(gpuaas_gateway_requests_total[2m]))",
+          "legendFormat": "{{code}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Request duration p99 and p50",
+      "description": "Both, because a p99 alone cannot say whether a spike hit every request or only the tail. The gap between them is the shape of the degradation.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 34
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "0"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(gpuaas_gateway_request_duration_seconds_bucket[2m])))",
+          "legendFormat": "p99",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(gpuaas_gateway_request_duration_seconds_bucket[2m])))",
+          "legendFormat": "p50",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Upstream errors and backend fallbacks",
+      "description": "upstream_errors counts failures that reached the client; backend_fallbacks counts failures a later backend absorbed. The second rising while the first stays flat is the retry path working, and that distinction is the whole reason both exist.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "noValue": "0"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (model) (rate(gpuaas_gateway_upstream_errors_total[2m]))",
+          "legendFormat": "upstream error {{model}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (model) (rate(gpuaas_gateway_backend_fallbacks_total[2m]))",
+          "legendFormat": "fallback {{model}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Rate limiting and admission decisions",
+      "description": "Refusals the gateway made on purpose, kept apart from upstream failures above. Conflating deliberate rejection with breakage is how a working limiter gets paged as an outage.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "noValue": "0"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (tenant) (rate(gpuaas_gateway_rate_limited_total[2m]))",
+          "legendFormat": "rate-limited {{tenant}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (decision) (rate(gpuaas_gateway_admission_decisions_total[2m]))",
+          "legendFormat": "admission {{decision}}",
+          "refId": "B"
+        }
+      ]
+    }
+  ]
+}

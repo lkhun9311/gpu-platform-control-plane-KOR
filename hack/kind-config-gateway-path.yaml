@@ -1,0 +1,38 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: platform
+# One node, unlike hack/kind-config.yaml's three.
+#
+# This cluster exists to measure latency through the gateway, and on a multi-node cluster the gateway Pod and
+# the backend Pod land wherever the scheduler puts them, so a run would silently be same-node or cross-node
+# and the difference would be read as gateway overhead.
+# A single node removes that variable; nothing in this path needs more than one node.
+nodes:
+  - role: control-plane
+    # NodePort traffic is published to the host so the harness can drive load over a real TCP path.
+    #
+    # kubectl port-forward is the documented access method for this gateway (config/gateway/service.yaml), but it
+    # tunnels every connection through the apiserver and the kubelet, which adds its own latency and multiplexes
+    # concurrent connections onto one stream: exactly the two properties this run is trying to measure.
+    # Publishing NodePorts keeps the measured path to kube-proxy plus the Pod.
+    extraPortMappings:
+      # 30080 is the gateway's user-traffic port (:8080).
+      - containerPort: 30080
+        hostPort: 30080
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+      # 30081 is the fast stub backend, reached directly, which is the no-gateway baseline.
+      - containerPort: 30081
+        hostPort: 30081
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+      # 30082 is the gateway's observability port (:8081), needed to read /metrics for the cardinality check.
+      - containerPort: 30082
+        hostPort: 30082
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+      # 30083 is the slow stub backend, whose /stats is how the in-flight concurrency measurement is read back.
+      - containerPort: 30083
+        hostPort: 30083
+        listenAddress: "127.0.0.1"
+        protocol: TCP

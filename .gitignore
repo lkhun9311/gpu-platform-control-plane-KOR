@@ -1,17 +1,67 @@
 # Local AI tool workspace - do not commit
 superpowers/
-.superpowers/
-AGENTS.md
-docs/
+
+# docs/ is published selectively: the design documents and the specs are the substance a reader needs,
+# while the implementation plans and the interview notes are working material and stay local.
+docs/*
+!docs/0[0-7]*.md
+!docs/09*.md
+!docs/superpowers/
+docs/superpowers/*
+!docs/superpowers/specs/
 .claude/
 .cursor/
 .chatgpt/
 .codex/
 .githooks/
 
-# Markdown: only the root README is committed (other .md kept locally under superpowers/)
+# Markdown is committed selectively. The design documents and specs are published because a reader who
+# clones this repository should be able to see the reasoning, not just the code; the implementation plans
+# and the interview notes are working material and stay local.
 *.md
 !/README.md
+!/infra/**/README.md
+!/hack/m6-kind-e2e.md
+!/hack/m5b-gateway-path.md
+!/hack/chaos-fr004-degraded-node.md
+!/hack/observability-kind.md
+!/hack/chaos-fr002-serving-pod-killed.md
+!/hack/chaos-fr002b-backend-fallback.md
+!/hack/argocd-kind.md
+!/hack/kueue-deployment-integration.md
+!/hack/kserve-queue-label-propagation.md
+!/hack/m5d-writeup.md
+!/hack/queuelab-refusal-register.md
+!/hack/m5c-sharing-sizing.md
+!/hack/m5b-vllm-sizing.md
+!/hack/queue-drain-under-load.md
+!/hack/alert-firing-verification.md
+!/hack/queuelab-reclaim-first-result.md
+!/hack/quota-bypass-guard.md
+!/hack/queue-load-under-concurrency.md
+!/hack/queuelab-grace-boundary.md
+!/hack/grace-holds-the-device.md
+!/hack/tenant-writable-fields.md
+!/hack/gpu-session-preregistration.md
+!/docs/0[0-7]*.md
+!/docs/09*.md
+!/docs/10_WHAT_I_GOT_WRONG.md
+!/docs/superpowers/specs/*.md
+
+# Terraform local state, cache and secrets (state lives in the remote backend, not here)
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
 
 # JetBrains / IntelliJ
 .idea/
@@ -51,3 +101,25 @@ Thumbs.db
 
 # Claude Code personal overrides
 .claude/settings.local.json
+
+# M6 kind E2E run artifact (curated evidence lives in hack/m6-kind-e2e.md)
+
+# stray local build of cmd/benchharness, anchored so it cannot also swallow new files under cmd/benchharness/
+/benchharness
+
+# stray local build of cmd/queuelabrun, anchored so it cannot also swallow new files under cmd/queuelabrun/
+/queuelabrun
+
+# Raw chaos-run records were excluded here, and queuelab inherited the rule without anyone asking whether it
+# fit. It does not. This lab's thesis is that the record outlives the terminal and that a conclusion nobody
+# can re-derive is prose -- and its records sat outside version control while committed documents told
+# readers to run `queuelabrun -compare 'ex/e14-*.json'` against files that do not ship.
+#
+# It cost what you would expect. A pre-registration fixed the GPU session's baseline at a figure assembled at
+# a shell from records that were then deleted, and the number appears in no record that exists. Git is the
+# notary a pre-registration needs; declining it left half the evidence with an mtime and nothing else.
+#
+# So run records are committed and the rest of ex/ -- scratch output, ad-hoc blobs -- is not. The whole
+# directory is 248 KB.
+ex/*
+!ex/*.json

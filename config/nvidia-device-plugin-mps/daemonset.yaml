@@ -1,0 +1,140 @@
+# The MPS arm: a control daemon beside the device plugin, both on the sharing node.
+#
+# WHAT IS VERIFIED AND WHAT IS NOT, because that distinction is the whole value of this file.
+#
+# Verified by reading the PINNED plugin image (nvcr.io/nvidia/k8s-device-plugin:v0.16.2@sha256:ed39e22c...):
+# it ships /usr/bin/mps-control-daemon, it drives nvidia-cuda-mps-control, it reads CUDA_MPS_PIPE_DIRECTORY
+# and CUDA_MPS_LOG_DIRECTORY, it roots its state under /mps, and it issues
+# set_default_device_pinned_mem_limit -- so MPS is a capability of this exact build rather than of some
+# other release, and each client is memory-capped rather than merely time-shared.
+#
+# NOT verified: that this arrangement of mounts and privileges is sufficient on the AL2023 NVIDIA AMI. No
+# card was available to run it. hack/m5c-matrix.sh therefore refuses the MPS arm unless the node actually
+# advertises the shared devices, exactly as it does for time-slicing -- a plugin that ignores its config
+# advertises one device per card and would turn a two-engine arm into a one-engine arm with half the memory,
+# silently. The refusal is the substitute for the verification this could not do.
+#
+# It selects the SAME node label as the time-slicing overlay, and that is deliberate: MPS and time-slicing
+# are two arms of one matrix on one node, run at different times. They must never be applied together --
+# two plugins registering nvidia.com/gpu against one kubelet socket -- and the matrix script deletes one
+# before applying the other rather than trusting an operator to remember.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-mps-control-daemon
+  namespace: system
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: nvidia-device-plugin-mps
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gpu-platform-control-plane
+      app.kubernetes.io/component: nvidia-mps-control-daemon
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gpu-platform-control-plane
+        app.kubernetes.io/component: nvidia-mps-control-daemon
+    spec:
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      nodeSelector:
+        platform.lkhun9311.github.io/gpu-sharing: "true"
+      priorityClassName: system-node-critical
+      # The control daemon and every client must share one IPC namespace, or the clients cannot reach the
+      # daemon's pipe and each falls back to running without MPS -- which looks like a working arm.
+      hostIPC: true
+      containers:
+        - name: mps-control-daemon
+          image: nvcr.io/nvidia/k8s-device-plugin:v0.16.2@sha256:ed39e22c8b71343fb996737741a99da88ce6c75dd83b5c520e0b3d8e8a884c47
+          command: ["mps-control-daemon"]
+          env:
+            - name: CONFIG_FILE
+              value: /etc/nvidia-device-plugin/config.yaml
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: mps-root
+              mountPath: /mps
+            - name: sharing-config
+              mountPath: /etc/nvidia-device-plugin
+      volumes:
+        - name: mps-root
+          hostPath:
+            path: /run/nvidia/mps
+            type: DirectoryOrCreate
+        - name: sharing-config
+          configMap:
+            name: nvidia-device-plugin-sharing-mps
+---
+# The device plugin for the MPS arm. Same binary and same digest as the exclusive and time-slicing arms:
+# sharing is a configuration of this plugin, not a different one, and pinning all three to one digest keeps
+# the matrix's arms from differing in the plugin as well as in the mode.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin-mps
+  namespace: system
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: nvidia-device-plugin-mps
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gpu-platform-control-plane
+      app.kubernetes.io/component: nvidia-device-plugin-mps-plugin
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gpu-platform-control-plane
+        app.kubernetes.io/component: nvidia-device-plugin-mps-plugin
+    spec:
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      nodeSelector:
+        platform.lkhun9311.github.io/gpu-sharing: "true"
+      priorityClassName: system-node-critical
+      hostIPC: true
+      containers:
+        - name: nvidia-device-plugin
+          image: nvcr.io/nvidia/k8s-device-plugin:v0.16.2@sha256:ed39e22c8b71343fb996737741a99da88ce6c75dd83b5c520e0b3d8e8a884c47
+          env:
+            - name: FAIL_ON_INIT_ERROR
+              value: "true"
+            # Without this the plugin ignores the mounted file and advertises one device per card, which is
+            # the EXCLUSIVE behaviour under a manifest that says MPS. The arm would then differ in name only.
+            - name: CONFIG_FILE
+              value: /etc/nvidia-device-plugin/config.yaml
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+            - name: mps-root
+              mountPath: /mps
+            - name: sharing-config
+              mountPath: /etc/nvidia-device-plugin
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+        - name: mps-root
+          hostPath:
+            path: /run/nvidia/mps
+            type: DirectoryOrCreate
+        - name: sharing-config
+          configMap:
+            name: nvidia-device-plugin-sharing-mps

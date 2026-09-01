@@ -1,11 +1,18 @@
-# More info: https://docs.docker.com/engine/reference/builder/#dockerignore-file
-# Ignore everything by default and re-include only needed files
-**
+# Ignore everything at the repository root by default, then re-include what an image build needs.
+#
+# The exclusion uses a single star, not two, on purpose.
+#
+# A ** pattern prunes whole directories (like cmd/) before their files are evaluated, so a later re-include of the files inside them never takes effect and the build context ends up without any source.
+*
 
-# Re-include Go source files (but not *_test.go)
-!**/*.go
-**/*_test.go
-
-# Re-include Go module files
+# Keep the Go module files so the dependency layer can be cached.
 !go.mod
 !go.sum
+
+# Keep the Go source trees the binaries build from.
+!cmd
+!api
+!internal
+
+# Drop test files from the kept trees, since images never run them.
+**/*_test.go

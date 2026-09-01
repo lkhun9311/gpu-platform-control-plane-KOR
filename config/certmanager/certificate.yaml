@@ -1,0 +1,26 @@
+# A self-signed issuer is enough here: the only client that ever dials this Service is the apiserver, and the
+# CA bundle it trusts is injected from this same Certificate. Nothing outside the cluster verifies the chain.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: gpu-platform-control-plane-selfsigned-issuer
+  namespace: gpu-platform-control-plane-system
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: gpu-platform-control-plane-serving-cert
+  namespace: gpu-platform-control-plane-system
+spec:
+  # The DNS names must match the Service the ValidatingWebhookConfiguration points at, including the
+  # namePrefix kustomize adds, or the apiserver's TLS handshake fails with a name mismatch and every write is
+  # refused by a failurePolicy of Fail.
+  dnsNames:
+    - gpu-platform-control-plane-webhook-service.gpu-platform-control-plane-system.svc
+    - gpu-platform-control-plane-webhook-service.gpu-platform-control-plane-system.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: gpu-platform-control-plane-selfsigned-issuer
+  secretName: gpu-platform-control-plane-webhook-server-cert

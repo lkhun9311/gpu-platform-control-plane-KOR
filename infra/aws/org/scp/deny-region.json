@@ -1,0 +1,53 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyOutsideApprovedRegions",
+      "Effect": "Deny",
+      "NotAction": [
+        "a4b:*",
+        "account:*",
+        "aws-marketplace:*",
+        "aws-portal:*",
+        "billing:*",
+        "budgets:*",
+        "ce:*",
+        "cloudfront:*",
+        "consolidatedbilling:*",
+        "cur:*",
+        "freetier:*",
+        "globalaccelerator:*",
+        "health:*",
+        "iam:*",
+        "importexport:*",
+        "invoicing:*",
+        "kms:DescribeKey",
+        "notifications:*",
+        "notifications-contacts:*",
+        "organizations:*",
+        "payments:*",
+        "pricing:*",
+        "route53:*",
+        "route53domains:*",
+        "s3:GetAccountPublicAccessBlock",
+        "s3:ListAllMyBuckets",
+        "s3:PutAccountPublicAccessBlock",
+        "shield:*",
+        "support:*",
+        "sts:*",
+        "tax:*",
+        "trustedadvisor:*",
+        "waf:*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:RequestedRegion": [
+            "ap-northeast-2",
+            "us-east-1"
+          ]
+        }
+      }
+    }
+  ]
+}

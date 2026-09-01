@@ -1,0 +1,10 @@
+{
+  "experiment": "how long a device-holder keeps its device after being told to stop",
+  "workload": "sleep as PID 1, which ignores SIGTERM without a handler",
+  "model": "held = min(remaining service, grace period)",
+  "remainingServiceSec": 45,
+  "deletedAfterSec": 2,
+  "rows": [{"graceSec":10,"remainingSec":43,"heldMs":11201,"predictedSec":10},{"graceSec":20,"remainingSec":43,"heldMs":20667,"predictedSec":20},{"graceSec":30,"remainingSec":43,"heldMs":31297,"predictedSec":30},{"graceSec":60,"remainingSec":43,"heldMs":42685,"predictedSec":43},{"graceSec":120,"remainingSec":43,"heldMs":43347,"predictedSec":43}],
+  "measures": "wall time from the delete call returning to the Pod object being gone; includes an API round trip at each end, so it is an upper bound on the container's own shutdown",
+  "whyItMatters": "grace is set by the tenant being preempted, so it bounds how long a borrower keeps a device its owner has already reclaimed. internal/webhook/v1 caps it at 120s for device holders."
+}

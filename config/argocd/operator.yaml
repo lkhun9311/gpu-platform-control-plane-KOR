@@ -1,0 +1,34 @@
+# The operator manager and RBAC, sourced from the CRD-free operator overlay (config/operator).
+#
+# The crds Application already owns the CustomResourceDefinitions via ServerSideApply.
+# Sourcing config/default here would render those same CRDs a second time and cause a SharedResourceWarning.
+# config/operator mirrors config/default's namespace and namePrefix, but drops the ../crd resource.
+#
+# The image digest comes from Git, so Argo CD deploys whatever config/operator pins.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gpu-platform-operator
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/lkhun9311/gpu-platform-control-plane.git
+    targetRevision: main
+    # config/operator-webhook, not config/operator: the guards are layered ABOVE the namePrefix rather
+    # than inside it. See that overlay for what putting them inside does to the Service name, and to every
+    # governed write in the cluster once the TLS name stops matching.
+    path: config/operator-webhook
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gpu-platform-control-plane-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

@@ -1,0 +1,370 @@
+{
+  "objects": 600,
+  "concurrency": 32,
+  "createMs": 244.212,
+  "createsPerSec": 2456.8817257137243,
+  "drainMs": 11569.928,
+  "reconciles": 1857,
+  "reconcilesPerSec": 160.5022952606101,
+  "peakQueueDepth": 600,
+  "requestedSampleIntervalMs": 200,
+  "achievedSampleIntervalMs": 202.93103448275863,
+  "samples": [
+    {
+      "atMs": 2,
+      "depth": 0,
+      "adds": 4182,
+      "reconciles": 4182
+    },
+    {
+      "atMs": 207,
+      "depth": 479,
+      "adds": 4670,
+      "reconciles": 4190
+    },
+    {
+      "atMs": 410,
+      "depth": 599,
+      "adds": 4824,
+      "reconciles": 4224
+    },
+    {
+      "atMs": 613,
+      "depth": 599,
+      "adds": 4862,
+      "reconciles": 4262
+    },
+    {
+      "atMs": 817,
+      "depth": 599,
+      "adds": 4902,
+      "reconciles": 4302
+    },
+    {
+      "atMs": 1020,
+      "depth": 599,
+      "adds": 4939,
+      "reconciles": 4339
+    },
+    {
+      "atMs": 1224,
+      "depth": 599,
+      "adds": 4976,
+      "reconciles": 4376
+    },
+    {
+      "atMs": 1427,
+      "depth": 599,
+      "adds": 5016,
+      "reconciles": 4416
+    },
+    {
+      "atMs": 1630,
+      "depth": 599,
+      "adds": 5054,
+      "reconciles": 4454
+    },
+    {
+      "atMs": 1834,
+      "depth": 599,
+      "adds": 5094,
+      "reconciles": 4494
+    },
+    {
+      "atMs": 2036,
+      "depth": 599,
+      "adds": 5129,
+      "reconciles": 4529
+    },
+    {
+      "atMs": 2239,
+      "depth": 599,
+      "adds": 5168,
+      "reconciles": 4568
+    },
+    {
+      "atMs": 2442,
+      "depth": 599,
+      "adds": 5205,
+      "reconciles": 4605
+    },
+    {
+      "atMs": 2644,
+      "depth": 599,
+      "adds": 5245,
+      "reconciles": 4645
+    },
+    {
+      "atMs": 2847,
+      "depth": 599,
+      "adds": 5287,
+      "reconciles": 4687
+    },
+    {
+      "atMs": 3049,
+      "depth": 599,
+      "adds": 5325,
+      "reconciles": 4725
+    },
+    {
+      "atMs": 3252,
+      "depth": 599,
+      "adds": 5366,
+      "reconciles": 4766
+    },
+    {
+      "atMs": 3454,
+      "depth": 599,
+      "adds": 5395,
+      "reconciles": 4795
+    },
+    {
+      "atMs": 3657,
+      "depth": 600,
+      "adds": 5407,
+      "reconciles": 4806
+    },
+    {
+      "atMs": 3860,
+      "depth": 600,
+      "adds": 5419,
+      "reconciles": 4818
+    },
+    {
+      "atMs": 4062,
+      "depth": 600,
+      "adds": 5432,
+      "reconciles": 4831
+    },
+    {
+      "atMs": 4265,
+      "depth": 600,
+      "adds": 5447,
+      "reconciles": 4846
+    },
+    {
+      "atMs": 4469,
+      "depth": 599,
+      "adds": 5464,
+      "reconciles": 4864
+    },
+    {
+      "atMs": 4672,
+      "depth": 599,
+      "adds": 5477,
+      "reconciles": 4877
+    },
+    {
+      "atMs": 4875,
+      "depth": 598,
+      "adds": 5486,
+      "reconciles": 4887
+    },
+    {
+      "atMs": 5078,
+      "depth": 597,
+      "adds": 5503,
+      "reconciles": 4905
+    },
+    {
+      "atMs": 5281,
+      "depth": 596,
+      "adds": 5520,
+      "reconciles": 4923
+    },
+    {
+      "atMs": 5483,
+      "depth": 596,
+      "adds": 5538,
+      "reconciles": 4941
+    },
+    {
+      "atMs": 5686,
+      "depth": 596,
+      "adds": 5555,
+      "reconciles": 4958
+    },
+    {
+      "atMs": 5889,
+      "depth": 595,
+      "adds": 5572,
+      "reconciles": 4976
+    },
+    {
+      "atMs": 6092,
+      "depth": 595,
+      "adds": 5590,
+      "reconciles": 4994
+    },
+    {
+      "atMs": 6294,
+      "depth": 596,
+      "adds": 5609,
+      "reconciles": 5012
+    },
+    {
+      "atMs": 6497,
+      "depth": 595,
+      "adds": 5626,
+      "reconciles": 5030
+    },
+    {
+      "atMs": 6700,
+      "depth": 595,
+      "adds": 5645,
+      "reconciles": 5049
+    },
+    {
+      "atMs": 6902,
+      "depth": 594,
+      "adds": 5661,
+      "reconciles": 5066
+    },
+    {
+      "atMs": 7106,
+      "depth": 594,
+      "adds": 5677,
+      "reconciles": 5082
+    },
+    {
+      "atMs": 7309,
+      "depth": 595,
+      "adds": 5694,
+      "reconciles": 5098
+    },
+    {
+      "atMs": 7512,
+      "depth": 594,
+      "adds": 5711,
+      "reconciles": 5116
+    },
+    {
+      "atMs": 7715,
+      "depth": 594,
+      "adds": 5728,
+      "reconciles": 5133
+    },
+    {
+      "atMs": 7917,
+      "depth": 594,
+      "adds": 5745,
+      "reconciles": 5150
+    },
+    {
+      "atMs": 8120,
+      "depth": 594,
+      "adds": 5762,
+      "reconciles": 5167
+    },
+    {
+      "atMs": 8323,
+      "depth": 592,
+      "adds": 5778,
+      "reconciles": 5185
+    },
+    {
+      "atMs": 8526,
+      "depth": 592,
+      "adds": 5795,
+      "reconciles": 5202
+    },
+    {
+      "atMs": 8729,
+      "depth": 592,
+      "adds": 5812,
+      "reconciles": 5219
+    },
+    {
+      "atMs": 8932,
+      "depth": 593,
+      "adds": 5830,
+      "reconciles": 5236
+    },
+    {
+      "atMs": 9135,
+      "depth": 591,
+      "adds": 5845,
+      "reconciles": 5253
+    },
+    {
+      "atMs": 9338,
+      "depth": 591,
+      "adds": 5862,
+      "reconciles": 5270
+    },
+    {
+      "atMs": 9541,
+      "depth": 592,
+      "adds": 5879,
+      "reconciles": 5286
+    },
+    {
+      "atMs": 9744,
+      "depth": 592,
+      "adds": 5895,
+      "reconciles": 5302
+    },
+    {
+      "atMs": 9947,
+      "depth": 592,
+      "adds": 5912,
+      "reconciles": 5319
+    },
+    {
+      "atMs": 10150,
+      "depth": 591,
+      "adds": 5928,
+      "reconciles": 5336
+    },
+    {
+      "atMs": 10353,
+      "depth": 590,
+      "adds": 5944,
+      "reconciles": 5353
+    },
+    {
+      "atMs": 10556,
+      "depth": 590,
+      "adds": 5961,
+      "reconciles": 5370
+    },
+    {
+      "atMs": 10759,
+      "depth": 591,
+      "adds": 5978,
+      "reconciles": 5386
+    },
+    {
+      "atMs": 10962,
+      "depth": 0,
+      "adds": 5989,
+      "reconciles": 5989
+    },
+    {
+      "atMs": 11165,
+      "depth": 0,
+      "adds": 5998,
+      "reconciles": 5998
+    },
+    {
+      "atMs": 11368,
+      "depth": 0,
+      "adds": 6009,
+      "reconciles": 6009
+    },
+    {
+      "atMs": 11571,
+      "depth": 0,
+      "adds": 6019,
+      "reconciles": 6019
+    },
+    {
+      "atMs": 11773,
+      "depth": 0,
+      "adds": 6029,
+      "reconciles": 6029
+    }
+  ],
+  "verdict": "the queue backed up to 600 items, so the operator was the bottleneck",
+  "caveat": "peak depth is a lower bound at a 203ms achieved sampling interval; a spike opening and closing between two reads is invisible"
+}

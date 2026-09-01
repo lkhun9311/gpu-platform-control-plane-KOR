@@ -1,0 +1,8 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: gpu-platform-control-plane-validating-webhook-configuration
+  annotations:
+    # cert-manager copies this Certificate's CA into every webhook's clientConfig.caBundle, so the apiserver
+    # trusts the endpoint it dials. A hard-coded bundle would go stale on the first renewal.
+    cert-manager.io/inject-ca-from: gpu-platform-control-plane-system/gpu-platform-control-plane-serving-cert

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: gpu-platform-control-plane-webhook-service
+  namespace: gpu-platform-control-plane-system
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: webhook
+spec:
+  # 9443 is the manager's default webhook port; the apiserver always dials 443.
+  ports:
+    - port: 443
+      protocol: TCP
+      targetPort: 9443
+  selector:
+    control-plane: controller-manager
+    app.kubernetes.io/name: gpu-platform-control-plane

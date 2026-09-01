@@ -1,0 +1,142 @@
+# The device-work observer this lab's GPU claims are made from.
+#
+# Nothing in queuelab can tell a DCGM exporter from a text file served over HTTP: the payload is a format
+# anyone can emit and the endpoint is a URL anyone can serve. The observation the runner records says so --
+# its source is DECLARED, not verified -- and the trust therefore comes from THIS FILE: what is deployed,
+# where it runs, and who can reach it. That is why the manifest is committed rather than left to a helm
+# incantation in somebody's shell history.
+#
+# Three properties are load-bearing for the verdict in internal/queuelab/device.go, and each is a line here:
+#
+#   1. It runs on the GPU nodes, as a DaemonSet, reading the driver through the host's NVIDIA stack. An
+#      exporter scraping from somewhere else would be reporting a card it cannot see.
+#   2. It mounts the kubelet's pod-resources socket, which is where the pod/namespace/container labels on
+#      each sample come from. Without it DCGM still reports utilisation and the samples carry no Pod at all,
+#      so nothing can be attributed and every run reads device-not-observed.
+#   3. The workload cannot write to it. The tenant's container has no path to this DaemonSet, which is the
+#      whole reason an observation from here counts for anything and a Pod's own report does not.
+#
+# It is NOT part of config/default or config/operator. A cluster with no GPU has nothing for it to read, and
+# a DaemonSet crash-looping on every node is a worse default than an absent observer -- the run simply
+# records that nothing watched the card, which is true.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dcgm-exporter
+  namespace: system
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: dcgm-exporter
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gpu-platform-control-plane
+      app.kubernetes.io/component: dcgm-exporter
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gpu-platform-control-plane
+        app.kubernetes.io/component: dcgm-exporter
+    spec:
+      # Only where there is a card to read. The GPU node group carries this taint (infra/aws/cluster/eks.tf),
+      # and a node without it has nothing this can observe.
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      # Selected on the label the GPU node group sets for itself (infra/aws/cluster/eks.tf), NOT on
+      # nvidia.com/gpu.present.
+      #
+      # That one is produced by NVIDIA's GPU Feature Discovery, which this repository does not deploy -- so
+      # selecting on it would leave the DaemonSet unschedulable everywhere and the observer silently absent,
+      # which is the failure a run reports as "no device observer ran" without ever saying why. Depending on
+      # a label this repository sets keeps the dependency visible in a file it owns.
+      nodeSelector:
+        platform.lkhun9311.github.io/gpu: "true"
+      containers:
+        - name: exporter
+          # A version tag, and it should be a digest. This is written down rather than quietly left because
+          # the observation records an identity the operator supplies with -device-observer, and a mutable
+          # tag means that recorded identity can name something other than what ran -- the same defect the
+          # canary key's operator digest exists to close.
+          #
+          # It was a tag here, on the stated grounds that pinning one required pulling the image onto a GPU
+          # node. That was wrong: a manifest digest is what the registry ANSWERS WITH, so a HEAD against
+          # nvcr.io resolves it from any machine with a network, and no GPU is involved. Pass this digest to
+          # -device-observer; the observation's identity is declared and unverifiable, so the least a
+          # declaration can do is name something immutable.
+          image: nvcr.io/nvidia/k8s/dcgm-exporter:3.3.9-3.6.1-ubuntu22.04@sha256:3d4e0dfa5fc4d7d12689d29fc6b56cd6c610750e8d187a393882e341fbba6c12
+          args:
+            # The one series the verdict reads. Collecting the default set would work too; naming it keeps
+            # the manifest and internal/queuelab/dcgm.go describing the same thing.
+            - "-f"
+            - "/etc/dcgm-exporter/queuelab-metrics.csv"
+            # Collect once a second. The default is 30000 ms, and dcgm-exporter serves a CACHED snapshot
+            # between collections -- so at the default a scrape every 500 ms buys sixty copies of one
+            # reading, an eight-second preflight can miss every collection entirely, and the pod-to-device
+            # mapping inside a served snapshot can be half a minute stale against a stale-label margin of
+            # four seconds. Every one of those reads as a device fault.
+            #
+            # It must stay under internal/queuelab/device.go's maxObserverGap for the same reason the
+            # scrape interval must: a collection slower than the gap a run may blink through cannot cover
+            # the interval it is asked about.
+            - "-c"
+            - "1000"
+          env:
+            # The exporter reads the kubelet's pod-resources socket to map devices to Pods, and that mapping
+            # is per NODE -- it has to know which node it is on. NVIDIA's own reference DaemonSet sets this
+            # from the downward API for exactly that reason, and this manifest omitted it: a review predicted
+            # the exporter would then emit empty Pod attribution on a real cluster, which is
+            # indistinguishable downstream from a card nobody used.
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # WITHOUT THIS THE EXPORTER EMITS NO POD LABELS AT ALL, and every gate downstream reads that as
+            # an idle or absent card.
+            #
+            # The kubernetes mapping defaults to OFF. Mounting the kubelet's pod-resources socket is
+            # necessary and not sufficient -- this is what makes the exporter open it. ParseDCGMUtilisation
+            # skips every sample whose pod label is empty, so a fully healthy exporter reporting 100%
+            # utilisation would produce zero attributable samples and the preflight would say the observer
+            # could not attribute, sending an operator after the driver.
+            #
+            # The header of this file used to claim the socket mount was where the labels came from. It is
+            # where they are READ from; this is what turns them on.
+            - name: DCGM_EXPORTER_KUBERNETES
+              value: "true"
+          ports:
+            - name: metrics
+              containerPort: 9400
+          securityContext:
+            # Reading the driver needs it; nothing else here does.
+            privileged: true
+          volumeMounts:
+            - name: pod-resources
+              mountPath: /var/lib/kubelet/pod-resources
+              readOnly: true
+            - name: metrics-config
+              mountPath: /etc/dcgm-exporter/queuelab-metrics.csv
+              subPath: queuelab-metrics.csv
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: pod-resources
+          hostPath:
+            path: /var/lib/kubelet/pod-resources
+        - name: metrics-config
+          configMap:
+            name: dcgm-exporter-metrics

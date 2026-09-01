@@ -1,0 +1,26 @@
+# The device-plugin profile carries the NVIDIA plugin or the simulator DaemonSet.
+#
+# It is disabled here and is mutually exclusive with the real GPU node group.
+#
+# The M5-b work flips this on in the same PR as the gpu.yml scale-up, and the manifests it points at land then.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gpu-platform-device-plugin
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/lkhun9311/gpu-platform-control-plane.git
+    targetRevision: main
+    path: config/device-plugin
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gpu-platform-control-plane-system
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true

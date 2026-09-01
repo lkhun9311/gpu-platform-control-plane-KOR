@@ -1,0 +1,27 @@
+# Where the captured vLLM fixtures came from
+
+`vllm_sse_stream.txt` here, and `internal/gateway/testdata/vllm_metrics_golden.txt`, are bytes a real
+vLLM server wrote. Neither was typed from the documentation.
+
+| | |
+|---|---|
+| image | `vllm/vllm-openai-cpu@sha256:0314b8a7594a3fc54e8a0c3ca1ba0c9257302bfb546abfb49a2d6107d2d0767f` |
+| tag | `vllm/vllm-openai-cpu:v0.27.1-x86_64` |
+| versions | vllm 0.27.1, torch 2.13.0+cpu, python 3.12.13 |
+| model | `Qwen/Qwen2.5-0.5B-Instruct`, `--dtype bfloat16 --max-model-len 1024 --max-num-seqs 16` |
+| captured | 2026-08-23, x86_64 CPU host |
+| request | `POST /v1/chat/completions`, `stream: true`, `max_tokens: 6` |
+
+`vllm_sse_stream.txt` is the response body verbatim, framing included, so the file is what the wire
+carried rather than a summary of it. Everything a test needs to know about it is therefore checkable
+against the file: eight `data:` frames, of which the first carries `"delta":{"role":"assistant",
+"content":""}` and the last is `[DONE]`, leaving six token frames for `max_tokens: 6`.
+
+That leading role frame is why this file exists. The hand-written streams elsewhere in
+`httpsender_test.go` start at the first token, so no test could tell whether the sender stamps
+time-to-first-token on the first frame or on the first frame that actually carries text -- a
+distinction worth a whole prefill on a loaded server, and the one number Arm C is judged on.
+
+The CPU build is not the GPU build. Framing, field names and chunk structure are the server's and
+carry over; timings are this host's and do not. Recapture on the paid GPU run before quoting any
+duration from a fixture.
