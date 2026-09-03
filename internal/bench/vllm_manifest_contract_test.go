@@ -638,3 +638,268 @@ func TestCITrustBoundariesSurviveEditing(t *testing.T) {
 		}
 	}
 }
+
+// TestTheDeadlineIsSizedFromTheRepetitionCountRatherThanALiteral pins the two call sites together.
+//
+// hack/m5b-gpu-session.sh re-arms the deadline for the run it just measured, and to do that it needs the
+// number of replays. It carried the literal 16 -- four arms times the default four repetitions -- which is
+// correct only while that default is four and nobody sets REPS. At REPS=2 it asked for twice the deadline
+// the run needed; raised, it would have armed a deadline too short for the run it was sizing, and a session
+// cut by its own backstop is the failure the backstop exists to prevent.
+//
+// This is the same defect class as the Region repeated across five files, the quota that had to agree with
+// the offerings, and the Go version in the Makefile: a value carried by hand across two call sites with
+// nothing that fails when they disagree. It has now appeared often enough here to be worth a test each time
+// a new instance is closed.
+func TestTheDeadlineIsSizedFromTheRepetitionCountRatherThanALiteral(t *testing.T) {
+	session := readRepoFile(t, "hack/m5b-gpu-session.sh")
+
+	// The arms script computes `4 * REPS`. The session script must reach the same product, and the only way
+	// it can be right for every REPS is by reading REPS rather than a number.
+	if !strings.Contains(session, "arms_reps=") {
+		t.Fatal("hack/m5b-gpu-session.sh does not derive a repetition count; the deadline it arms cannot track REPS")
+	}
+	if !strings.Contains(session, "replays = 4 * $arms_reps") {
+		t.Error("hack/m5b-gpu-session.sh does not size the deadline as four arms times the repetition count")
+	}
+	// Anchored to the arithmetic line so a comment mentioning 16 does not satisfy or trip this.
+	if regexp.MustCompile(`replays?\s*=\s*16\b|\b16 \* \(replay`).MatchString(session) {
+		t.Error("hack/m5b-gpu-session.sh still hardcodes 16 replays; set REPS and the deadline stops matching the run")
+	}
+
+	// The completions target is the other half of the replay length, and it was a literal 500 in both
+	// scripts. Lowering it in the harness to buy a shorter run -- the cheaper of the two ways to shorten a
+	// session, and the one a review recommended over cutting repetitions -- would otherwise leave the
+	// session sizing its deadline for the run it used to be.
+	if !strings.Contains(session, "arms_target=") {
+		t.Fatal("hack/m5b-gpu-session.sh does not derive the per-replay completion target; the deadline it arms cannot track a change to it")
+	}
+	if regexp.MustCompile(`replay\s*=\s*500\s*/`).MatchString(session) {
+		t.Error("hack/m5b-gpu-session.sh still hardcodes 500 completions; change it in the harness and the deadline stops matching the run")
+	}
+}
+
+// TestTheDeadlineCeilingAdmitsTheShippedDesign keeps a cost guard from refusing the thing it guards.
+//
+// MAX_TTL_MINUTES caps how long a session may buy. At four repetitions and the rate an A10G is expected to
+// give, the design asks for 358 minutes -- and the ceiling was 360, so a card measuring a few percent slow
+// would have been refused at the re-arming step with the engine already warm and paid for. That is the same
+// defect as hack/m5c-matrix.sh budgeting 456 minutes against its own 240-minute deadline: a guard that
+// cannot pass the configuration the repository ships.
+func TestTheDeadlineCeilingAdmitsTheShippedDesign(t *testing.T) {
+	session := readRepoFile(t, "hack/m5b-gpu-session.sh")
+	m := regexp.MustCompile(`max_min="\$\{MAX_TTL_MINUTES:-(\d+)\}"`).FindStringSubmatch(session)
+	if m == nil {
+		t.Fatal("hack/m5b-gpu-session.sh has no MAX_TTL_MINUTES default in the expected form")
+	}
+	ceiling, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatalf("MAX_TTL_MINUTES default %q is not a number", m[1])
+	}
+	// Checked at a rate BELOW the expectation, not at it.
+	//
+	// The first version of this test used 1.142/s, the estimate itself, and passed against the old ceiling
+	// of 360 -- the design asks for 358 there, so two minutes of slack was enough to satisfy it. That made
+	// the test agree with the defect it was written for: the estimate is an estimate, the rate is not known
+	// until the probe runs on the actual card, and a ceiling with two minutes of room is a ceiling that
+	// refuses as soon as the card is a few percent slower than guessed.
+	//
+	// So the requirement is that the ceiling still admits the design at 1.0/s, about twelve percent below
+	// the estimate. Below that the card is slow enough that stopping to reconsider is the right answer,
+	// which is what the ceiling is for.
+	const slowRate = 1.0
+	replay := 500.0 / (slowRate / 2)
+	armsMin := int((16*(replay+180))/60) + 1
+	needed := armsMin*12/10 + 20
+	if ceiling < needed {
+		t.Errorf("MAX_TTL_MINUTES defaults to %d but the shipped design needs %d at %.2f/s, %d%% below the expected rate; a card that measures a little slow would be refused after it is warm and paid for",
+			ceiling, needed, slowRate, 12)
+	}
+}
+
+// TestTheDigestIsInTheTransformNotTheDeployment keeps two consumers of one manifest from fighting.
+//
+// config/manager/manager.yaml and config/gateway/deployment.yaml are read by two paths that need different
+// images. `make deploy` runs `kustomize edit set image controller=${IMG}`, so the kind path builds locally,
+// side-loads, and overrides the pin; Argo CD builds the same directories untouched and must get the
+// published digest.
+//
+// Writing the ECR reference into the Deployment removed the name the transform matches on. The override
+// silently stopped applying, and every e2e run failed on a Pod that could not pull from a registry kind has
+// no credentials for -- a change that looked like pinning an image and was actually unpinning an override.
+func TestTheDigestIsInTheTransformNotTheDeployment(t *testing.T) {
+	for _, tc := range []struct{ manifest, kustomization, placeholder, name string }{
+		{"config/manager/manager.yaml", "config/manager/kustomization.yaml", "image: controller:latest", "controller"},
+		{"config/gateway/deployment.yaml", "config/gateway/kustomization.yaml", "image: gateway:latest", "gateway"},
+	} {
+		manifest := readRepoFile(t, tc.manifest)
+		if !strings.Contains(manifest, tc.placeholder) {
+			t.Errorf("%s does not carry %q; `kustomize edit set image %s=...` has nothing to match and the local override stops applying",
+				tc.manifest, tc.placeholder, tc.name)
+		}
+		if strings.Contains(manifest, "dkr.ecr.") {
+			t.Errorf("%s names a registry directly; the digest belongs in %s where the image transform can be overridden",
+				tc.manifest, tc.kustomization)
+		}
+
+		kust := readRepoFile(t, tc.kustomization)
+		if !strings.Contains(kust, "images:") {
+			t.Errorf("%s has no image transform, so Argo CD would deploy the %s placeholder, which no registry serves",
+				tc.kustomization, tc.placeholder)
+		}
+		if !strings.Contains(kust, "digest: sha256:") {
+			t.Errorf("%s pins by tag rather than digest; a tag names whatever was pushed under it most recently",
+				tc.kustomization)
+		}
+		if !strings.Contains(kust, "name: "+tc.name) {
+			t.Errorf("%s does not transform the image named %q, so the pin would not apply to the Deployment",
+				tc.kustomization, tc.name)
+		}
+	}
+}
+
+// TestCRDApplicationsDoNotPrune keeps a rename from deleting a cluster's data.
+//
+// Deleting a CustomResourceDefinition is not a schema change: the API server removes every instance of it
+// in the same operation. An Argo Application that owns CRDs with prune enabled will therefore delete every
+// Workload, LocalQueue, ClusterQueue and ResourceFlavor -- or every InferenceDeployment, GPUQuotaPolicy and
+// NodeHealth -- when a file is renamed, a path stops rendering one of them, or the child is removed from
+// the root Application. A cascade finalizer on the Application makes that last one a two-stage version of
+// the same thing.
+//
+// selfHeal is left on deliberately. Re-creating a definition someone deleted by hand is safe; removing one
+// because a file moved is not, and that is not a decision to make unattended.
+func TestCRDApplicationsDoNotPrune(t *testing.T) {
+	for _, app := range []string{"config/argocd/crds.yaml", "config/argocd/kueue-crds.yaml"} {
+		body := readRepoFile(t, app)
+		if strings.Contains(body, "prune: true") {
+			t.Errorf("%s prunes; a renamed file would delete the CRDs and every custom resource stored under them", app)
+		}
+		if !strings.Contains(body, "prune: false") {
+			t.Errorf("%s does not state prune: false, so the default could change under it", app)
+		}
+		if strings.Contains(body, "resources-finalizer.argocd.argoproj.io") {
+			t.Errorf("%s carries a cascade finalizer; deleting the Application would take the CRDs and their instances with it", app)
+		}
+	}
+
+	// And the CRDs the operator cannot start without must be owned by config/, not by a test fixture.
+	// They lived under test/crd/kueue, which made tidying a fixture a production change.
+	kueue := readRepoFile(t, "config/argocd/kueue-crds.yaml")
+	if !strings.Contains(kueue, "path: config/kueue-crds") {
+		t.Error("the Kueue CRD Application does not source config/kueue-crds; a runtime dependency should not be served out of test/")
+	}
+}
+
+// TestTheKueueCRDDirectoryHoldsOnlyCRDs keeps a helpful file from breaking three consumers.
+//
+// config/kueue-crds is read as a directory of Kubernetes objects by three things at once: Argo CD renders
+// the path, the e2e suite runs `kubectl apply --server-side -f` on it, and envtest loads it through
+// CRDDirectoryPaths. All three take every .yaml in the directory and send it somewhere that expects an
+// object with a kind.
+//
+// A kustomization.yaml was added here to describe the set, which is exactly the sort of thing that looks
+// like documentation and is not. The four CRDs applied and then the kustomization failed with
+// "error: resource mapping", and the e2e suite went red on a change that only moved files. Prose belongs in
+// a .md, which kubectl's directory expansion ignores -- verified, along with the fact that a stray .yaml
+// does not get ignored.
+func TestTheKueueCRDDirectoryHoldsOnlyCRDs(t *testing.T) {
+	const dir = "../../config/kueue-crds"
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("cannot read %s: %v", dir, err)
+	}
+
+	seen := 0
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".json") {
+			continue // kubectl, Argo and envtest all skip these; prose is safe here
+		}
+		seen++
+		body := readRepoFile(t, "config/kueue-crds/"+name)
+		if !strings.Contains(body, "kind: CustomResourceDefinition") {
+			t.Errorf("config/kueue-crds/%s is not a CustomResourceDefinition; every consumer of this directory sends each .yaml to an API that expects one", name)
+		}
+	}
+	if seen != 4 {
+		t.Errorf("config/kueue-crds holds %d manifests, want the 4 Kueue definitions the operator's field index requires", seen)
+	}
+}
+
+// TestTheDevicePluginDoesNotNameDeviceIndices keeps a manifest from depending on which card it lands on.
+//
+// The daemonset set NVIDIA_VISIBLE_DEVICES to "0,1". The queuelab node is a g4dn.12xlarge with four cards,
+// so both indices exist there; g5.xlarge has one A10G, so index 1 does not, and the NVIDIA container
+// runtime refuses to create the container at all:
+//
+//	failed to generate CDI spec for mode "auto": failed to construct device spec generators:
+//	failed to get device handle from index: Invalid Argument
+//
+// The plugin CrashLoopBackOff'd, nvidia.com/gpu was never advertised, and the paid session refused after the
+// card had been billing for ten minutes -- with a message that said the device plugin was not working and
+// could not say why.
+//
+// A device plugin advertises whatever the node has, so an index list is the wrong shape on every node, not
+// just the ones where it happens to be short. This is the same defect as a Region or a node group name
+// written into one file: a value that depends on the machine, carried by hand.
+func TestTheDevicePluginDoesNotNameDeviceIndices(t *testing.T) {
+	body := readRepoFile(t, "config/nvidia-device-plugin/daemonset.yaml")
+
+	m := regexp.MustCompile(`(?m)^\s*-\s*name:\s*NVIDIA_VISIBLE_DEVICES\s*\n\s*value:\s*"([^"]*)"`).FindStringSubmatch(body)
+	if m == nil {
+		t.Fatal("config/nvidia-device-plugin/daemonset.yaml does not set NVIDIA_VISIBLE_DEVICES in the expected form")
+	}
+	switch m[1] {
+	case "all", "void":
+		// all: advertise whatever the node has. void: no injection at all.
+	default:
+		t.Errorf("NVIDIA_VISIBLE_DEVICES is %q; naming devices ties this manifest to one instance type, and the runtime refuses to start the container on any node that has fewer", m[1])
+	}
+}
+
+// TestGPUNodeGroupsHoldTheEngine keeps the node disk large enough for what has to land on it.
+//
+// EKS defaults to 20 GiB when disk_size is unset, and nothing set it. The first paid session reached the
+// engine rollout and the node reported DiskPressure=True: kubelet evicted the vLLM Pod twice and left the
+// third Pending, and the session refused with the card already billing.
+//
+// What must fit, measured rather than estimated -- the image pulled locally, the weights read from the
+// Hugging Face API:
+//
+//	vllm/vllm-openai      21.7 GiB by docker history, 30.8 GiB by docker system df
+//	Qwen2.5-3B weights     6.18 GiB
+//	AMI, kubelet, containerd, DCGM, device plugin   roughly 5 GiB
+//
+// The image alone exceeds the default. This pins a floor rather than the exact number, so raising it stays
+// easy and dropping it back to something that cannot hold the engine does not.
+func TestGPUNodeGroupsHoldTheEngine(t *testing.T) {
+	body := readRepoFile(t, "infra/aws/cluster/eks.tf")
+
+	// volume_size on a block_device_mappings block, NOT disk_size.
+	//
+	// The first version of this test read disk_size, and passed while the cluster kept the AMI default of
+	// 20 GiB: this module overrides disk_size to null whenever a custom launch template is used, which is
+	// the default, so terraform reported no change and the setting never reached a node. A test that reads
+	// the file rather than what the file does is exactly the shape it was written to catch.
+	//
+	// Counting the group blocks was also tried and dropped: `gpu = {` appears inside each group's labels,
+	// so the pattern matched six times and failed against a correct file.
+	const floorGiB = 60
+	if regexp.MustCompile(`(?m)^\s*disk_size\s*=`).MatchString(body) {
+		t.Error("eks.tf sets disk_size; with a custom launch template this module discards it, so the node keeps the AMI default. Use block_device_mappings.")
+	}
+	sizes := regexp.MustCompile(`(?m)^\s*volume_size\s*=\s*(\d+)`).FindAllStringSubmatch(body, -1)
+	if len(sizes) < 3 {
+		t.Fatalf("eks.tf sets volume_size %d times; each GPU group needs one or the node keeps the 20 GiB AMI default, which the vLLM image alone exceeds", len(sizes))
+	}
+	for _, m := range sizes {
+		got, err := strconv.Atoi(m[1])
+		if err != nil {
+			t.Fatalf("disk_size %q is not a number", m[1])
+		}
+		if got < floorGiB {
+			t.Errorf("a node group sets disk_size = %d; the engine image measures 21.7-30.8 GiB and the weights another 6.18, so anything under %d evicts the Pod after the card is warm", got, floorGiB)
+		}
+	}
+}

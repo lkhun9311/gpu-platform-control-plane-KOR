@@ -114,7 +114,7 @@ func installKueueCRDs() {
 	// annotation and the Workload CRD is larger than the 262,144-byte annotation limit. The three smaller
 	// definitions went in and that one was rejected, which reads as a partial install rather than a size
 	// limit unless the message is read to the end.
-	cmd := exec.Command("kubectl", "apply", "--server-side", "-f", filepath.Join("test", "crd", "kueue"))
+	cmd := exec.Command("kubectl", "apply", "--server-side", "-f", filepath.Join("config", "kueue-crds"))
 	_, err := utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to install the Kueue CRDs")
 }

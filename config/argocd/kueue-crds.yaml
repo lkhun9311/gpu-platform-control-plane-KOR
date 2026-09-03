@@ -1,0 +1,56 @@
+# The Kueue CRDs the operator indexes against, which nothing installed on a real cluster.
+#
+# At startup the manager builds a field index over kueue.x-k8s.io/v1beta1 Workloads. Without the CRD that is
+# a hard failure, and deliberately so -- an operator whose job is to hand work to a scheduler is worse
+# silently skipping the scheduler than refusing to start:
+#
+#   Failed to create controller {"controller": "mltrainingjob",
+#     "error": "index workloads by job ref: no matches for kind \"Workload\" in version \"kueue.x-k8s.io/v1beta1\""}
+#
+# test/e2e installs these before deploying the manager (test/e2e/e2e_suite_test.go, installKueueCRDs), and
+# the admission suite loads the same files through envtest's CRDDirectoryPaths. The GitOps path did not, and
+# nothing said the three environments differed -- so the operator ran green in every test and
+# CrashLoopBackOff'd the first time it met a real cluster.
+#
+# The path is test/crd/kueue rather than a copy under config/. Copying four CRDs to make the directory name
+# tidier would put the same definitions in two places with nothing failing when they drift, which is the
+# defect this repository has spent a week removing.
+#
+# What this does NOT install: the Kueue controller itself. These are the definitions the index needs, not a
+# working scheduler, so MLTrainingJob admission does not function from this alone. go.mod pins
+# sigs.k8s.io/kueue v0.18.3 and the controller belongs at that version when M6 needs it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kueue-crds
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/lkhun9311/gpu-platform-control-plane.git
+    targetRevision: main
+    path: config/kueue-crds
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+  # prune is OFF, and the finalizer is absent, because these are CustomResourceDefinitions.
+  #
+  # Deleting a CRD is not a schema change. The API server removes every instance of it in the same
+  # operation, so a rename in this directory, a path that renders without one of these files, removing the
+  # child from the root Application, or deleting the root itself would each take the definitions AND every
+  # Workload, LocalQueue, ClusterQueue and ResourceFlavor with them. With a cascade finalizer on the
+  # Application, removing the child from root is a two-stage version of exactly that.
+  #
+  # selfHeal stays on: re-creating a definition someone deleted by hand is the safe direction. Removing one
+  # because a file moved is not, and it is not a decision Argo should make unattended.
+    automated:
+      prune: false
+      selfHeal: true
+    syncOptions:
+      # Server-side, because client-side apply stores the whole manifest in a last-applied-configuration
+      # annotation and the Workload CRD is larger than the 262,144-byte limit. Three of the four go in and
+      # that one is rejected, which reads as a partial install rather than a size limit.
+      - ServerSideApply=true

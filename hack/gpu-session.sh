@@ -76,23 +76,123 @@ if [[ ${#WORKERS[@]} -eq 2 && "${WORKERS[0]}" == "${WORKERS[1]}" ]]; then
   exit 2
 fi
 
+# Register the deadline with AWS before anything else, because everything after this point can be cut short
+# by a closed laptop and none of it stops the billing.
+#
+# See hack/lib/gpu-ttl.sh for why a trap is not enough: the scale-down is itself an AWS call, so the
+# credential that would stop the billing dies at the same moment the session does.
+#
+# What this cannot close, stated so it is not mistaken for solved: the worker names are arguments to this
+# script, so the node must already exist to be named, and the deadline is registered after it started
+# billing rather than before. The window is the minutes between scaling the group up by hand and running
+# this -- small, but not zero, and it is the operator's to keep short. Closing it properly means this script
+# owning the scale-up, which is a larger change than the one being made here.
+GPU_CLUSTER="${GPU_CLUSTER:-$(kubectl config view --minify -o jsonpath='{.clusters[0].name}' 2>/dev/null | sed 's|.*cluster/||')}"
+GPU_NODEGROUP="${GPU_NODEGROUP:-$(kubectl get node "${WORKERS[0]}" \
+  -o jsonpath='{.metadata.labels.eks\.amazonaws\.com/nodegroup}' 2>/dev/null)}"
+if [[ -n "$GPU_CLUSTER" && -n "$GPU_NODEGROUP" ]]; then
+  TTL_ROLE_ARN="${TTL_ROLE_ARN:-$(terraform -chdir=infra/aws/bootstrap output -raw ttl_scaledown_role_arn 2>/dev/null)}"
+  export TTL_ROLE_ARN
+  # shellcheck source=hack/lib/gpu-ttl.sh
+  . "$(dirname "$0")/lib/gpu-ttl.sh"
+  ttl_arm "$GPU_CLUSTER" "$GPU_NODEGROUP" "${TTL_MINUTES:-240}" \
+    || { echo "could not register the TTL scale-down; refusing to run a paid session with no deadline" >&2; exit 1; }
+else
+  # Not a warning to scroll past. A session on a node group this script cannot name is a session whose node
+  # it also cannot scale down on the way out, and that is the state this whole arrangement exists to avoid.
+  # The kind cluster is the legitimate case, and it is free, so it is the one exemption.
+  case "$GPU_CLUSTER" in
+    kind-*) echo "no EKS node group behind ${WORKERS[0]}; assuming the kind cluster, which costs nothing" >&2 ;;
+    *) echo "could not determine the EKS cluster and node group behind ${WORKERS[0]}, so this session could" >&2
+       echo "neither register a deadline nor scale the node down when it ends. Set GPU_CLUSTER and" >&2
+       echo "GPU_NODEGROUP explicitly if that derivation is wrong." >&2
+       exit 1 ;;
+  esac
+fi
+
 # Per worker, filled in by prepare().
 declare -A URL_OF OBSERVER_OF POD_OF OCCUPIER_OF
 FORWARDS=()
 OCCUPIERS=()
 
+# Scale the GPU node group back to zero, the same way hack/m5b-gpu-session.sh does.
+#
+# This file had no such thing. Its cleanup killed port-forwards and deleted occupier Pods -- Kubernetes
+# objects, all of them free -- and left the node group running. Deleting a Pod does not stop an EC2 instance;
+# the study could finish, or fail, or be interrupted, and the card kept billing either way. That was the
+# largest hole in the paid path and it was in the file that spends the most time on the card.
+gpu_scale_down() {
+  local desired
+  [[ -n "${GPU_CLUSTER:-}" && -n "${GPU_NODEGROUP:-}" ]] || return 0
+  if [[ "${KEEP_NODE:-}" == "1" ]]; then
+    echo "KEEP_NODE=1: leaving $GPU_NODEGROUP up. The TTL deadline stays armed; it bills until then." >&2
+    return 0
+  fi
+  if ! aws eks update-nodegroup-config --cluster-name "$GPU_CLUSTER" --nodegroup-name "$GPU_NODEGROUP" \
+       --scaling-config minSize=0,maxSize=1,desiredSize=0 >/dev/null 2>&1; then
+    echo "############################################################" >&2
+    echo "#  SCALE-DOWN CALL FAILED. THE NODE IS STILL BILLING.      #" >&2
+    echo "#    aws eks update-nodegroup-config --cluster-name $GPU_CLUSTER \\" >&2
+    echo "#      --nodegroup-name $GPU_NODEGROUP \\" >&2
+    echo "#      --scaling-config minSize=0,maxSize=1,desiredSize=0  #" >&2
+    echo "############################################################" >&2
+    return 0
+  fi
+  desired=$(aws eks describe-nodegroup --cluster-name "$GPU_CLUSTER" --nodegroup-name "$GPU_NODEGROUP" \
+    --query 'nodegroup.scalingConfig.desiredSize' --output text 2>/dev/null)
+  if [[ "$desired" == "0" ]]; then
+    echo "$GPU_CLUSTER/$GPU_NODEGROUP is at desiredSize=0" >&2
+    # Only after the node is confirmed down. A scale-down that failed is exactly when the deadline is needed.
+    command -v ttl_disarm >/dev/null 2>&1 && ttl_disarm
+  else
+    echo "WARNING: $GPU_CLUSTER/$GPU_NODEGROUP reports desiredSize=$desired after the scale-down. It is billing." >&2
+    echo "The TTL deadline is left armed on purpose. It is what remains." >&2
+  fi
+}
+
+# A signal must also END the script, and these traps did not.
+#
+# `trap cleanup INT` runs cleanup and then RESUMES where the signal arrived. During the ten-minute wait for
+# a node to join, Ctrl-C therefore scaled the node group to zero, dropped the deadline, and went back to
+# waiting for the node it had just cancelled -- for another ten minutes, on a card the operator had just
+# asked to stop. The cost was cleaned up; the session was not.
+#
+# EXIT still runs cleanup for ordinary exits and for `fail`. The signal handlers do their own cleanup and
+# exit with the conventional 128+signal status, and the guard makes the second call a no-op so the EXIT
+# trap that follows does not repeat the work.
+CLEANED=0
 cleanup() {
+  [ "$CLEANED" = "1" ] && return 0
+  CLEANED=1
   for pid in "${FORWARDS[@]:-}"; do
     [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
   done
   # Occupiers are deleted rather than left: they hold devices, and a leftover one silently changes what the
   # next session's qualification computes. The gate would refuse rather than mismeasure, but refusing for a
   # reason nobody can see is a bad way to start an hour that costs money.
+  #
+  # The delete is now waited on. --wait=false returned as soon as the API accepted the deletion, so a resumed
+  # session starting a minute later could find the previous occupier still terminating and still holding a
+  # device: the new occupier cannot schedule, qualification is refused, and the card bills through a run that
+  # never starts. Waiting costs seconds; not waiting costs the difference between a session and a bill.
   for spec in "${OCCUPIERS[@]:-}"; do
-    [[ -n "$spec" ]] && kubectl delete pod -n "$NS" "$spec" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    [[ -n "$spec" ]] && kubectl delete pod -n "$NS" "$spec" --ignore-not-found \
+      --wait=true --timeout=90s >/dev/null 2>&1 || true
   done
+  for spec in "${OCCUPIERS[@]:-}"; do
+    if [[ -n "$spec" ]] && kubectl get pod -n "$NS" "$spec" >/dev/null 2>&1; then
+      echo "WARNING: occupier $spec is still present after the delete timed out. The next session's" >&2
+      echo "         qualification may be refused until it is gone: kubectl delete pod -n $NS $spec --force" >&2
+    fi
+  done
+  gpu_scale_down
 }
+# HUP is in the list because a closed terminal or a dropped SSH connection sends it, and that is the ordinary
+# way a long session ends -- not an exotic one. EXIT alone did not cover it.
 trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 129' HUP
 
 # refuseFakePlugin stops a session whose node is advertising SIMULATED devices.
 #
@@ -353,14 +453,99 @@ mkdir -p "$EXDIR" || { echo "cannot create $EXDIR" >&2; exit 1; }
 echo "records for this session go in $EXDIR"
 echo "running ${#SEQUENCE[@]} runs, starting at $START_AT"
 echo
+# Stop before a run that cannot finish, rather than being cut in the middle of one.
+#
+# Nothing bounded this session's length. The per-run horizon is derived inside the runner and refuses to be
+# short, but the number of runs comes from REPS and the worker count, -horizon can be raised, and a slow
+# node stretches every run -- so the total was whatever it turned out to be, against a deadline that fires
+# at a fixed time. The TTL would then scale the node out from under a run in progress, and that run's record
+# is lost while every earlier one survives: the expensive half of the session is thrown away last.
+#
+# The budget is measured rather than declared. Copying the runner's horizon constants into this file is the
+# drift this repository keeps finding -- a value carried by hand across two call sites with nothing that
+# fails when they disagree. After the first run, the elapsed time IS the budget, and it accounts for the
+# node's real speed, the flags actually passed, and the per-run setup, none of which a constant would know.
+run_secs=0
+runs_done=0
+DEADLINE_SEEN=0
+deadline_check() {
+  local remain projected per
+  # A deadline that was readable and then is not means the answer is unknown, not fine. The old code
+  # returned 0 on any read failure, so the exact moment worth stopping for -- SSO expiring mid-session, the
+  # Scheduler API refusing -- was the moment the guard stopped guarding, while the remote deadline stayed
+  # armed and went on to cut a run in half. Once a deadline has been seen, losing sight of it stops the
+  # session; before that, there may genuinely be none (the kind cluster) and continuing is right.
+  if ! remain=$(ttl_remaining_minutes "$GPU_CLUSTER" "$GPU_NODEGROUP" 2>/dev/null) || [[ -z "$remain" ]]; then
+    if (( DEADLINE_SEEN == 1 )); then
+      echo >&2
+      echo "STOPPING: the deadline for $GPU_CLUSTER/$GPU_NODEGROUP was readable earlier and is not now." >&2
+      echo "  It is still armed and will still fire. Continuing would risk being cut inside a run." >&2
+      echo "  ${runs_done} runs are complete in $EXDIR. Resume with:" >&2
+      echo "    EXDIR=$EXDIR START_AT=$N RUN_STUDY=1 $0 ${WORKERS[*]}" >&2
+      echo "  EXDIR is not optional: without it the resumed runs land in a fresh directory and the compare" >&2
+      echo "  globs would pool half a session with nothing. The worker name will differ -- this exit scales" >&2
+      echo "  the node group away, so pass whatever the replacement node is called." >&2
+      return 1
+    fi
+    return 0
+  fi
+  DEADLINE_SEEN=1
+  # Before the first run there is nothing measured to project from, and the floor used to be a flat fifteen
+  # minutes -- a guess that is wrong in both directions. It is too generous for a raised -horizon, where a
+  # single run can exceed it and be cut anyway, and it is arbitrary otherwise.
+  #
+  # The runner knows the answer, so it is asked. -print-horizon touches no cluster and reports the same
+  # window the run will actually observe, derived from the same constants, including any -horizon widening.
+  # Copying those constants into this file is the drift this repository keeps finding.
+  if (( runs_done == 0 )); then
+    local h longest=0
+    for d in self-completing grace-bounded; do
+      h=$(./queuelabrun -print-horizon -dose "$d" 2>/dev/null) || h=""
+      [[ "$h" =~ ^[0-9]+$ ]] && (( h > longest )) && longest=$h
+    done
+    if (( longest == 0 )); then
+      echo "could not ask the runner for its observation window; refusing to guess how long a run takes" >&2
+      return 1
+    fi
+    # The window is what the run OBSERVES. Preparing the worker, holding the surplus and tearing down are on
+    # top of it, so the floor is the longest window plus half again, rounded up to whole minutes.
+    local floor=$(( (longest * 3 / 2 + 59) / 60 ))
+    (( remain >= floor )) && return 0
+    echo >&2
+    echo "STOPPING: the deadline fires in ${remain} min and one run needs about ${floor} min end to end" >&2
+    echo "  (the runner reports a ${longest}s observation window). The first run would be cut and lost." >&2
+    echo "  Re-arm with a longer TTL_MINUTES before resuming." >&2
+    return 1
+  fi
+  # A fifth of headroom, and rounding up rather than down. The mean is not the worst case: runs differ by
+  # arm, by dose and by node, and a projection that only just fits under the deadline is one slightly slow
+  # run away from being cut. The comparison was also >= rather than >, so a projection exactly equal to the
+  # remaining time counted as fitting, with no time left for the teardown that follows the last run.
+  per=$(( (run_secs + runs_done - 1) / runs_done ))
+  projected=$(( ((${#SEQUENCE[@]} - runs_done - skipped) * per * 12 / 10 + 59) / 60 ))
+  if (( projected >= remain )); then
+    echo >&2
+    echo "STOPPING: $((${#SEQUENCE[@]} - runs_done - skipped)) runs left at ~$((per / 60)) min each needs about ${projected} min," >&2
+    echo "  and the deadline fires in ${remain} min. Being cut mid-run would lose that run's record while" >&2
+    echo "  keeping every earlier one, so the session stops on a boundary instead." >&2
+    echo "  ${runs_done} runs are complete in $EXDIR. Re-arm with a longer TTL_MINUTES and resume:" >&2
+    echo "    EXDIR=$EXDIR START_AT=$((N)) RUN_STUDY=1 $0 ${WORKERS[*]}" >&2
+    return 1
+  fi
+  return 0
+}
+
 N=0
+skipped=0
 for SPEC in "${SEQUENCE[@]}"; do
   # shellcheck disable=SC2086
   set -- $SPEC
   DOSE=$1 ARM=$2 ID=$3 ON=$4
   N=$((N + 1))
-  (( N < START_AT )) && { echo "[$N/${#SEQUENCE[@]}] $ID  skipped (START_AT=$START_AT)"; continue; }
+  (( N < START_AT )) && { echo "[$N/${#SEQUENCE[@]}] $ID  skipped (START_AT=$START_AT)"; skipped=$((skipped + 1)); continue; }
+  deadline_check || exit 1
   echo "[$N/${#SEQUENCE[@]}] $ID  $DOSE  $ARM  on $ON"
+  RUN_T0=$(date +%s)
   # The route was verified once, at prepare time, and then trusted for the whole session. On EKS the forward
   # traverses an idle-timing load balancer and a worker's tunnel can sit unused for half an hour between its
   # runs. A dead tunnel does not stop the run: the device observer is explicitly non-fatal, so the full
@@ -369,7 +554,8 @@ for SPEC in "${SEQUENCE[@]}"; do
   if ! curl -sf -m 3 "${URL_OF[$ON]}" >/dev/null 2>&1; then
     echo "        the route to $ON is not answering; reopening it"
     openRoute "$ON" \
-      || { echo "could not reopen the route to $ON; resume with START_AT=$N once it is back" >&2; exit 1; }
+      || { echo "could not reopen the route to $ON. Resume once it is back with:" >&2
+           echo "    EXDIR=$EXDIR START_AT=$N RUN_STUDY=1 $0 ${WORKERS[*]}" >&2; exit 1; }
   fi
   # And the surplus must still be held. An evicted occupier frees the spare cards mid-session, and the run
   # that follows would measure a node whose scarcity has quietly gone -- the one wrong-number path here.
@@ -377,7 +563,8 @@ for SPEC in "${SEQUENCE[@]}"; do
     OCC_PHASE="$(kubectl get pod -n "$NS" "${OCCUPIER_OF[$ON]}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
     if [[ "$OCC_PHASE" != "Running" ]]; then
       echo "the surplus occupier on $ON is ${OCC_PHASE:-gone}; the spare cards are free and the arm" >&2
-      echo "  contrast would collapse without saying so. Re-prepare, then resume: START_AT=$N" >&2
+      echo "  contrast would collapse without saying so. Re-prepare, then resume with:" >&2
+      echo "    EXDIR=$EXDIR START_AT=$N RUN_STUDY=1 $0 ${WORKERS[*]}" >&2
       exit 1
     fi
   fi
@@ -387,7 +574,9 @@ for SPEC in "${SEQUENCE[@]}"; do
   ./queuelabrun -require-device -dose "$DOSE" -arm "$ARM" -runid "$ID" -worker "$ON" \
     -device-metrics "${URL_OF[$ON]}" -device-observer "${OBSERVER_OF[$ON]}" \
     -out "$EXDIR/gpu-$DOSE-$ARM-$ID.json" \
-    || { echo; echo "run $ID failed. Fix the cause, then resume: START_AT=$N RUN_STUDY=1 $0 ${WORKERS[*]}" >&2; exit 1; }
+    || { echo; echo "run $ID failed. Fix the cause, then resume: EXDIR=$EXDIR START_AT=$N RUN_STUDY=1 $0 ${WORKERS[*]}" >&2; exit 1; }
+  run_secs=$(( run_secs + $(date +%s) - RUN_T0 ))
+  runs_done=$((runs_done + 1))
 done
 
 # The globs are the ones the kind study uses, and they are narrow for reasons the tool enforces: an arm

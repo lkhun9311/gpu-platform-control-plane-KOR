@@ -9,7 +9,16 @@ on:
 
 permissions: {}
 
-# TF_STATE_BUCKET and TF_STATE_KMS_KEY are repository variables holding the bootstrap state bucket and state KMS key.
+# TF_STATE_BUCKET and TF_STATE_KMS_KEY are SECRETS, not variables, and the distinction is about this
+# repository being public.
+#
+# Both values name the account: the bucket ends in the account id and the KMS key ARN contains it. Actions
+# expands an expression into the run script that appears in the log, and a public repository's logs are
+# public, so a variable puts those coordinates where anyone can read them. A secret is masked to *** in the
+# same place.
+#
+# secrets cannot be read in a job-level `if`, so the gate is a separate non-sensitive variable,
+# INFRA_ENABLED, which carries no coordinates and only says whether the AWS side is provisioned yet.
 # There is no lock table variable: the S3 backend locks on a <key>.tflock object since Terraform 1.10.
 #
 # They complete the cluster's partial S3 backend at init time, since those values are chosen at bootstrap.
@@ -40,7 +49,7 @@ jobs:
     if: >-
       github.event_name == 'pull_request'
       && github.event.pull_request.head.repo.full_name == github.repository
-      && vars.TF_STATE_BUCKET != ''
+      && vars.INFRA_ENABLED == 'true'
     timeout-minutes: 45
     concurrency:
       group: infra-plan-${{ github.ref }}
@@ -69,8 +78,8 @@ jobs:
         working-directory: infra/aws/cluster
         run: |
           terraform init -input=false \
-            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
-            -backend-config="kms_key_id=${{ vars.TF_STATE_KMS_KEY }}"
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="kms_key_id=${{ secrets.TF_STATE_KMS_KEY }}"
           terraform plan -input=false -no-color
 
   apply:
@@ -81,7 +90,17 @@ jobs:
     # The environment gate plus the apply role's sub condition together deny forked-PR applies.
     #
     # Skip cleanly until the bootstrap state bucket exists, since there is nothing to apply against.
-    if: github.event_name == 'push' && vars.TF_STATE_BUCKET != ''
+    # A SECOND switch, and the split is the point.
+    #
+    # INFRA_ENABLED says "the AWS side exists": it arms the nightly teardown, the read-only plan, and the
+    # image push, none of which decide to spend. This job creates an EKS control plane and a NAT gateway,
+    # which bill from the moment they exist, and it does so on a merge rather than on a decision.
+    #
+    # Sharing one variable with the teardown would mean arming the backstop also arms an unattended apply --
+    # the same value doing two jobs, which is the defect shape this repository keeps finding. So the spend
+    # path gets its own switch, and it is left unset: the cluster comes up when someone runs terraform, not
+    # when a pull request merges.
+    if: github.event_name == 'push' && vars.INFRA_APPLY_ENABLED == 'true'
     environment: infra-apply
     timeout-minutes: 45
     concurrency:
@@ -111,6 +130,6 @@ jobs:
         working-directory: infra/aws/cluster
         run: |
           terraform init -input=false \
-            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
-            -backend-config="kms_key_id=${{ vars.TF_STATE_KMS_KEY }}"
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="kms_key_id=${{ secrets.TF_STATE_KMS_KEY }}"
           terraform apply -input=false -auto-approve
