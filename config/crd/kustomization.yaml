@@ -1,6 +1,6 @@
-# This kustomization.yaml is not intended to be run by itself,
-# since it depends on service name and namespace that are out of this kustomize package.
-# It should be run by config/default
+# 이 kustomization.yaml은 단독으로 실행하도록 만든 것이 아니다,
+# 이 kustomize package 밖에 있는 service 이름과 namespace에 의존하므로,
+# config/default를 통해 실행해야 한다.
 resources:
 - bases/platform.lkhun9311.github.io_nodehealths.yaml
 - bases/platform.lkhun9311.github.io_workloadruns.yaml
@@ -10,11 +10,11 @@ resources:
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
-# [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix.
-# patches here are for enabling the conversion webhook for each CRD
+# [WEBHOOK] webhook을 활성화하려면 [WEBHOOK] prefix가 붙은 모든 섹션을 주석 해제한다,
+# 아래 patch는 각 CRD의 conversion webhook을 활성화한다.
 # +kubebuilder:scaffold:crdkustomizewebhookpatch
 
-# [WEBHOOK] To enable webhook, uncomment the following section
-# the following config is for teaching kustomize how to do kustomization for CRDs.
+# [WEBHOOK] webhook을 활성화하려면 아래 섹션을 주석 해제한다,
+# 아래 설정은 kustomize가 CRD를 어떻게 kustomization할지 알려준다.
 #configurations:
-#- kustomizeconfig.yaml
+# - kustomizeconfig.yaml

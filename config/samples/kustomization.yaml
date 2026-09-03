@@ -1,5 +1,4 @@
-## Append samples of your project ##
-namespace: gpu-platform-control-plane-system
+# 프로젝트 sample CR manifest 목록입니다.
 resources:
 - platform_v1_nodehealth.yaml
 - platform_v1_gpuquotapolicy.yaml
