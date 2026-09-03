@@ -32,3 +32,12 @@ output "gateway_repo_url" {
   description = "ECR repository URL for the gateway image."
   value       = aws_ecr_repository.gateway.repository_url
 }
+
+# The role EventBridge Scheduler assumes to force a GPU node group to zero when a session's TTL expires.
+#
+# The harness reads this to arm a schedule before it scales anything up, and refuses to start the GPU if the
+# schedule cannot be created -- so the deadline exists before the cost does.
+output "ttl_scaledown_role_arn" {
+  description = "IAM role assumed by EventBridge Scheduler for the session TTL scale-down."
+  value       = aws_iam_role.ttl_scaledown.arn
+}

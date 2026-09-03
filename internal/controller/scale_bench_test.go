@@ -44,7 +44,7 @@ func startCachedClient(b testing.TB) (context.Context, client.Client, client.Cli
 	env := &envtest.Environment{
 		CRDDirectoryPaths: []string{
 			filepath.Join("..", "..", "config", "crd", "bases"),
-			filepath.Join("..", "..", "test", "crd", "kueue"),
+			filepath.Join("..", "..", "config", "kueue-crds"),
 		},
 		ErrorIfCRDPathMissing: true,
 	}

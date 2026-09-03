@@ -19,6 +19,34 @@ ALLOWED_TYPES="t3. g4dn. g5."
 say() { printf '\n== %s\n' "$*"; }
 fail=0
 
+# Ask AWS whether the policy is even well-formed, before asking what it would have done.
+#
+# This step exists because the simulation below cannot see the difference between a condition that never
+# matches and a condition key that DOES NOT EXIST. It substitutes recorded calls into the policy and reports
+# what would have been denied; a nonexistent key simply never matches, so the run comes back clean.
+#
+# The console caught what this script could not: eks:instanceTypes is not a condition key EKS publishes, so
+# DenyUnapprovedInstanceTypesOnManagedNodeGroups could not be created at all -- Organizations refuses the
+# policy. Three rounds of review on that one statement had already found a deny that could not fire and a
+# checker that duplicated its action list, and neither round asked whether the key was real.
+#
+# IAM Access Analyzer answers exactly that question, with the same finding code the console shows
+# (INVALID_SERVICE_CONDITION_KEY). Verified by putting the rejected statement back and watching this fail.
+say "validating the policies against AWS's own grammar"
+for f in deny-region.json deny-instance-family.json deny-escape.json; do
+  findings=$(aws accessanalyzer validate-policy \
+      --policy-document "file://$f" --policy-type SERVICE_CONTROL_POLICY \
+      --query 'findings[?findingType==`ERROR` || findingType==`SECURITY_WARNING`].[findingType,issueCode]' \
+      --output text 2>&1)
+  if [ -n "$findings" ]; then
+    echo "   $f"
+    echo "$findings" | sed 's/^/     /'
+    fail=1
+  else
+    echo "   $f: no errors"
+  fi
+done
+
 say "collecting CloudTrail events (last ${DAYS} days)"
 : > /tmp/scp-events.jsonl
 for r in $REGIONS; do

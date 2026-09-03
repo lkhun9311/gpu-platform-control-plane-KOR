@@ -96,8 +96,24 @@ spec:
             # equal the requirement exactly. The run RECOGNISES the occupier rather than creating one -- an
             # earlier version of this comment said the run occupies the surplus itself, which is false and
             # would have sent someone looking for code that is not there.
+            # all, not a list of indices.
+            #
+            # This said "0,1", which names two devices by index. The queuelab node (g4dn.12xlarge) has four
+            # cards so both indices exist there; g5.xlarge has one A10G, so index 1 does not, and the NVIDIA
+            # container runtime refuses to start the container at all:
+            #
+            #   failed to create the automatic CDI modifier: failed to generate CDI spec for mode "auto":
+            #   failed to construct device spec generators: failed to get device handle from index: Invalid Argument
+            #
+            # The plugin then CrashLoopBackOff'd, nvidia.com/gpu was never advertised, and the paid session
+            # refused after the card had been running for ten minutes -- reporting "the device plugin is not
+            # working", which was true and did not say why.
+            #
+            # A device plugin has to see every device on the node it is advertising, so a fixed list is the
+            # wrong shape regardless of which node it happens to fit. This is the same defect as a node group
+            # name or a Region written into one file: a value that depends on the machine, carried by hand.
             - name: NVIDIA_VISIBLE_DEVICES
-              value: "0,1"
+              value: "all"
           securityContext:
             privileged: true
           volumeMounts:

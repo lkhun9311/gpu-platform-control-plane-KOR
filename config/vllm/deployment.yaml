@@ -82,6 +82,26 @@ spec:
             - --max-model-len=16384
             - --max-num-seqs=64
             - --gpu-memory-utilization=0.90
+            # Prefix caching OFF, stated rather than defaulted.
+            #
+            # vLLM's V1 engine enables automatic prefix caching by default, and nothing here said either way.
+            # This study replays ONE trace sixteen times and every request carries the same 40,000-character
+            # prompt, so with caching on almost none of that prefill is ever computed after the first pass --
+            # the arms would measure admission control over a cache, not over the KV pressure the design is
+            # about.
+            #
+            # It was found by arithmetic and then confirmed on the card. The session measured a 7,695-token
+            # prefill at 93.7 ms and derived an arrival rate of 17.081/s; that implies 508 TFLOPS on an A10G
+            # whose dense bf16 peak is about 125. Measured on the live engine, same prompt each time:
+            #
+            #   caching on,  prompt seen before   0.092 - 0.097 s
+            #   caching on,  unique prompt        1.004 - 1.021 s
+            #   caching off, same prompt x3       0.998 - 1.039 s
+            #
+            # So the true prefill is about 1.0 s -- 47 TFLOPS, 38% MFU, which is the neighbourhood the sizing
+            # page assumed -- and the derived rate is about 1.58/s rather than 17. Ten times too much load
+            # would have censored every tail and disqualified the run after the card was paid for.
+            - --no-enable-prefix-caching
             - --port=8000
           ports:
             - name: http

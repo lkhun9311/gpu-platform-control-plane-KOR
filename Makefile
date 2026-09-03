@@ -119,7 +119,17 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 
 .PHONY: lint-config
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
-	"$(GOLANGCI_LINT)" config verify
+# `config verify` fetches its JSON schema over the network, so this target fails whenever
+# golangci-lint.run is slow -- observed as a CI failure on a change that touched no Go code at all.
+# Retry absorbs that, and only that: an actually invalid config fails all three attempts just as fast,
+# because the schema loads and the validation is what rejects it. Still fails closed when the network
+# never comes back, which is the right answer -- an unverified config is not a verified one.
+	@for i in 1 2 3; do \
+		"$(GOLANGCI_LINT)" config verify && exit 0; \
+		echo "config verify attempt $$i failed; retrying in 5s"; \
+		sleep 5; \
+	done; \
+	echo "config verify failed three times"; exit 1
 
 ##@ Build
 
@@ -240,6 +250,7 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+GO_MOD_VERSION = $(shell awk '/^go [0-9]/{print $$2}' go.mod)
 TERRAFORM = $(LOCALBIN)/terraform
 ACTIONLINT = $(LOCALBIN)/actionlint
 
@@ -290,9 +301,18 @@ $(ENVTEST): $(LOCALBIN)
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+# The plugin build must use the Go version this module targets. Left alone it follows golangci-lint's
+# own go.mod (go 1.25) and produces a binary that then refuses to read this repo's config -- "the Go
+# language version (go1.25) used to build golangci-lint is lower than the targeted Go version (1.26.0)".
+# CI never sees this because setup-go's go-version-file: go.mod already pins the toolchain there, so it
+# is a local-only failure that looks like a broken config rather than a broken build.
+#
+# GOTOOLCHAIN=local is not enough; the version has to be named. It is read from go.mod rather than
+# written here, because a Go version repeated in two places is exactly the drift this repo keeps
+# getting caught by -- bumping go.mod alone would silently rebuild the wrong linter.
 	@test -f .custom-gcl.yml && { \
-		echo "Building custom golangci-lint with plugins..." && \
-		$(GOLANGCI_LINT) custom --destination $(LOCALBIN) --name golangci-lint-custom && \
+		echo "Building custom golangci-lint with plugins (go$(GO_MOD_VERSION))..." && \
+		GOTOOLCHAIN=go$(GO_MOD_VERSION) $(GOLANGCI_LINT) custom --destination $(LOCALBIN) --name golangci-lint-custom && \
 		mv -f $(LOCALBIN)/golangci-lint-custom $(GOLANGCI_LINT); \
 	} || true
 

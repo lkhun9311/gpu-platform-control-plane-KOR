@@ -122,8 +122,31 @@ func main() {
 			"varies that factor, reporting whether the quota owner's wait responds to it; \"baseline\" pools "+
 			"one arm's runs into the restoration figure a later session differences against; \"model\" tests "+
 			"held = min(remaining service, grace) against both regimes at once. Empty compares the arms")
+		printHorizonFlag = flag.Bool("print-horizon", false, "offline: print this -dose regime's observation "+
+			"window in seconds and exit. It exists so a wrapper can budget a session against the same "+
+			"derivation the run uses, instead of copying the constants into a shell script where nothing "+
+			"would fail when the two disagree")
 	)
 	flag.Parse()
+
+	// -print-horizon dispatches with -compare, before anything that touches a cluster, because it answers a
+	// question about the protocol rather than about a run. hack/gpu-session.sh asks it to learn how long one
+	// run can take before deciding whether the session fits inside its deadline; a number it hardcoded
+	// instead would be right until someone changed a constant here.
+	if *printHorizonFlag {
+		p, err := doseProtocolFor(*doseFlag)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ERROR:", err)
+			os.Exit(1)
+		}
+		h, err := horizonFor(*horizonFlag, p)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ERROR:", err)
+			os.Exit(1)
+		}
+		fmt.Println(int(h.Seconds()))
+		return
+	}
 
 	// -compare dispatches before anything else, including the record path below, because it touches no
 	// cluster, holds no worker and produces no RUN record. Putting it here is what lets a conclusion be

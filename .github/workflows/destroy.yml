@@ -24,7 +24,16 @@ jobs:
     # For fully unattended nightly teardown, provision a separate infra-destroy environment and role without a reviewer gate.
     #
     # Skip cleanly until the bootstrap state bucket exists, so the nightly cron does not fail before AWS is provisioned.
-    if: vars.TF_STATE_BUCKET != ''
+    # The teardown gets its own switch, separate from INFRA_ENABLED.
+    #
+    # INFRA_ENABLED also arms ci.yml's build-push, which pushes two images and then opens a digest-bump PR
+    # with github.token -- and this repository has "Allow GitHub Actions to create and approve pull requests"
+    # turned off, so that job pushes the images and then fails on the PR. Arming the cost backstop should not
+    # depend on settling that.
+    #
+    # One value doing two jobs is the defect shape this repository keeps finding, and the two jobs here are
+    # unrelated: one stops spend, the other publishes images.
+    if: vars.DESTROY_ENABLED == 'true'
     environment: infra-apply
     timeout-minutes: 45
     concurrency:
@@ -140,8 +149,8 @@ jobs:
           ENDPOINT=$(aws eks describe-cluster --name "$CLUSTER_NAME" --query 'cluster.endpoint' --output text)
           CA=$(aws eks describe-cluster --name "$CLUSTER_NAME" --query 'cluster.certificateAuthority.data' --output text)
           terraform init -input=false \
-            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
-            -backend-config="kms_key_id=${{ vars.TF_STATE_KMS_KEY }}"
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="kms_key_id=${{ secrets.TF_STATE_KMS_KEY }}"
           terraform destroy -input=false -auto-approve \
             -var "cluster_endpoint=$ENDPOINT" \
             -var "cluster_ca=$CA"
@@ -162,8 +171,8 @@ jobs:
         working-directory: infra/aws/cluster
         run: |
           terraform init -input=false \
-            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
-            -backend-config="kms_key_id=${{ vars.TF_STATE_KMS_KEY }}"
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="kms_key_id=${{ secrets.TF_STATE_KMS_KEY }}"
           terraform destroy -input=false -auto-approve
 
       # Inventory what commonly lingers, so a failed destroy is visible rather than silent.
@@ -193,8 +202,18 @@ jobs:
             --query 'Vpcs[].VpcId' --output text)
           EC2=$(aws ec2 describe-instances --filters 'Name=tag:project,Values=gpu-platform-control-plane' 'Name=instance-state-name,Values=pending,running,stopping,stopped' --query 'Reservations[].Instances[].InstanceId' --output text)
           EBS=$(aws ec2 describe-volumes --filters 'Name=tag:project,Values=gpu-platform-control-plane' --query 'Volumes[].VolumeId' --output text)
-          NAT=$(aws ec2 describe-nat-gateways --filter 'Name=state,Values=pending,available,deleting' --query 'NatGateways[].NatGatewayId' --output text)
-          EIP=$(aws ec2 describe-addresses --query 'Addresses[?AssociationId==null].AllocationId' --output text)
+          # Scoped to this project's tag, for the reason the load-balancer query above was scoped to this VPC.
+          #
+          # Both queries used to look at the whole account. An unrelated NAT gateway or a single idle EIP
+          # anywhere in ap-northeast-2 would have failed this job as residue from a cluster it has nothing to
+          # do with -- and this job failing is what the repository calls its teardown backstop, so the false
+          # positive would land on the one signal meant to be trusted.
+          #
+          # The trade is a false negative if tagging ever lapses: an untagged NAT would go unseen. That is
+          # the same assumption the EC2 and EBS lines above already make, and terraform applies
+          # project=gpu-platform-control-plane to both resources (verified in the plan, not assumed).
+          NAT=$(aws ec2 describe-nat-gateways --filter 'Name=tag:project,Values=gpu-platform-control-plane' 'Name=state,Values=pending,available,deleting' --query 'NatGateways[].NatGatewayId' --output text)
+          EIP=$(aws ec2 describe-addresses --filters 'Name=tag:project,Values=gpu-platform-control-plane' --query 'Addresses[?AssociationId==null].AllocationId' --output text)
           LB=""
           ENI=""
           if [ -n "$VPC" ]; then

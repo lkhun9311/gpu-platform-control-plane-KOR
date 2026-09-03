@@ -69,7 +69,6 @@ mkdir -p "$OUT" || fail "cannot create $OUT"
 
 WORK="$(mktemp -d)"
 PF_PID=""
-SCALED_UP=""
 NODEGROUP=""
 
 # Scaling the node group back to zero, which this file's header claimed and this function did not do.
@@ -88,15 +87,51 @@ NODEGROUP=""
 #
 # What this does NOT solve, stated so it is not mistaken for solved: a trap cannot run after the laptop dies,
 # loses power, or has its shell killed with SIGKILL. The backstop for that is the nightly destroy workflow,
-# and an external TTL watchdog is the control this repository still does not have.
+# and the deadline this script registers with EventBridge Scheduler is what covers those.
+# See hack/lib/gpu-ttl.sh.
 gpu_scale_down() {
-  [ -n "$SCALED_UP" ] || return 0
+  # The deadline is NOT dropped here, and the ordering is the whole point.
+  #
+  # Removing it first means a scale-down that then fails leaves the account with a billing GPU and no
+  # remaining backstop -- the one arrangement worse than either failure alone. The schedule costs nothing
+  # while it waits and does nothing once the node is already at zero, so there is no reason to trade it away
+  # before the thing it protects against is known not to have happened. It comes off at the bottom of this
+  # function, after desiredSize has been read back as 0, and nowhere else.
+  #
+  # KEEP_NODE=1 keeps the node up; the deadline stays armed, so a session someone walks away from still ends.
   if [ "${KEEP_NODE:-}" = "1" ]; then
-    echo "KEEP_NODE=1: leaving $NODEGROUP at its current size. It bills by the hour." >&2
+    echo "KEEP_NODE=1: leaving $NODEGROUP up. The TTL deadline stays armed; it bills until then." >&2
     return 0
   fi
 
   CLUSTER="${CLUSTER:-$(kubectl config view --minify -o jsonpath='{.clusters[0].name}' 2>/dev/null | sed 's|.*cluster/||')}"
+
+  # Ask EKS what is billing rather than trusting a flag set after the preflight checks. The same reasoning is
+  # written out in m5b-gpu-session.sh: the refusals that run before the node group is identified used to exit
+  # through a cleanup that believed nothing had been started.
+  if [ -z "$NODEGROUP" ] && [ -n "$CLUSTER" ]; then
+    for ng in $(aws eks list-nodegroups --cluster-name "$CLUSTER" \
+                  --query 'nodegroups[?starts_with(@, `gpu`)]' --output text 2>/dev/null); do
+      size=$(aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$ng" \
+               --query 'nodegroup.scalingConfig.desiredSize' --output text 2>/dev/null)
+      if [ -n "$size" ] && [ "$size" != "0" ] && [ "$size" != "None" ]; then
+        echo "found $CLUSTER/$ng at desiredSize=$size without this session having recorded it" >&2
+        # No break. The same fix went into hack/m5b-gpu-session.sh and this file was left with the old
+        # shape, so a claim that "every stray group is scaled down" was true of one script and not the
+        # other. Taking the first and stopping leaves the rest billing, in the function whose only job is
+        # to find what is billing and stop it.
+        if [ -z "$NODEGROUP" ]; then
+          NODEGROUP="$ng"
+        else
+          aws eks update-nodegroup-config --cluster-name "$CLUSTER" --nodegroup-name "$ng" \
+            --scaling-config minSize=0,maxSize=1,desiredSize=0 >/dev/null 2>&1 \
+            && echo "also scaled $CLUSTER/$ng to zero" >&2 \
+            || echo "WARNING: could not scale $CLUSTER/$ng down. IT IS STILL BILLING." >&2
+        fi
+      fi
+    done
+  fi
+
   if [ -z "$CLUSTER" ] || [ -z "${NODEGROUP:-}" ]; then
     echo
     echo "############################################################"
@@ -110,8 +145,9 @@ gpu_scale_down() {
   fi
 
   echo "scaling $CLUSTER/$NODEGROUP to desiredSize=0" >&2
+  # stderr is kept, so a failed scale-down says why rather than only that.
   if ! aws eks update-nodegroup-config --cluster-name "$CLUSTER" --nodegroup-name "$NODEGROUP" \
-        --scaling-config "minSize=0,maxSize=1,desiredSize=0" >/dev/null 2>&1; then
+        --scaling-config "minSize=0,maxSize=1,desiredSize=0" >/dev/null; then
     echo
     echo "############################################################"
     echo "#  SCALE-DOWN CALL FAILED. THE NODE IS STILL BILLING.      #"
@@ -129,12 +165,28 @@ gpu_scale_down() {
     --query 'nodegroup.scalingConfig.desiredSize' --output text 2>/dev/null)
   if [ "$DESIRED" = "0" ]; then
     echo "$CLUSTER/$NODEGROUP is at desiredSize=0" >&2
+    # Only now. The deadline has nothing left to protect, and this is the single place that knows that.
+    command -v ttl_disarm >/dev/null 2>&1 && ttl_disarm
   else
     echo "WARNING: $CLUSTER/$NODEGROUP reports desiredSize=$DESIRED after the scale-down. It is billing." >&2
+    echo "The TTL deadline is left armed on purpose. It is what remains." >&2
   fi
 }
 
+# A signal must also END the script, and these traps did not.
+#
+# `trap cleanup INT` runs cleanup and then RESUMES where the signal arrived. During the ten-minute wait for
+# a node to join, Ctrl-C therefore scaled the node group to zero, dropped the deadline, and went back to
+# waiting for the node it had just cancelled -- for another ten minutes, on a card the operator had just
+# asked to stop. The cost was cleaned up; the session was not.
+#
+# EXIT still runs cleanup for ordinary exits and for `fail`. The signal handlers do their own cleanup and
+# exit with the conventional 128+signal status, and the guard makes the second call a no-op so the EXIT
+# trap that follows does not repeat the work.
+CLEANED=0
 cleanup() {
+  [ "$CLEANED" = "1" ] && return 0
+  CLEANED=1
   [ -n "$PF_PID" ] && kill "$PF_PID" 2>/dev/null
   k delete namespace "$NS_A" "$NS_B" --wait=false >/dev/null 2>&1
   k delete gpuquotapolicy m5c-premium m5c-standard >/dev/null 2>&1
@@ -142,36 +194,124 @@ cleanup() {
   rm -rf "$WORK"
   gpu_scale_down
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 129' HUP
 
 say "preflight"
 case "$KCTX" in kind-*) fail "context $KCTX is a kind cluster; this is the paid matrix" ;; esac
 
 # The sharing node, and it must be the sharing one: the exclusive plugin advertises one device per card, so
 # the second engine would sit Pending and the arm would silently become a one-engine arm with half the memory.
+# The deadline is registered BEFORE the card exists, which is why this script scales the group up itself.
+#
+# It used to refuse when no sharing node was present, print the aws command, and wait to be re-run -- so a
+# person scaled up, the node billed and took minutes to join, and only a re-run registered a deadline. This
+# is the longest run in the repository and therefore the one most likely to outlive the shell that started
+# it; starting it with an unbacked card was the wrong end to be careless at.
+#
+# The name cannot come off a node label before a node exists, so it comes from a default verified against
+# EKS. A name that does not resolve would produce a schedule that is accepted and then fires into nothing.
+CLUSTER="${CLUSTER:-$(kubectl config view --minify -o jsonpath='{.clusters[0].name}' 2>/dev/null | sed 's|.*cluster/||')}"
+[ -n "$CLUSTER" ] || fail "could not determine the cluster name from the kubeconfig context"
+# Named into a candidate first, and promoted to NODEGROUP only once EKS confirms it exists.
+#
+# Assigning NODEGROUP before the check meant that when the check refused, the EXIT trap's scale-down saw a
+# node group name, skipped discovery, and called update-nodegroup-config against a group just proven not to
+# exist -- then printed THE NODE IS STILL BILLING for a session that had started nothing. A commit claimed
+# no refusal path calls update-nodegroup-config; this was the path that did.
+NG_CANDIDATE="${NODEGROUP:-gpu_shared}"
+aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$NG_CANDIDATE" >/dev/null 2>&1 \
+  || fail "no node group $NG_CANDIDATE in $CLUSTER. The deadline must name a group that exists, or it fires into nothing. Set NODEGROUP if the name is different."
+NODEGROUP="$NG_CANDIDATE"
+
+# One schedule names one node group, so a second GPU group left running is not covered by anything this
+# session registers. The deadline would fire, scale down the group it names, and leave the other billing --
+# and nothing in the run would look wrong.
+#
+# Refusing here rather than trying to cover both is deliberate. A session that finds another card already
+# running does not know whose it is: it may be another session mid-run, and scaling it down would destroy
+# someone else's paid work. Naming it and stopping is the only answer that is right in both cases.
+# Every AWS call here is checked, because the previous shape failed OPEN. It ran the listing inside a
+# command substitution, threw away stderr and the exit status, and iterated the result -- so expired
+# credentials, a permissions error, or a network failure all produced an empty list, which reads exactly
+# like "no other card is running". The same held one level down: a describe that failed left sz empty,
+# which the case treated as zero.
+#
+# That is the wrong direction for this particular guard. It exists for the moments when something is wrong
+# with the account, and those are the moments an unchecked call returns nothing.
+if ! ng_list=$(aws eks list-nodegroups --cluster-name "$CLUSTER" \
+                 --query 'nodegroups[?starts_with(@, `gpu`)]' --output text 2>&1); then
+  fail "could not list the node groups in $CLUSTER, so this session cannot tell whether another card is already running: $ng_list"
+fi
+others=""
+for ng in $ng_list; do
+  [ "$ng" = "$NODEGROUP" ] && continue
+  if ! sz=$(aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$ng" \
+              --query 'nodegroup.scalingConfig.desiredSize' --output text 2>&1); then
+    fail "could not read the size of $CLUSTER/$ng: $sz. An unreadable node group is not a stopped one."
+  fi
+  case "$sz" in
+    0|None) ;;
+    ''|*[!0-9]*) fail "the size of $CLUSTER/$ng came back as ${sz@Q}, which is not a number. Refusing rather than reading it as zero." ;;
+    *) others="$others $ng($sz)" ;;
+  esac
+done
+[ -z "$others" ] || fail "another GPU node group is already running:$others. This session's deadline names only $NODEGROUP, so that card would keep billing after the deadline fires. Scale it to zero, or if another session owns it, wait for it."
+
+TTL_ROLE_ARN="${TTL_ROLE_ARN:-$(terraform -chdir=infra/aws/bootstrap output -raw ttl_scaledown_role_arn 2>/dev/null)}"
+export TTL_ROLE_ARN
+# shellcheck source=hack/lib/gpu-ttl.sh
+. "$(dirname "$0")/lib/gpu-ttl.sh"
+if true; then
+  ttl_arm "$CLUSTER" "$NODEGROUP" "${TTL_MINUTES:-240}" \
+    || fail "could not register the TTL scale-down; refusing to start a card with no deadline"
+
+  # What is checked here, and what is not.
+  #
+  # The first shape of this check multiplied the per-cell TIMEOUT budget by the cell count and refused if
+  # the product exceeded the deadline. At the shipped defaults that is 456 minutes against 240, so the
+  # design's own repetition count -- four, which a unit test pins because below it the incremental interval
+  # is a bootstrap over very few blocks -- could never start. Lowering REPS to make the arithmetic work was
+  # the wrong repair: it traded a statistical property for a scheduling one, quietly.
+  #
+  # Those 1800 seconds are two rollout TIMEOUTS, not two expected rollouts. A budget is what the script
+  # waits before giving up, and refusing a run because the worst case does not fit refuses most runs that
+  # would have finished. So the pessimistic product is gone and only the floor stays here: a deadline that
+  # cannot hold even one cell is a session with nothing to gain. The real bound is measured per cell, in
+  # the loop, where a slow matrix stops on a cell boundary with everything before it intact.
+  ttl_min="${TTL_MINUTES:-240}"
+  cell_floor_min=$(( (1800 + 180 + ${REPLAY_SECONDS:-300} + 59) / 60 ))
+  if [ "$ttl_min" -lt "$cell_floor_min" ]; then
+    ttl_disarm
+    fail "the deadline is ${ttl_min} min but one cell can take up to ${cell_floor_min} min, so this session could not finish even a single cell. Raise TTL_MINUTES."
+  fi
+fi
+
+# The card starts here, after the deadline exists.
 shared_nodes=$(k get nodes -l 'platform.lkhun9311.github.io/gpu-sharing=true' -o name 2>/dev/null | wc -l)
 if [ "$shared_nodes" -eq 0 ]; then
-  cat <<EOF
-
-No sharing node. Scale gpu_shared up, then re-run:
-
-    aws eks update-nodegroup-config --cluster-name <cluster> \\
-      --nodegroup-name gpu_shared --scaling-config minSize=0,maxSize=1,desiredSize=1
-
-EOF
-  fail "no node carries platform.lkhun9311.github.io/gpu-sharing"
+  say "no sharing node present; scaling $NODEGROUP to 1 -- the card starts billing here, and the deadline is already registered"
+  aws eks update-nodegroup-config --cluster-name "$CLUSTER" --nodegroup-name "$NODEGROUP" \
+    --scaling-config minSize=0,maxSize=1,desiredSize=1 >/dev/null || fail "could not scale $NODEGROUP up"
+  say "wait for the node to join (this takes a few minutes)"
+  for i in $(seq 1 60); do
+    shared_nodes=$(k get nodes -l 'platform.lkhun9311.github.io/gpu-sharing=true' -o name 2>/dev/null | wc -l)
+    [ "$shared_nodes" -gt 0 ] && break
+    [ "$i" = 60 ] && fail "the node never joined after ten minutes. The deadline will scale it down; to do it now: aws eks update-nodegroup-config --cluster-name $CLUSTER --nodegroup-name $NODEGROUP --scaling-config minSize=0,maxSize=1,desiredSize=0"
+    sleep 10
+  done
 fi
-SCALED_UP=1
 
-# The node group name comes from the node the session just qualified, not from a constant.
-#
-# EKS stamps eks.amazonaws.com/nodegroup on every managed-node-group member, so the node this session is
-# about names the group that must be scaled back down. A hardcoded "gpu_single" would be wrong the moment a
-# group is renamed, and wrong silently: the scale-down would return a ResourceNotFoundException that nobody
-# reads, on the exit path of the script that spends money.
-NODEGROUP=$(k get node -l 'platform.lkhun9311.github.io/gpu-sharing=true' \
+# Cross-check, not re-derive: a node from a different group means the deadline would scale down a group this
+# matrix is not using while the one it is using bills on.
+node_ng=$(k get node -l 'platform.lkhun9311.github.io/gpu-sharing=true' \
   -o jsonpath='{.items[0].metadata.labels.eks\.amazonaws\.com/nodegroup}' 2>/dev/null)
-[ -n "$NODEGROUP" ] || say "could not read the node's nodegroup label; exit will print the manual scale-down instead"
+if [ -n "$node_ng" ] && [ "$node_ng" != "$NODEGROUP" ]; then
+  fail "the deadline names $NODEGROUP but the sharing node belongs to $node_ng. Re-run with NODEGROUP=$node_ng."
+fi
+
 [ "$shared_nodes" -eq 1 ] || fail "$shared_nodes sharing nodes are up; two engines on two nodes are not sharing a card, and nothing downstream could tell that apart from a sharing result"
 
 # The two sharing overlays select the SAME node, so exactly one may be applied at a time: two plugins
@@ -326,9 +466,36 @@ EOF
 DURATION_MS=$(python3 -c "print(int(500 / (float('$RATE')/2) * 1000))")
 say "rate ${RATE}/s, duration $((DURATION_MS/1000))s per arm, ${REPS} repetitions, output $OUT"
 
+# Measured, like the M6 wrapper's: after the first cell, the elapsed time IS the budget, and it knows the
+# node's real speed and how long the rollouts actually took rather than how long they were allowed to take.
+cells_total=0; for _a in $ARMS; do cells_total=$(( cells_total + REPS )); done
+cell_secs=0; cells_done=0; cell_n=0
+cell_deadline_check() {
+  local remain per projected
+  [ "$cells_done" -eq 0 ] && return 0
+  remain=$(ttl_remaining_minutes "$CLUSTER" "$NODEGROUP" 2>/dev/null) || return 0
+  [ -n "$remain" ] || return 0
+  per=$(( (cell_secs + cells_done - 1) / cells_done ))
+  # A fifth of headroom, because cells differ by arm -- the sharing arms roll out two engines and the
+  # exclusive arm rolls out one -- and a projection that only just fits is one slow cell from being cut.
+  projected=$(( ((cells_total - cells_done) * per * 12 / 10 + 59) / 60 ))
+  if [ "$projected" -ge "$remain" ]; then
+    echo >&2
+    echo "STOPPING: $(( cells_total - cells_done )) cells left at ~$(( per / 60 )) min each needs about ${projected} min," >&2
+    echo "  and the deadline fires in ${remain} min. Being cut mid-cell would waste that cell's rollouts and" >&2
+    echo "  leave a matrix missing one of the topologies it exists to compare, so it stops on a boundary." >&2
+    echo "  ${cells_done} of ${cells_total} cells are complete. Re-arm with a longer TTL_MINUTES to continue." >&2
+    return 1
+  fi
+  return 0
+}
+
 for rep in $(seq 1 "$REPS"); do
   for arm in $ARMS; do
-    say "rep $rep arm $arm"
+    cell_n=$(( cell_n + 1 ))
+    cell_deadline_check || exit 1
+    CELL_T0=$(date +%s)
+    say "rep $rep arm $arm  (cell $cell_n/$cells_total)"
     deploy_arm "$arm"
     [ -n "$PF_PID" ] && kill "$PF_PID" 2>/dev/null
     k port-forward -n "$NS_A" deploy/gateway 18080:8080 >/dev/null 2>&1 &
@@ -346,6 +513,8 @@ for rep in $(seq 1 "$REPS"); do
       --raw-out "$OUT/raw-$arm-$rep.jsonl" || fail "replay $arm"
     [ -s "$OUT/raw-$arm-$rep.jsonl" ] || fail "no raw evidence for $arm rep $rep"
     say "  $(wc -l < "$OUT/raw-$arm-$rep.jsonl") rows"
+    cell_secs=$(( cell_secs + $(date +%s) - CELL_T0 ))
+    cells_done=$(( cells_done + 1 ))
   done
 done
 

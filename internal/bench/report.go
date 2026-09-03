@@ -428,7 +428,16 @@ func EvaluateChecks(r1, staticCap, kvAware ArmSummary, incrementalCI CI, matchTo
 func FormatReport(summaries []ArmSummary, checks Checks, matchTolerance float64) string {
 	var b strings.Builder
 	b.WriteString("M5-b benchmark report\n\n")
-	fmt.Fprintf(&b, "%-12s %8s %8s %8s %8s %8s %8s %8s %8s\n", "arm", "total", "done", "429", "timeout", "ttftP50", "ttftP95", "ttftP99", "tailN")
+	// reps is printed for the same reason tailN is. The incremental interval below is a bootstrap over
+	// REPETITIONS -- BootstrapCI resamples whole repetitions, so the repetition count IS the n of the only
+	// interval this study reports. Without it on the page, a CI built from two blocks is typographically
+	// indistinguishable from one built from four, and the two mean very different things: with two blocks
+	// the nearest-rank 2.5/97.5 percentiles land on the smaller and larger of exactly two numbers, so the
+	// printed interval is their range and not a 95% interval at all.
+	//
+	// A reader who cannot see the block count has no way to tell those apart, which is the same defect the
+	// tailN column exists to prevent one level down.
+	fmt.Fprintf(&b, "%-12s %8s %8s %8s %8s %8s %8s %8s %8s %8s\n", "arm", "total", "done", "429", "timeout", "ttftP50", "ttftP95", "ttftP99", "tailN", "reps")
 	for _, s := range summaries {
 		censored := ""
 		if s.Censored {
@@ -440,8 +449,8 @@ func FormatReport(summaries []ArmSummary, checks Checks, matchTolerance float64)
 		if s.TailSampleSize > 0 && s.TailSampleSize < MinTailSamples {
 			thin = fmt.Sprintf(" (p99 is the maximum: %d < %d premium completions)", s.TailSampleSize, MinTailSamples)
 		}
-		fmt.Fprintf(&b, "%-12s %8d %8d %8d %8d %8.1f %8.1f %8.1f %8d%s%s\n",
-			s.Arm, s.Total, s.Completed, s.Rejected, s.TimedOut, s.TTFTMsP50, s.TTFTMsP95, s.TTFTMsP99, s.TailSampleSize, censored, thin)
+		fmt.Fprintf(&b, "%-12s %8d %8d %8d %8d %8.1f %8.1f %8.1f %8d %8d%s%s\n",
+			s.Arm, s.Total, s.Completed, s.Rejected, s.TimedOut, s.TTFTMsP50, s.TTFTMsP95, s.TTFTMsP99, s.TailSampleSize, s.RepetitionCount, censored, thin)
 	}
 	// The threshold's own evidence, printed before the checks because it qualifies them: the checks compare
 	// arms, and this says whether the number those arms were configured with did any work at all.

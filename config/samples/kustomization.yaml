@@ -1,4 +1,7 @@
 # 프로젝트 sample CR manifest 목록입니다.
+#
+# config/default가 이 디렉터리를 더 이상 합성하지 않으므로 namespace를 여기서 직접 지정한다.
+namespace: gpu-platform-control-plane-system
 resources:
 - platform_v1_nodehealth.yaml
 - platform_v1_gpuquotapolicy.yaml

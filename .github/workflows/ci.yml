@@ -41,7 +41,7 @@ jobs:
     # Push only from the default branch; PRs (including forks) run tests only.
     #
     # The provisioning gate skips this job cleanly until AWS exists.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.TF_STATE_BUCKET != ''
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.INFRA_ENABLED == 'true'
     needs: infra-validate
     timeout-minutes: 30
     permissions:

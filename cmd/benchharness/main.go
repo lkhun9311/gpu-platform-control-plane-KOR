@@ -27,6 +27,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -34,6 +35,27 @@ import (
 
 	"github.com/lkhun9311/gpu-mlops-platform-control-plane/internal/bench"
 )
+
+// traceRefFor returns the trace path as a manifest should record it: relative to the manifest's own
+// directory when both live under it, and unchanged otherwise.
+//
+// LoadManifest resolves relative paths against the manifest's directory, so a working-directory-relative
+// path recorded verbatim is joined twice and cannot be found.
+func traceRefFor(manifestOut, traceOut string) string {
+	if manifestOut == "" || filepath.IsAbs(traceOut) {
+		return traceOut
+	}
+	rel, err := filepath.Rel(filepath.Dir(manifestOut), traceOut)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		// Outside the manifest's directory: an absolute path is the only unambiguous answer.
+		abs, absErr := filepath.Abs(traceOut)
+		if absErr != nil {
+			return traceOut
+		}
+		return abs
+	}
+	return rel
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -176,7 +198,18 @@ func genTrace(args []string) error {
 		PromptCorpusSHA: bench.PromptCorpusSHA256,
 		Arm:             *arm,
 		GatewayURL:      *gatewayURL,
-		TracePath:       *traceOut,
+		// Relative to the MANIFEST, not to the working directory.
+		//
+		// LoadManifest resolves a relative TracePath against the manifest's own directory, which is what
+		// makes a run directory portable. gen-trace wrote the flag through verbatim, so
+		// `--trace-out hack/run-x/trace.jsonl --manifest-out hack/run-x/manifest.yaml` recorded a
+		// working-directory path that the loader then joined onto hack/run-x again:
+		//
+		//   read trace file hack/run-x/hack/run-x/trace-R1-1.jsonl: no such file or directory
+		//
+		// The paid run failed on its first replay because of it. Storing the path the loader expects keeps
+		// the manifest movable, which is the point of recording a checksum beside it.
+		TracePath:       traceRefFor(*manifestOut, *traceOut),
 		TraceChecksum:   bench.Checksum(traceBytes),
 		Model:           *model,
 		TimeoutMs:       *timeoutMs,

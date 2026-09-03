@@ -15,41 +15,6 @@
           ]
         }
       }
-    },
-    {
-      "Sid": "DenyUnapprovedInstanceTypesOnLaunchTemplates",
-      "Effect": "Deny",
-      "Action": [
-        "ec2:CreateLaunchTemplate",
-        "ec2:CreateLaunchTemplateVersion"
-      ],
-      "Resource": "*",
-      "Condition": {
-        "StringNotLike": {
-          "ec2:InstanceType": [
-            "t3.*",
-            "g4dn.*",
-            "g5.*"
-          ]
-        }
-      }
-    },
-    {
-      "Sid": "DenyUnapprovedInstanceTypesOnManagedNodeGroups",
-      "Effect": "Deny",
-      "Action": [
-        "eks:CreateNodegroup"
-      ],
-      "Resource": "*",
-      "Condition": {
-        "ForAnyValue:StringNotLike": {
-          "eks:instanceTypes": [
-            "t3.*",
-            "g4dn.*",
-            "g5.*"
-          ]
-        }
-      }
     }
   ]
 }

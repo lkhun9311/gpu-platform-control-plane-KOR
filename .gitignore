@@ -123,3 +123,17 @@ Thumbs.db
 # directory is 248 KB.
 ex/*
 !ex/*.json
+
+# Paid-session output, which belongs beside the session rather than in the source tree.
+#
+# hack/m5b-arms.sh writes a run directory per invocation -- traces, manifests, raw JSONL, the report -- and
+# hack/m5b-gpu-session.sh writes .m5b-rate for the second shell to read. Three runs of these landed in the
+# repository because a commit used `git add -A`, which is how ~40 files of experiment output ended up in a
+# source history that has to stay readable.
+#
+# The evidence still matters and is kept: it is copied out of the working tree when a run finishes. What
+# does not belong here is a growing pile of one-off measurements that no code reads.
+hack/m5b-run-*/
+hack/m5c-run-*/
+hack/m5b-gpu-session-evidence.log
+.m5b-rate

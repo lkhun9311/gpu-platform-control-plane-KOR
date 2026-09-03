@@ -124,7 +124,32 @@ module "eks" {
     # Scaling to 2 doubles the burn for as long as both are up, and the node axis is the only thing it buys.
     # hack/gpu-session-preregistration.md says what the session delivers with one node and what it does not.
     gpu = {
-      name           = "gpu"
+      name = "gpu"
+
+      # Same 100 GiB as gpu_single, and for the same measured reason: the vLLM image alone exceeds the 20 GiB
+      # EKS default. See the note on gpu_single for what was measured and how.
+      # On the launch template, not disk_size.
+      #
+      # disk_size was set here first and terraform reported no change at all: this module overrides it to
+      # null whenever a custom launch template is in play, which is the default --
+      #
+      #   disk_size = var.use_custom_launch_template ? null : var.disk_size
+      #     # if using a custom LT, set disk size on custom LT or else it will error here
+      #
+      # so the value sat in this file, passed a unit test that read this file, and never reached a node. The
+      # cluster kept the AMI default of 20 GiB and the engine kept being evicted. A setting the tooling
+      # silently discards is the same defect as a guard whose condition can never be true.
+      block_device_mappings = {
+        root = {
+          device_name = "/dev/xvda"
+          ebs = {
+            volume_size           = 100
+            volume_type           = "gp3"
+            encrypted             = true
+            delete_on_termination = true
+          }
+        }
+      }
       subnet_ids     = local.gpu_subnets
       instance_types = [var.gpu_node_instance_type]
       # On-Demand rather than Spot. A reclaimed Spot node mid-run does not fail the experiment cleanly -- it
@@ -198,30 +223,68 @@ module "eks" {
     # special case. max_size is 1 rather than 2: a second node here buys nothing, because the arms are
     # compared against one engine and a second KV pool is the one thing config/vllm forbids.
     gpu_single = {
-      name           = "gpu_single"
+      name = "gpu_single"
+      # 100 GiB, and the number comes from measurement rather than a round guess.
+      #
+      # EKS defaults to 20 GiB when disk_size is unset, and nothing here set it. The first paid session got as
+      # far as the engine rollout and then the node reported DiskPressure=True: kubelet evicted the vLLM Pod
+      # twice and left the third Pending, and the session refused after the card had been billing for fifteen
+      # minutes.
+      #
+      # What actually has to fit, measured without renting anything -- the image was pulled locally and the
+      # weights read from the Hugging Face API:
+      #
+      #   vllm/vllm-openai   9.11 GiB compressed, 21.7 GiB by docker history, 30.8 GiB by docker system df
+      #   Qwen2.5-3B-Instruct weights  6.18 GiB across two safetensors files
+      #   AL2023 NVIDIA AMI, kubelet, containerd, DCGM and the device plugin  roughly 5 GiB
+      #
+      # So the image alone does not fit in 20 GiB. 100 GiB covers the worst reading of all three plus room
+      # for two image versions coexisting during a rollout, and gp3 in Seoul is about $0.0125/hour for it --
+      # under ten cents for a six-hour session, against a card that costs thirty times that per hour.
+      # On the launch template, not disk_size.
+      #
+      # disk_size was set here first and terraform reported no change at all: this module overrides it to
+      # null whenever a custom launch template is in play, which is the default --
+      #
+      #   disk_size = var.use_custom_launch_template ? null : var.disk_size
+      #     # if using a custom LT, set disk size on custom LT or else it will error here
+      #
+      # so the value sat in this file, passed a unit test that read this file, and never reached a node. The
+      # cluster kept the AMI default of 20 GiB and the engine kept being evicted. A setting the tooling
+      # silently discards is the same defect as a guard whose condition can never be true.
+      block_device_mappings = {
+        root = {
+          device_name = "/dev/xvda"
+          ebs = {
+            volume_size           = 100
+            volume_type           = "gp3"
+            encrypted             = true
+            delete_on_termination = true
+          }
+        }
+      }
       subnet_ids     = local.gpu_single_subnets
       instance_types = [var.gpu_single_node_instance_type]
 
-      # ON_DEMAND, and this is a retreat from a decision that was right on the reasoning and unbuildable on
-      # this account.
+      # Spot, and the reason it is safe to be Spot is a refusal rather than an assumption.
       #
-      # The reasoning stands, and it is kept because it is what makes the retreat temporary: M5-b measures
-      # admission under KV pressure, an interruption ends an arm without biasing it, and an arm that produced
-      # no records is refused rather than reported. Seoul spot for g5.xlarge was $0.357-$0.424 against an
-      # On-Demand $1.237 -- 66 to 71 percent off, which this study needs as repetitions rather than savings.
+      # M5-b measures admission under KV pressure. An interruption ends an arm without biasing it, and an arm
+      # that produced no records is refused rather than reported -- so the failure mode of Spot here is a
+      # rerun, not a wrong number. Seoul g5.xlarge Spot runs $0.357-$0.424 against an On-Demand $1.237, which
+      # this study spends on repetitions rather than banks.
       #
-      # What killed it is that AWS meters Spot under a SEPARATE quota, and this account has none:
+      # Spot is metered under a SEPARATE quota from On-Demand, and an On-Demand increase does not raise it.
+      # A Spot node group creates without complaint at desired_size = 0 and fails at the first scale-up of a
+      # paid session, which is the shape this repository has shipped three times: the region defaulting to
+      # us-east-1, the node groups pinned to subnet zero, and this. terraform_data.gpu_quota in placement.tf
+      # reads both quotas and refuses at plan time instead.
       #
-      #   L-DB2E81BA  Running On-Demand G and VT instances   52     <- granted 2026-08-26
-      #   L-3819A6DF  All G and VT Spot Instance Requests     0     <- never requested
-      #
-      # An On-Demand increase does not raise the Spot limit. A SPOT node group is created without complaint
-      # at desired_size = 0, and the FIRST SCALE-UP OF A PAID SESSION fails on the quota -- the same shape as
-      # the region defaulting to us-east-1 and the node groups pinned to subnet zero, and the third time this
-      # repository has shipped a GPU setting whose failure waits for the moment money is being spent.
-      #
-      # terraform_data.gpu_quota in placement.tf refuses at plan time now instead. Flip this back only after
-      # the Spot quota is granted; that precondition is what will say when.
+      # The numbers are deliberately NOT written here. This comment used to carry a transcribed table saying
+      # the Spot quota was 0 and had never been requested. It was granted on 2026-08-27 and vpc.tf was
+      # flipped to SPOT the same day; the table was not touched, so for five days the file said the opposite
+      # of what it did -- and a review reading the comment concluded terraform would refuse to build, which
+      # it would not. A comment that restates a mutable number is a second source of truth that nothing
+      # fails when it drifts. placement.tf reads the live values; look there.
       capacity_type = local.gpu_capacity["gpu_single"]
       min_size      = 0
       max_size      = 1
@@ -263,7 +326,32 @@ module "eks" {
     # max_size 1 is what makes co-location certain. Two engines on two nodes are not sharing a card, and
     # nothing downstream could tell that apart from a sharing result.
     gpu_shared = {
-      name           = "gpu_shared"
+      name = "gpu_shared"
+
+      # Same 100 GiB as gpu_single, and for the same measured reason: the vLLM image alone exceeds the 20 GiB
+      # EKS default. See the note on gpu_single for what was measured and how.
+      # On the launch template, not disk_size.
+      #
+      # disk_size was set here first and terraform reported no change at all: this module overrides it to
+      # null whenever a custom launch template is in play, which is the default --
+      #
+      #   disk_size = var.use_custom_launch_template ? null : var.disk_size
+      #     # if using a custom LT, set disk size on custom LT or else it will error here
+      #
+      # so the value sat in this file, passed a unit test that read this file, and never reached a node. The
+      # cluster kept the AMI default of 20 GiB and the engine kept being evicted. A setting the tooling
+      # silently discards is the same defect as a guard whose condition can never be true.
+      block_device_mappings = {
+        root = {
+          device_name = "/dev/xvda"
+          ebs = {
+            volume_size           = 100
+            volume_type           = "gp3"
+            encrypted             = true
+            delete_on_termination = true
+          }
+        }
+      }
       subnet_ids     = local.gpu_shared_subnets
       instance_types = [var.gpu_shared_node_instance_type]
 
