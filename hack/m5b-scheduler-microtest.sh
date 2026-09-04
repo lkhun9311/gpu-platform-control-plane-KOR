@@ -92,10 +92,27 @@ AMI=$(aws ssm get-parameter --region "$REGION" \
 
 # A default subnet, because default subnets assign public IPs and therefore reach the internet through an
 # internet gateway rather than a NAT gateway. That is the whole cost argument: inbound is free there.
-SUBNET=$(aws ec2 describe-subnets --region "$REGION" \
-  --filters Name=default-for-az,Values=true Name=map-public-ip-on-launch,Values=true \
-  --query 'Subnets[0].SubnetId' --output text)
-[ "$SUBNET" != "None" ] || fail "no default public subnet; this test relies on one for free ingress"
+#
+# The zone has to be one that actually offers this instance type, which is not every zone in the region: the
+# first attempt took Subnets[0], landed in ap-northeast-2b, and was refused because g5 is not offered there.
+# AWS will say which zones do, so it is asked rather than assumed.
+ZONES=$(aws ec2 describe-instance-type-offerings --region "$REGION" \
+  --location-type availability-zone \
+  --filters "Name=instance-type,Values=$INSTANCE_TYPE" \
+  --query 'InstanceTypeOfferings[].Location' --output text)
+[ -n "$ZONES" ] || fail "$INSTANCE_TYPE is offered in no availability zone of $REGION"
+say "$INSTANCE_TYPE is offered in: $ZONES"
+
+SUBNET=""
+for z in $ZONES; do
+  SUBNET=$(aws ec2 describe-subnets --region "$REGION" \
+    --filters Name=default-for-az,Values=true Name=map-public-ip-on-launch,Values=true \
+      "Name=availability-zone,Values=$z" \
+    --query 'Subnets[0].SubnetId' --output text)
+  [ -n "$SUBNET" ] && [ "$SUBNET" != "None" ] && { say "using $SUBNET in $z"; break; }
+  SUBNET=""
+done
+[ -n "$SUBNET" ] || fail "no default public subnet in any zone offering $INSTANCE_TYPE; this test relies on one for free ingress"
 
 say "ami $AMI in $SUBNET"
 
@@ -237,15 +254,30 @@ cp "$UD" "$OUT/user-data.sh"
 cp "$MEASURE" "$OUT/microtest.py"
 
 say "launching $INSTANCE_TYPE spot (max \$$MAX_SPOT_PRICE/h)"
-IID=$(aws ec2 run-instances --region "$REGION" \
-  --image-id "$AMI" --instance-type "$INSTANCE_TYPE" --subnet-id "$SUBNET" \
-  --iam-instance-profile "Name=$STACK" \
-  --instance-initiated-shutdown-behavior terminate \
-  --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":150,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
-  --instance-market-options "{\"MarketType\":\"spot\",\"SpotOptions\":{\"MaxPrice\":\"$MAX_SPOT_PRICE\",\"SpotInstanceType\":\"one-time\"}}" \
-  --user-data "file://$UD" \
-  --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$STACK},{Key=purpose,Value=m5b-scheduler-microtest}]" \
-  --query 'Instances[0].InstanceId' --output text) || fail "launch failed"
+# Retried across zones, because "no capacity right now" is a normal Spot answer rather than a fault, and a
+# single-zone attempt turns it into an aborted run.
+launch_in() {
+  aws ec2 run-instances --region "$REGION" \
+    --image-id "$AMI" --instance-type "$INSTANCE_TYPE" --subnet-id "$SUBNET" \
+    --iam-instance-profile "Name=$STACK" \
+    --instance-initiated-shutdown-behavior terminate \
+    --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":150,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
+    --instance-market-options "{\"MarketType\":\"spot\",\"SpotOptions\":{\"MaxPrice\":\"$MAX_SPOT_PRICE\",\"SpotInstanceType\":\"one-time\"}}" \
+    --user-data "file://$UD" \
+    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$STACK},{Key=purpose,Value=m5b-scheduler-microtest}]" \
+    --query 'Instances[0].InstanceId' --output text
+}
+IID=""
+for z in $ZONES; do
+  SUBNET=$(aws ec2 describe-subnets --region "$REGION" \
+    --filters Name=default-for-az,Values=true Name=map-public-ip-on-launch,Values=true \
+      "Name=availability-zone,Values=$z" --query 'Subnets[0].SubnetId' --output text)
+  [ -n "$SUBNET" ] && [ "$SUBNET" != "None" ] || continue
+  say "trying $z ($SUBNET)"
+  IID=$(launch_in 2>>"$OUT/launch-errors.txt") && [ -n "$IID" ] && [ "$IID" != "None" ] && break
+  IID=""
+done
+[ -n "$IID" ] || fail "no zone would launch $INSTANCE_TYPE; see $OUT/launch-errors.txt"
 echo "$IID" > "$OUT/instance-id"
 say "instance $IID"
 
