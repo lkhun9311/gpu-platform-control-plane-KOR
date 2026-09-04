@@ -135,5 +135,8 @@ ex/*
 # does not belong here is a growing pile of one-off measurements that no code reads.
 hack/m5b-run-*/
 hack/m5c-run-*/
+# Microtest output: instance ids, user-data, and the raw results, which are copied into
+# docs/evidence when a run produces something worth keeping.
+hack/microtest-*/
 hack/m5b-gpu-session-evidence.log
 .m5b-rate

@@ -1,0 +1,394 @@
+{
+  "image": "vllm/vllm-openai@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967",
+  "model": "Qwen/Qwen2.5-3B-Instruct",
+  "cells": [
+    {
+      "max_num_batched_tokens": 512,
+      "scheduling_policy": "fcfs",
+      "startup": [
+        "(APIServer pid=1) INFO 09-04 08:59:18 [api_utils.py:273] non-default args: {'model_tag': 'Qwen/Qwen2.5-3B-Instruct', 'model': 'Qwen/Qwen2.5-3B-Instruct', 'dtype': 'half', 'max_model_len': 16384, 'gpu_memory_utilization': 0.9, 'enable_prefix_caching': False, 'max_num_batched_tokens': 512, 'max_num_seqs': 64}",
+        "(APIServer pid=1) INFO 09-04 09:01:09 [scheduler.py:242] Chunked prefill is enabled with max_num_batched_tokens=512.",
+        "(EngineCore pid=84) INFO 09-04 09:04:04 [gpu_worker.py:563] Available KV cache memory: 13.28 GiB",
+        "(EngineCore pid=84) INFO 09-04 09:04:04 [kv_cache_utils.py:2235] GPU KV cache size: 386,912 tokens"
+      ],
+      "baseline_ms": 48.726507000083075,
+      "contended": [
+        {
+          "short_ttft_ms": 668.3418079999228,
+          "long_ttft_ms": 686.3709310000559,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 669.204407000052,
+          "long_ttft_ms": 684.9932829998124,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 671.442844000012,
+          "long_ttft_ms": 684.9309290000747,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 668.1156350000492,
+          "long_ttft_ms": 684.3348260001676,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 672.4463709999782,
+          "long_ttft_ms": 685.0363759999709,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 672.4115189999793,
+          "long_ttft_ms": 684.6225819999745,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 671.9044199999189,
+          "long_ttft_ms": 684.770110000045,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 672.7983209998456,
+          "long_ttft_ms": 684.7865509998883,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 671.9744740000806,
+          "long_ttft_ms": 684.6108720001212,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 672.7213870001378,
+          "long_ttft_ms": 684.816132999913,
+          "overlapped": true
+        }
+      ],
+      "contended_median_ms": 671.9394469999997,
+      "ratio": 13.790018787902325
+    },
+    {
+      "max_num_batched_tokens": 512,
+      "scheduling_policy": "priority",
+      "startup": [
+        "(APIServer pid=1) INFO 09-04 09:05:10 [api_utils.py:273] non-default args: {'model_tag': 'Qwen/Qwen2.5-3B-Instruct', 'model': 'Qwen/Qwen2.5-3B-Instruct', 'dtype': 'half', 'max_model_len': 16384, 'gpu_memory_utilization': 0.9, 'enable_prefix_caching': False, 'max_num_batched_tokens': 512, 'max_num_seqs': 64, 'scheduling_policy': 'priority'}",
+        "(APIServer pid=1) INFO 09-04 09:05:28 [scheduler.py:242] Chunked prefill is enabled with max_num_batched_tokens=512.",
+        "(EngineCore pid=83) INFO 09-04 09:06:12 [gpu_worker.py:563] Available KV cache memory: 13.28 GiB",
+        "(EngineCore pid=83) INFO 09-04 09:06:12 [kv_cache_utils.py:2235] GPU KV cache size: 386,912 tokens"
+      ],
+      "baseline_ms": 48.54728600003,
+      "contended": [
+        {
+          "short_ttft_ms": 76.82105200001388,
+          "long_ttft_ms": 686.0955639999702,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 73.24883799992676,
+          "long_ttft_ms": 683.5077470000215,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 75.48264499996549,
+          "long_ttft_ms": 684.2364670001189,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 76.10913099983918,
+          "long_ttft_ms": 683.8230430000749,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 75.41024200008906,
+          "long_ttft_ms": 683.6338339999202,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 76.35381500017502,
+          "long_ttft_ms": 683.9502410000478,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 75.3108159999556,
+          "long_ttft_ms": 683.7496199998441,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 75.90373999983058,
+          "long_ttft_ms": 683.2523220000439,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 76.55943700001444,
+          "long_ttft_ms": 684.4789209999362,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 76.73663600007785,
+          "long_ttft_ms": 683.7891410000339,
+          "overlapped": true
+        }
+      ],
+      "contended_median_ms": 76.00643549983488,
+      "ratio": 1.5656165722588058
+    },
+    {
+      "max_num_batched_tokens": 2048,
+      "scheduling_policy": "fcfs",
+      "startup": [
+        "(APIServer pid=1) INFO 09-04 09:06:58 [api_utils.py:273] non-default args: {'model_tag': 'Qwen/Qwen2.5-3B-Instruct', 'model': 'Qwen/Qwen2.5-3B-Instruct', 'dtype': 'half', 'max_model_len': 16384, 'gpu_memory_utilization': 0.9, 'enable_prefix_caching': False, 'max_num_batched_tokens': 2048, 'max_num_seqs': 64}",
+        "(EngineCore pid=83) INFO 09-04 09:08:00 [gpu_worker.py:563] Available KV cache memory: 12.69 GiB",
+        "(EngineCore pid=83) INFO 09-04 09:08:00 [kv_cache_utils.py:2235] GPU KV cache size: 369,680 tokens"
+      ],
+      "baseline_ms": 48.810785000114265,
+      "contended": [
+        {
+          "short_ttft_ms": 610.0584939999862,
+          "long_ttft_ms": 624.5747259999916,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 606.7620970000007,
+          "long_ttft_ms": 622.6534370000536,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 606.9035349999012,
+          "long_ttft_ms": 623.4093900000062,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 611.0834819999127,
+          "long_ttft_ms": 623.2692230000794,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 607.6749979999931,
+          "long_ttft_ms": 624.0298549998897,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 610.1478589998806,
+          "long_ttft_ms": 623.5094950000075,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 606.6475100001298,
+          "long_ttft_ms": 622.7388620000056,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 608.7326079998547,
+          "long_ttft_ms": 623.3826590000717,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 610.8640490001562,
+          "long_ttft_ms": 623.9372790000743,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 610.1601589998609,
+          "long_ttft_ms": 622.5801320001665,
+          "overlapped": true
+        }
+      ],
+      "contended_median_ms": 609.3955509999205,
+      "ratio": 12.484854545947046
+    },
+    {
+      "max_num_batched_tokens": 2048,
+      "scheduling_policy": "priority",
+      "startup": [
+        "(APIServer pid=1) INFO 09-04 09:08:45 [api_utils.py:273] non-default args: {'model_tag': 'Qwen/Qwen2.5-3B-Instruct', 'model': 'Qwen/Qwen2.5-3B-Instruct', 'dtype': 'half', 'max_model_len': 16384, 'gpu_memory_utilization': 0.9, 'enable_prefix_caching': False, 'max_num_batched_tokens': 2048, 'max_num_seqs': 64, 'scheduling_policy': 'priority'}",
+        "(EngineCore pid=83) INFO 09-04 09:09:47 [gpu_worker.py:563] Available KV cache memory: 12.69 GiB",
+        "(EngineCore pid=83) INFO 09-04 09:09:47 [kv_cache_utils.py:2235] GPU KV cache size: 369,680 tokens"
+      ],
+      "baseline_ms": 48.59798600000431,
+      "contended": [
+        {
+          "short_ttft_ms": 235.9110590000455,
+          "long_ttft_ms": 630.1904480001213,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 234.96966499988048,
+          "long_ttft_ms": 628.5641359997953,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 234.41756400006852,
+          "long_ttft_ms": 627.583568999853,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 232.44145299986485,
+          "long_ttft_ms": 628.0828690000817,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 235.58086000002731,
+          "long_ttft_ms": 628.2734200001414,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 235.70299599987266,
+          "long_ttft_ms": 627.3546879999685,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 235.5977909999183,
+          "long_ttft_ms": 627.8528360001019,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 235.90843900001346,
+          "long_ttft_ms": 628.622200999871,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 235.16675599989867,
+          "long_ttft_ms": 628.247508999948,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 235.43926199999987,
+          "long_ttft_ms": 627.7162280000539,
+          "overlapped": true
+        }
+      ],
+      "contended_median_ms": 235.5100610000136,
+      "ratio": 4.846086852241011
+    },
+    {
+      "max_num_batched_tokens": 8192,
+      "scheduling_policy": "fcfs",
+      "startup": [
+        "(APIServer pid=1) INFO 09-04 09:10:33 [api_utils.py:273] non-default args: {'model_tag': 'Qwen/Qwen2.5-3B-Instruct', 'model': 'Qwen/Qwen2.5-3B-Instruct', 'dtype': 'half', 'max_model_len': 16384, 'gpu_memory_utilization': 0.9, 'enable_prefix_caching': False, 'max_num_batched_tokens': 8192, 'max_num_seqs': 64}",
+        "(APIServer pid=1) INFO 09-04 09:10:50 [scheduler.py:242] Chunked prefill is enabled with max_num_batched_tokens=8192.",
+        "(EngineCore pid=83) INFO 09-04 09:11:35 [gpu_worker.py:563] Available KV cache memory: 13.23 GiB",
+        "(EngineCore pid=83) INFO 09-04 09:11:35 [kv_cache_utils.py:2235] GPU KV cache size: 385,216 tokens"
+      ],
+      "baseline_ms": 48.701512999969054,
+      "contended": [
+        {
+          "short_ttft_ms": 595.8606729998337,
+          "long_ttft_ms": 588.6556030000065,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 577.1861600001102,
+          "long_ttft_ms": 589.5194019999508,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 574.0518019999854,
+          "long_ttft_ms": 587.3069159999886,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 575.2074370000173,
+          "long_ttft_ms": 587.4094519999744,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 575.3112129998499,
+          "long_ttft_ms": 588.4744830000272,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 573.3227999999144,
+          "long_ttft_ms": 587.6383149998219,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 574.5236380000733,
+          "long_ttft_ms": 587.5058679998801,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 575.4885139999715,
+          "long_ttft_ms": 587.5789220001479,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 574.8752980000518,
+          "long_ttft_ms": 587.7044390001629,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 575.7666399999835,
+          "long_ttft_ms": 587.9848249999213,
+          "overlapped": true
+        }
+      ],
+      "contended_median_ms": 575.2593249999336,
+      "ratio": 11.811939497655835
+    },
+    {
+      "max_num_batched_tokens": 8192,
+      "scheduling_policy": "priority",
+      "startup": [
+        "(APIServer pid=1) INFO 09-04 09:12:18 [api_utils.py:273] non-default args: {'model_tag': 'Qwen/Qwen2.5-3B-Instruct', 'model': 'Qwen/Qwen2.5-3B-Instruct', 'dtype': 'half', 'max_model_len': 16384, 'gpu_memory_utilization': 0.9, 'enable_prefix_caching': False, 'max_num_batched_tokens': 8192, 'max_num_seqs': 64, 'scheduling_policy': 'priority'}",
+        "(APIServer pid=1) INFO 09-04 09:12:35 [scheduler.py:242] Chunked prefill is enabled with max_num_batched_tokens=8192.",
+        "(EngineCore pid=82) INFO 09-04 09:13:21 [gpu_worker.py:563] Available KV cache memory: 13.23 GiB",
+        "(EngineCore pid=82) INFO 09-04 09:13:21 [kv_cache_utils.py:2235] GPU KV cache size: 385,216 tokens"
+      ],
+      "baseline_ms": 48.64979000012681,
+      "contended": [
+        {
+          "short_ttft_ms": 575.433331000113,
+          "long_ttft_ms": 589.2209959999946,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 572.3837670000194,
+          "long_ttft_ms": 587.0146899999327,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 575.1630550000755,
+          "long_ttft_ms": 588.3526370000709,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 572.9871210000965,
+          "long_ttft_ms": 587.1484980000332,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 575.9136179999587,
+          "long_ttft_ms": 588.6283219999768,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 575.6168809998599,
+          "long_ttft_ms": 588.2655719999548,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 573.7131529999715,
+          "long_ttft_ms": 587.0782239999244,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 575.8233499998369,
+          "long_ttft_ms": 588.018934000047,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 575.2008550000483,
+          "long_ttft_ms": 587.8325239998503,
+          "overlapped": true
+        },
+        {
+          "short_ttft_ms": 575.473269999975,
+          "long_ttft_ms": 587.6421330001449,
+          "overlapped": true
+        }
+      ],
+      "contended_median_ms": 575.3170930000806,
+      "ratio": 11.825685023482752
+    }
+  ]
+}
