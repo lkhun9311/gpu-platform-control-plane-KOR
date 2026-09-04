@@ -17,6 +17,8 @@ limitations under the License.
 package bench
 
 import (
+	"strings"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -52,6 +54,9 @@ var _ = Describe("Summarize", func() {
 			rows = append(rows, completedRow(i, float64(i), 100))
 		}
 		// One rejection and one timeout.
+		//
+		// Only the rejection is offered work. A timeout produced no response, so nothing says whether the
+		// guard admitted it or refused it, and the offered total is 8000 rather than 16000 for that reason.
 		rows = append(rows, RawRow{Index: 101, SendUnixNanos: 1, HTTPStatus: 429, EstInputTokens: 8000})
 		rows = append(rows, RawRow{Index: 102, SendUnixNanos: 1, ErrorKind: "timeout", EstInputTokens: 8000})
 
@@ -63,9 +68,15 @@ var _ = Describe("Summarize", func() {
 		Expect(s.TTFTMsP50).To(Equal(float64(50)))
 		Expect(s.TTFTMsP99).To(Equal(float64(99)))
 		Expect(s.TailSampleSize).To(Equal(100))
-		// Admitted-work over the eligible (>=4096-token) population: one offered (rejected) + one offered (timed out, not a 429 so counts as admitted work).
-		Expect(s.OfferedInputTokens).To(Equal(int64(16000)))
-		Expect(s.AdmittedInputTokens).To(Equal(int64(8000))) // the timeout row was admitted (not 429); the 429 was not
+		// Admitted-work over the eligible (>=4096-token) population.
+		//
+		// The rejection is offered and not admitted. The timeout is neither: no response arrived, so nothing
+		// says what the guard decided about it, and it is counted as a lost verdict instead. It used to be
+		// scored as admitted for the sole reason that it was not a 429, which is how an arm that transmitted
+		// nothing could report a perfect admission match.
+		Expect(s.OfferedInputTokens).To(Equal(int64(8000)))
+		Expect(s.AdmittedInputTokens).To(BeZero())
+		Expect(s.AdmissionLost).To(Equal(1))
 	})
 
 	It("flags the tail as censored when more than 1% of requests time out", func() {
@@ -241,7 +252,7 @@ var _ = Describe("the two ways a truncated arm used to certify itself", func() {
 		c := EvaluateChecks(r1, staticCap, kvAware, CI{}, 0.05)
 		Expect(c.IncrementalValuePass).To(BeFalse())
 		Expect(c.Invalid).To(BeTrue())
-		Expect(c.InvalidReason).To(ContainSubstring("no incremental confidence interval"))
+		Expect(c.InvalidReason).To(ContainSubstring("no usable confidence interval"))
 		Expect(c.OverallPass).To(BeFalse())
 	})
 
@@ -307,5 +318,279 @@ var _ = Describe("the truncated repetition that pooling hides", func() {
 
 		c := EvaluateChecks(r1, staticCap, kvAware, CI{Lo: 0.45, Hi: 0.65, Valid: true}, 0.05)
 		Expect(c.Invalid).To(BeFalse())
+	})
+})
+
+var _ = Describe("a request shed with 413", func() {
+	// The gateway refuses a request larger than the bucket can ever hold with 413 rather than 429, because the
+	// caller's remedy is a smaller prompt rather than a later one.
+	// The report knew only about 429, so the arm that shed the hardest was the one that reported shedding
+	// nothing: a paid static-cap replay refused 447 noisy requests and printed rejected=0.
+	// These rows are that run's shape -- status 413, error kind "http", no first token -- so the fix is pinned
+	// to the evidence that exposed it rather than to an invented one.
+	shed := func(index int, tenant string, noisy bool) RawRow {
+		return RawRow{
+			Index:          index,
+			SendUnixNanos:  1,
+			Tenant:         tenant,
+			IsNoisy:        noisy,
+			EstInputTokens: 8000,
+			HTTPStatus:     413,
+			ErrorKind:      "http",
+			LongThreshold:  4000,
+		}
+	}
+
+	It("is a rejection, not a failure", func() {
+		rows := []RawRow{completedRow(1, 10, 100), shed(2, "noisy", true), shed(3, "noisy", true)}
+		s := Summarize("static-cap", rows)
+		Expect(s.Rejected).To(Equal(2))
+		Expect(s.Failed).To(BeZero())
+	})
+
+	It("is not counted as admitted work", func() {
+		// Every one of these was refused, so an admission-match check reading this arm must see none of their
+		// tokens admitted. Counting them made a cap that admitted nothing look like a cap that admitted all.
+		rows := []RawRow{shed(1, "noisy", true), shed(2, "noisy", true)}
+		s := Summarize("static-cap", rows)
+		Expect(s.OfferedInputTokens).To(Equal(int64(16000)))
+		Expect(s.AdmittedInputTokens).To(BeZero())
+	})
+
+	It("does not censor the premium tail, because shedding is the treatment", func() {
+		// This is the distinction the 429 path already drew and this one did not: a rejection is the guard
+		// working, while a transport error is a measurement that got away. Ten refusals against 100 premium
+		// completions is far past the 1% censoring trigger, so a wrong answer here is visible.
+		var rows []RawRow
+		for i := 1; i <= 100; i++ {
+			r := completedRow(i, float64(i), 100)
+			r.Tenant = "premium"
+			r.LongThreshold = 4000
+			rows = append(rows, r)
+		}
+		for i := 101; i <= 110; i++ {
+			rows = append(rows, shed(i, "premium", false))
+		}
+		s := Summarize("static-cap", rows)
+		Expect(s.Censored).To(BeFalse())
+		Expect(s.Rejected).To(Equal(10))
+	})
+
+	It("counts against a threshold probe's rejections", func() {
+		rows := []RawRow{shed(1, thresholdProbePrefix+"long", false)}
+		s := Summarize("static-cap", rows)
+		Expect(s.ThresholdProbe[thresholdProbePrefix+"long"].Rejected).To(Equal(1))
+	})
+})
+
+var _ = Describe("a threshold probe the gateway never evaluated", func() {
+	// The probe tenants exist to prove the eligibility threshold discriminates between 4095 and 4096 estimated
+	// tokens. A 403 means the gateway refused the tenant before admission ever ran, so the threshold did not
+	// get to speak and the section has no evidence in it -- but it printed "rejected=0", which reads as the
+	// threshold having considered the probe and let it through. A paid run shipped 92 such rows per arm and the
+	// report presented them as a result.
+	probe := func(status int) ArmSummary {
+		return Summarize("off", []RawRow{{
+			Index:          1,
+			SendUnixNanos:  1,
+			Tenant:         thresholdProbePrefix + "over",
+			EstInputTokens: 4096,
+			HTTPStatus:     status,
+			ErrorKind:      "http",
+			LongThreshold:  4000,
+		}})
+	}
+
+	It("is tallied apart from a rejection", func() {
+		o := probe(403).ThresholdProbe[thresholdProbePrefix+"over"]
+		Expect(o.Unevaluated).To(Equal(1))
+		Expect(o.Rejected).To(BeZero())
+	})
+
+	It("voids the section rather than reporting a threshold result", func() {
+		out := FormatReport([]ArmSummary{probe(403)}, Checks{}, 0.05)
+		Expect(out).To(ContainSubstring("VOID"))
+	})
+
+	It("leaves the section standing when the probes were actually evaluated", func() {
+		out := FormatReport([]ArmSummary{probe(200)}, Checks{}, 0.05)
+		Expect(out).NotTo(ContainSubstring("VOID"))
+	})
+})
+
+var _ = Describe("admitted work when a request never reached admission", func() {
+	// The 413 fix put neverEvaluated into the probe tally and not into the admitted-work block directly above
+	// it, which is the same defect the fix was for, committed inside the fix. A 403 is not 429 and not 413, so
+	// shedByAdmission says false and the row was counted as work the guard admitted. In the paid run the
+	// probes estimate at 4,096 tokens against a 4,096 threshold, so all 180 of them per arm landed in the
+	// eligible population -- and static-cap, which admitted nothing at all, scored 737,280 admitted tokens.
+	//
+	// A request the gateway turned away on credentials is not admitted work and not offered work either: it
+	// is outside the population the guard was measured on, because the guard never saw it.
+	It("is neither offered nor admitted", func() {
+		rows := []RawRow{
+			completedRow(1, 10, 8000),
+			{Index: 2, SendUnixNanos: 1, Tenant: thresholdProbePrefix + "over", EstInputTokens: 4096, HTTPStatus: 403, ErrorKind: "http", LongThreshold: 4000},
+		}
+		rows[0].LongThreshold = 4000
+		s := Summarize("static-cap", rows)
+		Expect(s.OfferedInputTokens).To(Equal(int64(8000)))
+		Expect(s.AdmittedInputTokens).To(Equal(int64(8000)))
+	})
+})
+
+var _ = Describe("the eligible population when the evidence records a tier", func() {
+	// The gateway's rule is tier == standard AND input over the threshold. Summarize read only the threshold,
+	// because a raw row had no tier to read, and the two agreed only because the paid run's sole premium
+	// tenant sent 50-token prompts against a 4,096 threshold. A premium tenant with a long prompt would have
+	// put premium tokens into both terms of the admission-match fraction, which is a comparison of how much
+	// STANDARD work each arm let through.
+	//
+	// Evidence written before the gateway reported its tier carries none, and must keep scoring the way it
+	// did -- otherwise fixing this would silently rewrite the numbers of every run already on disk.
+	row := func(tier string, est int) RawRow {
+		r := completedRow(1, 10, est)
+		r.Tier = tier
+		r.LongThreshold = 4000
+		return r
+	}
+
+	It("excludes a long premium request", func() {
+		s := Summarize("off", []RawRow{row("premium", 8000), row("standard", 8000)})
+		Expect(s.OfferedInputTokens).To(Equal(int64(8000)))
+	})
+
+	It("still counts a long request when the evidence predates the tier header", func() {
+		s := Summarize("off", []RawRow{row("", 8000)})
+		Expect(s.OfferedInputTokens).To(Equal(int64(8000)))
+	})
+})
+
+var _ = Describe("an eligible request that never got an admission verdict", func() {
+	// A request the gateway never answered says nothing about what the guard admitted, and Summarize counted
+	// it as admitted work anyway: anything that was not 429, 413, 401 or 403 landed in both terms of the
+	// fraction. Driven through the real report binary, an arm whose noisy traffic died in transport -- a third
+	// of the arm gone -- printed "admission match |B-C|/C = 0.000 PASS".
+	//
+	// That is not a hypothetical failure mode. A port-forward dying mid-replay is the most frequent failure
+	// this project has observed, twice in one run, and the script checks the forward only BEFORE each replay.
+	//
+	// The rule is the one the tail already uses: a lost observation is neither a success nor a refusal. It
+	// leaves both terms and is counted, and past a threshold it disqualifies the comparison instead of
+	// quietly shrinking it.
+	dead := func(i int) RawRow {
+		return RawRow{Index: i, SendUnixNanos: 1, Tenant: "standard-noisy", IsNoisy: true,
+			EstInputTokens: 10000, HTTPStatus: 0, ErrorKind: "transport", LongThreshold: 4096}
+	}
+	admitted := func(i int) RawRow {
+		r := completedRow(i, 10, 10000)
+		r.Tenant = "standard-noisy"
+		r.IsNoisy = true
+		r.LongThreshold = 4096
+		return r
+	}
+
+	It("is in neither term of the admitted-work fraction", func() {
+		s := Summarize("static-cap", []RawRow{admitted(1), dead(2)})
+		Expect(s.OfferedInputTokens).To(Equal(int64(10000)))
+		Expect(s.AdmittedInputTokens).To(Equal(int64(10000)))
+		Expect(s.AdmissionLost).To(Equal(1))
+	})
+
+	It("disqualifies the comparison once more than 1% of the eligible population is lost", func() {
+		var rows []RawRow
+		for i := 1; i <= 98; i++ {
+			rows = append(rows, admitted(i))
+		}
+		rows = append(rows, dead(100), dead(101))
+		b := Summarize("static-cap", rows)
+		c := Summarize("kv-aware", rows[:98])
+		r1 := Summarize("R1", []RawRow{completedRow(1, 10, 50)})
+		checks := EvaluateChecks(r1, b, c, CI{}, 0.05)
+		Expect(checks.Invalid).To(BeTrue())
+		Expect(checks.InvalidReason).To(ContainSubstring("admission"))
+	})
+
+	It("keeps every reason when a run is broken in more than one way", func() {
+		// The reason was overwritten rather than accumulated, so a run failing three ways reported the last
+		// one and an operator fixed one problem at a time, paying for a run each round.
+		empty := Summarize("kv-aware", nil)
+		r1 := Summarize("R1", []RawRow{completedRow(1, 10, 50)})
+		checks := EvaluateChecks(r1, empty, empty, CI{}, 0.05)
+		Expect(checks.Invalid).To(BeTrue())
+		Expect(strings.Count(checks.InvalidReason, "arm ")).To(BeNumerically(">=", 2))
+	})
+})
+
+var _ = Describe("the incremental check when the repetition ratios scatter", func() {
+	// The percentile bootstrap over four values is anti-conservative once the per-repetition ratios spread
+	// out: simulated against this package's own BootstrapCI, a true ratio of 1.00 -- no effect whatsoever --
+	// clears the gate 10.2% of the time at a coefficient of variation of 0.20, against a nominal 5%.
+	//
+	// So the interval is only worth reading while the ratios are tight. The 2026-09-03 pilot measured 0.001
+	// for the contended arms and 0.056 for the isolation-like ones, well inside that, but a run is not
+	// entitled to assume it stayed there. This refuses rather than reports, because the direction matters:
+	// the failure mode is a gate that passes when it should not.
+	It("is refused when the ratios are too scattered for the interval to mean anything", func() {
+		Expect(RatioScatterTooHigh([]float64{0.9, 0.9, 0.9, 0.9})).To(BeFalse())
+		Expect(RatioScatterTooHigh([]float64{0.6, 0.9, 1.2, 1.5})).To(BeTrue())
+	})
+
+	It("says nothing about scatter it cannot measure", func() {
+		// One repetition has no spread to speak of, and the CI is already invalid for that reason.
+		Expect(RatioScatterTooHigh([]float64{0.9})).To(BeFalse())
+		Expect(RatioScatterTooHigh(nil)).To(BeFalse())
+	})
+})
+
+var _ = Describe("the admitted-work fraction over exact tokens", func() {
+	// The design defines the admission-match criterion over EXACT target-tokenizer input tokens. Every run so
+	// far computed it over ceil(chars/4), which this project's own calibration records as 36% low on a
+	// 200-character prompt and 23% high on a 40,000-character one. The pre-registered criterion has therefore
+	// never been evaluated -- a proxy for it has.
+	//
+	// Falling back to the estimate is exactly how that happened, so a report with no exact counts refuses the
+	// check instead of quietly answering a different question.
+	row := func(i, est, exact, engine, status int) RawRow {
+		r := completedRow(i, 10, est)
+		r.Tenant = "standard-noisy"
+		r.IsNoisy = true
+		r.LongThreshold = 4096
+		r.ExactInputTokens = exact
+		r.EngineInputTokens = engine
+		r.HTTPStatus = status
+		if status != 200 {
+			r.ErrorKind = "rejected"
+			r.FirstTokenUnixNanos, r.EndUnixNanos = 0, 0
+		}
+		return r
+	}
+
+	It("scores offered and admitted work in exact tokens, including the refused", func() {
+		// 10,000 estimated is 7,695 exact. One admitted, one refused.
+		s := Summarize("static-cap", []RawRow{row(1, 10000, 7695, 7695, 200), row(2, 10000, 7695, 0, 429)})
+		Expect(s.OfferedExactTokens).To(Equal(int64(15390)))
+		Expect(s.AdmittedExactTokens).To(Equal(int64(7695)))
+		Expect(s.ExactTokensMissing).To(BeZero())
+	})
+
+	It("counts an eligible row that carries no exact measurement", func() {
+		s := Summarize("static-cap", []RawRow{row(1, 10000, 0, 0, 200)})
+		Expect(s.ExactTokensMissing).To(Equal(1))
+	})
+
+	It("refuses the admission-match check rather than scoring it on estimates", func() {
+		unmeasured := Summarize("static-cap", []RawRow{row(1, 10000, 0, 0, 200)})
+		r1 := Summarize("R1", []RawRow{completedRow(1, 10, 50)})
+		checks := EvaluateChecks(r1, unmeasured, unmeasured, CI{}, 0.05)
+		Expect(checks.Invalid).To(BeTrue())
+		Expect(checks.InvalidReason).To(ContainSubstring("no measured input-token count"))
+	})
+
+	It("refuses when the engine's own count contradicts the trace's", func() {
+		// The trace is stamped once per prompt length; the engine reports on every admitted request. A
+		// disagreement means the trace was stamped against a different tokenizer, or a different prompt ran.
+		s := Summarize("static-cap", []RawRow{row(1, 10000, 7695, 6000, 200)})
+		Expect(s.ExactTokensContradicted).To(Equal(1))
 	})
 })

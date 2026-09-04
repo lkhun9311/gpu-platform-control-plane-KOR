@@ -28,6 +28,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/lkhun9311/gpu-mlops-platform-control-plane/internal/gateway"
 )
 
 // HTTPSender replays a trace row as a streaming OpenAI chat-completions request against the gateway.
@@ -241,6 +243,18 @@ type chatRequest struct {
 	Messages  []chatReqMsg `json:"messages"`
 	MaxTokens int          `json:"max_tokens"`
 	Stream    bool         `json:"stream"`
+	// StreamOptions asks the engine to append a usage chunk carrying its own count of the prompt.
+	//
+	// That count is the served tokenizer's, which is the unit the design's admission-match criterion is
+	// defined in and the unit no run has ever measured. It arrives on admitted requests only -- a refusal
+	// never reaches the engine -- so it checks the trace's per-prompt-length measurement rather than
+	// replacing it.
+	StreamOptions streamOptions `json:"stream_options"`
+}
+
+// streamOptions is the OpenAI streaming extension vLLM implements for usage reporting.
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type chatReqMsg struct {
@@ -256,10 +270,11 @@ func (h *HTTPSender) Send(ctx context.Context, row TraceRow, sendUnixNanos int64
 	defer cancel()
 
 	body := chatRequest{
-		Model:     h.model,
-		Messages:  []chatReqMsg{{Role: "user", Content: PromptText(row.PromptLenChars)}},
-		MaxTokens: row.MaxOutputTokens,
-		Stream:    true,
+		Model:         h.model,
+		Messages:      []chatReqMsg{{Role: "user", Content: PromptText(row.PromptLenChars)}},
+		MaxTokens:     row.MaxOutputTokens,
+		Stream:        true,
+		StreamOptions: streamOptions{IncludeUsage: true},
 	}
 	buf, err := json.Marshal(body)
 	if err != nil {
@@ -301,14 +316,31 @@ func (h *HTTPSender) Send(ctx context.Context, row TraceRow, sendUnixNanos int64
 		if h.drain {
 			drainForReuse(resp.Body)
 		}
+		// Both refusals are admission decisions and belong in the same bucket; labelling only 429 left the
+		// report to infer a 413's meaning from a status code, and for one paid run it inferred wrong.
 		kind := "http"
-		if resp.StatusCode == http.StatusTooManyRequests {
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusRequestEntityTooLarge {
 			kind = "rejected"
 		}
-		return SendResult{HTTPStatus: resp.StatusCode, ErrorKind: kind}
+		return h.withAdmissionDecision(resp, SendResult{HTTPStatus: resp.StatusCode, ErrorKind: kind})
 	}
 
-	return h.readStream(reqCtx, resp)
+	return h.withAdmissionDecision(resp, h.readStream(reqCtx, resp))
+}
+
+// withAdmissionDecision copies the gateway's reported tier and refusal reason onto a result.
+//
+// One function rather than a pair of assignments on each return path, because the path that needs them most
+// is the refusal path -- the one a streaming reader never touches, and the one that would be forgotten.
+//
+// The header names come from internal/gateway rather than string literals here: they are the contract between
+// the two packages, and a copy of a contract is how this project has produced most of its defects. Empty when
+// the gateway predates reporting them, which every consumer reads as "not recorded" rather than as a value.
+func (h *HTTPSender) withAdmissionDecision(resp *http.Response, res SendResult) SendResult {
+	res.Tier = resp.Header.Get(gateway.HeaderAdmissionTier)
+	res.AdmissionReason = resp.Header.Get(gateway.HeaderAdmissionReason)
+	res.BackendState = resp.Header.Get(gateway.HeaderBackendState)
+	return res
 }
 
 // readStream consumes the server-sent-events response, recording first-token and end times and counting output tokens.
@@ -344,12 +376,19 @@ func (h *HTTPSender) readStream(ctx context.Context, resp *http.Response) SendRe
 					Content string `json:"content"`
 				} `json:"delta"`
 			} `json:"choices"`
+			// The usage chunk arrives last, with an empty choices list, so it contributes no output token.
+			Usage *struct {
+				PromptTokens int `json:"prompt_tokens"`
+			} `json:"usage"`
 		}
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			// A malformed chunk mid-stream is a stream error, but any first token already observed still stands.
 			res.ErrorKind = "stream"
 			res.EndUnixNanos = h.now().UnixNano()
 			return res
+		}
+		if chunk.Usage != nil && chunk.Usage.PromptTokens > 0 {
+			res.PromptTokens = chunk.Usage.PromptTokens
 		}
 		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
 			if res.FirstTokenUnixNanos == 0 {

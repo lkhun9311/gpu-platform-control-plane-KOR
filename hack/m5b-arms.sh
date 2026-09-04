@@ -17,8 +17,12 @@ export GOTOOLCHAIN=go1.26.0
 
 NS="${NS:-m5b}"
 KCTX="${KCTX:-$(kubectl config current-context 2>/dev/null)}"
-ENGINE=vllm-qwen25-3b
-MODEL="Qwen/Qwen2.5-3B-Instruct"
+# ENGINE and MODEL are read from the cluster further down, not set here.
+#
+# Both used to be assigned literals at this line and then overwritten by the cluster-derived values below,
+# so the literals were dead code that read as the authority -- the shape that has cost this project two paid
+# runs. Whatever the InferenceDeployment actually says is what the gateway routes on, so that is the only
+# answer worth having.
 # gpu-platform-gateway, not gateway: that is the repository this account actually has, and ECR does not
 # create one on push. The old default named a repository that has never existed anywhere.
 #
@@ -47,8 +51,77 @@ GW_IMAGE="${GW_IMAGE:-gpu-platform-gateway:m5b-$(date -u +%Y%m%d-%H%M%S)}"
 # tolerate, not a target anything argued for.
 REPS="${REPS:-4}"
 
-# The arm order the loop below walks, named once so the first-replay check can tell which arm is first.
+# How calm the engine must be before the next arm starts, and how long to wait for it.
+#
+# The usage bound is the guard's own release threshold: below it the guard considers the backend calm, so a
+# backend under it is one the next arm can be measured on without inheriting this one's pressure.
+WASHOUT_USAGE="${WASHOUT_USAGE:-0.75}"
+WASHOUT_TIMEOUT_S="${WASHOUT_TIMEOUT_S:-180}"
+
+# The arms, named once. The order they RUN in is rotated per block; see armsForBlock below.
 ARMS_ORDER="R1 off static-cap kv-aware"
+
+# armsForBlock prints the arm order for one repetition block, rotated so position is not confounded with arm.
+#
+# Every block used to run R1, off, static-cap, kv-aware in that order, so R1 was always measured first on a
+# cold engine and kv-aware always last on one that had been serving for an hour. Any drift over a block --
+# prefix cache filling, thermal behaviour, a Spot neighbour arriving -- lands on the arms in a fixed pattern
+# and is indistinguishable from the effect being measured. That is the confound, and no amount of extra
+# instrumentation removes it after the fact.
+#
+# A Latin square fixes it exactly: with four arms and four blocks, rotating by the block index puts each arm
+# in each position exactly once, so position effects cancel in the arm means instead of accumulating.
+#
+# It is worth saying what this does not fix. Order is balanced, not randomised, so a trend that happens to
+# align with the rotation still lands unevenly; and carry-over between adjacent arms is handled by the
+# washout below rather than by the square.
+armsForBlock() {
+  local block="$1" arms i n
+  read -r -a arms <<< "$ARMS_ORDER"
+  n=${#arms[@]}
+  for ((i = 0; i < n; i++)); do
+    printf '%s ' "${arms[$(((i + block - 1) % n))]}"
+  done
+}
+
+# Arm B's frozen tuning, in tokens -- which is what the flags measure and what the last run did not give them.
+#
+# The runner used to pass "-admission-static-rate=${RATE}", where RATE is the trace's REQUEST rate, 1.568/s.
+# The flag is tokens per second. It never passed -admission-static-burst at all, so the burst stayed at the
+# gateway's 8,192 default while every noisy prompt in the trace estimates at 10,000 tokens -- 40,000 chars,
+# a number written in the generator's own flag help. A request larger than the burst can never fit any
+# bucket, so the gateway refused all 447 of them with 413, in all four repetitions. Arm B admitted nothing.
+# It was not a badly tuned competitor; it was a second isolation arm, which is why C/B came out equal to
+# C/R1 and all three pre-registered checks failed for a reason that had nothing to do with the guard.
+#
+# The design spec's Arm B section asks for these to come from an OFFLINE SIMULATION against a C pilot's
+# admitted-work fraction, frozen before the confirmatory run. That simulation had never been run. The first
+# attempt at these numbers skipped it too and divided C's admitted tokens by the replay's duration --
+# 3.78M over 635s, 5,957 tokens/sec -- which is the average a matched bucket sustains, not the rate that
+# produces it. Simulated against the real trace, 5,957 tok/s at a burst of 12,288 admits 52.5 percent, not
+# 84.6: a 10,000-token withdrawal needs 1.68 seconds to refill and the arrivals do not wait for it.
+#
+# So these come from the simulation, on the 2026-09-03 pilot's own trace, via "benchharness sim-cap":
+#
+#   burst  = 3 x the largest eligible prompt, so a short run of long requests can pass without the bucket
+#            behaving like a per-request gate. Anything at or below 10,000 makes arm B degenerate outright.
+#   rate   = solved at that burst for the pilot's admitted fraction: 8,000 tok/s admits 0.8444 against the
+#            pilot's 0.8456, within 0.12 percentage points.
+#
+# The check below re-runs that simulation on the trace this run actually generated, so the pair has to keep
+# agreeing with the traffic rather than with the day it was chosen.
+STATIC_RATE=8000
+STATIC_BURST=30000
+# The C pilot's admitted fraction of eligible offered tokens, the target arm B is matched to.
+#
+# Provisional, and the tolerance says so. The pilot measured 0.8456 over standard-noisy alone, because its
+# two probe tenants were refused with 403 before admission and are excluded from the population entirely.
+# The simulation scores the population a CORRECTLY configured run will have, which includes the probes above
+# the threshold -- so the two fractions are over different populations and the agreement between them is an
+# estimate, not a match. The real admission-match check is |B-C|/C on the run's own evidence, where both
+# terms are measured over the same rows; this is only a pre-flight that stops a bucket which is off by half.
+PILOT_ADMITTED_FRACTION=0.8456
+PILOT_MATCH_TOLERANCE=0.10
 
 # For ttl_remaining_minutes: this script spends the money in a shell that never armed the deadline.
 . "$(dirname "$0")/lib/gpu-ttl.sh"
@@ -214,45 +287,71 @@ k get ns "$NS" >/dev/null 2>&1 || fail "namespace $NS does not exist; run hack/m
 #
 # Reading it from the cluster is what makes it agree by construction: the router resolves a request by
 # matching this same field, so a name taken from anywhere else can drift from what will actually route.
+# The engine's own name, read from the same record the model name comes from.
+#
+# The washout polls this Service's /metrics, and the provenance step reads this Deployment's image digest.
+ENGINE=$(k get inferencedeployment -n "$NS" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+[ -n "$ENGINE" ] || fail "no InferenceDeployment in $NS to read the engine name from; run hack/m5b-gpu-session.sh first"
 MODEL=$(k get inferencedeployment -n "$NS" -o jsonpath='{.items[0].spec.model.name}' 2>/dev/null)
 [ -n "$MODEL" ] || fail "no InferenceDeployment in $NS to read the served model from; run hack/m5b-gpu-session.sh first"
 say "model: $MODEL (read from the routing record the gateway matches on)"
-# Four tenants, because the trace uses four.
+# One tenant list, because four hand-kept copies of it drifted twice.
 #
-# The secret carried two. gen-trace also emits standard-probe-over and standard-probe-under -- the pair that
-# measures where the eligibility threshold actually fires -- and the gateway answered 401 for every one of
-# them. In the first paid run that was 92 requests per replay rejected before they reached admission
-# control, which is the thing the probes exist to measure.
-k create secret generic gateway-api-keys -n "$NS" \
-  --from-literal=premium-key=premium-1 \
-  --from-literal=standard-key=standard-noisy \
-  --from-literal=probe-over-key=standard-probe-over \
-  --from-literal=probe-under-key=standard-probe-under --dry-run=client -o yaml | k apply -f - >/dev/null
-k apply -f - >/dev/null <<EOF || fail "apply policies"
-apiVersion: platform.lkhun9311.github.io/v1
-kind: GPUQuotaPolicy
-metadata:
-  name: m5b-premium
+# The trace generator names the tenants, and this list has to agree with it in three places at once: the API
+# key secret, the --api-keys flag the replay client authenticates with, and the GPUQuotaPolicy each tenant
+# needs to clear authorisation. The first paid run had two of the four in the secret, so a quarter of every
+# replay came back 401. The second had all four keyed but only two given a policy, so the two probe tenants
+# -- the ones that exist to measure where the eligibility threshold fires -- came back 403 and the report
+# presented their silence as "rejected=0". Both times the list was right in one place and wrong in another.
+#
+# Deriving all three from here removes the copies. The check after gen-trace is what makes the list binding
+# rather than merely central: a tenant the generator invents and this list has not heard of stops the run
+# before any card time is spent on it.
+#
+# Fields are tenant:key:tier, and an empty tier means the policy carries no tier annotation.
+TENANTS=(
+  "premium-1:premium-key:premium"
+  "standard-noisy:standard-key:"
+  "standard-probe-over:probe-over-key:"
+  "standard-probe-under:probe-under-key:"
+)
+
+secret_args=()
+api_keys=""
+premium_tenants=""
+policies=""
+for entry in "${TENANTS[@]}"; do
+  tenant="${entry%%:*}"; rest="${entry#*:}"; key="${rest%%:*}"; tier="${rest#*:}"
+  secret_args+=("--from-literal=$key=$tenant")
+  api_keys="${api_keys:+$api_keys,}$tenant=$key"
+  if [ "$tier" = "premium" ]; then
+    premium_tenants="${premium_tenants:+$premium_tenants,}$tenant"
+  fi
+  annotations=""
+  if [ -n "$tier" ]; then
+    annotations="
   annotations:
-    platform.lkhun9311.github.io/tier: premium
-spec:
-  tenant: premium-1
-  targetNamespace: $NS
-  gpuClass: t4
-  limits:
-    gpuCount: 1
+    platform.lkhun9311.github.io/tier: $tier"
+  fi
+  policies="$policies
 ---
 apiVersion: platform.lkhun9311.github.io/v1
 kind: GPUQuotaPolicy
 metadata:
-  name: m5b-standard
+  name: m5b-$tenant$annotations
 spec:
-  tenant: standard-noisy
+  tenant: $tenant
   targetNamespace: $NS
   gpuClass: t4
   limits:
-    gpuCount: 1
-EOF
+    gpuCount: 1"
+done
+
+k create secret generic gateway-api-keys -n "$NS" \
+  "${secret_args[@]}" --dry-run=client -o yaml | k apply -f - >/dev/null
+printf '%s\n' "$policies" | k apply -f - >/dev/null || fail "apply policies"
+say "identity for ${#TENANTS[@]} tenants: key and policy for each"
+
 k create serviceaccount gateway -n "$NS" --dry-run=client -o yaml | k apply -f - >/dev/null
 k create clusterrolebinding "m5b-gateway-role" --clusterrole=gateway-role \
   --serviceaccount="$NS:gateway" --dry-run=client -o yaml | k apply -f - >/dev/null
@@ -334,19 +433,129 @@ esac
 say "provenance: gateway $GW_SHA / $GW_IMAGE"
 say "            engine  $ENGINE_IMAGE"
 
+# The engine's own resolved configuration, into the evidence directory.
+#
+# The 2026-09-03 evidence records the engine's image digest and nothing else about how it was configured.
+# So when the premium tail turned out to be a clean staircase of one full prefill per concurrent long
+# request -- 944.6 ms observed against 951 ms of arithmetic -- the obvious next question was whether vLLM
+# had been given a batch token budget large enough to swallow a 7,695-token prompt whole, and the evidence
+# could not answer it. The question is about the run, the run is over, and the cluster is gone.
+#
+# Both halves are captured. The container's argv is what we asked for; the startup log is what vLLM decided,
+# including the defaults it filled in for everything we did not ask about, which is exactly the part that
+# turned out to matter. Failure here does not stop the run: this is provenance, not a precondition.
+{
+  echo "== engine deployment argv"
+  k get deploy -n "$NS" "$ENGINE" -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null
+  echo
+  echo "== engine resolved configuration, as the engine reported it at startup"
+  k logs -n "$NS" "deploy/$ENGINE" --tail=400 2>/dev/null \
+    | grep -iE "engineargs|chunked|max_num_batched|max_num_seqs|max_model_len|cache_config|scheduler|kv cache|gpu blocks" \
+    || echo "(no matching startup lines; the pod may have been restarted since)"
+} > "$OUT/engine-config.txt" 2>&1 || true
+say "engine configuration recorded to engine-config.txt"
+
 say "generate the shared trace once"
 "$WORK/benchharness" gen-trace --seed 7 --duration-ms "$DURATION_MS" --rate "$RATE" \
   --model "$MODEL" --arm off --gateway-url "http://127.0.0.1:18080" \
   --gateway-sha "$GW_SHA" --gateway-image "$GW_IMAGE" --engine-image "$ENGINE_IMAGE" \
   --trace-out "$OUT/trace.jsonl" --manifest-out "$OUT/manifest-off.yaml" || fail "gen-trace"
 
+# The trace is what actually names the tenants, so it is the authority the list above is checked against.
+#
+# Without this the list is just a fourth copy in a nicer shape. A generator that adds a tenant -- a third
+# probe, a second premium -- would hand it no key and no policy, and the run would record its 401s and 403s
+# as ordinary outcomes for three hours before the report said anything.
+missing=$(python3 -c "
+import json,sys
+known = set(sys.argv[2].split(','))
+seen = {json.loads(l)['tenant'] for l in open(sys.argv[1]) if l.strip()}
+print(','.join(sorted(seen - known)))" "$OUT/trace.jsonl" "$(printf '%s' "${TENANTS[*]}" | tr ' ' '\n' | cut -d: -f1 | paste -sd,)")
+[ -z "$missing" ] || fail "the trace uses tenants this script has no key or policy for: $missing. Add them to TENANTS in this file; a tenant without both is refused before admission and its requests measure nothing."
+say "every tenant in the trace has a key and a policy"
+
+# The trace is stamped with the engine's own count for each distinct prompt length, before any arm runs.
+#
+# The design defines the admission-match criterion over the served tokenizer's input-token count, and three
+# paid runs scored it on ceil(chars/4) -- 36 percent low on a 200-character prompt, 23 percent high on a
+# 40,000-character one, per this repository's own calibration. The criterion has never been evaluated.
+#
+# It has to be on the TRACE rather than only on responses, because a refused request never reaches the engine
+# and refused requests are the denominator of the fraction. The measurement uses the premium tenant, whose
+# requests no admission mode refuses, so a probe cannot be shed before it is counted.
+"$WORK/benchharness" stamp-exact-tokens -trace "$OUT/trace.jsonl" \
+  -gateway-url "http://127.0.0.1:18080" -model "$MODEL" -api-keys "$api_keys" -tenant "${premium_tenants%%,*}" \
+  || fail "the engine would not report its own input-token counts, so the admission-match criterion cannot be evaluated in the units the design defines it in"
+
+# A burst below the largest prompt makes arm B refuse every eligible request, which is not a tuning error
+# that shows up as a weak result -- it is a degenerate arm that reports cleanly and answers a question nobody
+# asked. The last run spent three hours and a card on it. The trace knows the number, so it is asked.
+max_est=$(python3 -c "
+import json,sys,math
+print(max(math.ceil(json.loads(l)['promptLenChars'] / 4) for l in open(sys.argv[1]) if l.strip()))" "$OUT/trace.jsonl")
+# Strictly greater, matching the admitter: it refuses permanently on EstInputTokens > burst, so a prompt
+# exactly equal to the burst is admissible from a full bucket and this must not reject that configuration.
+if [ "$max_est" -gt "$STATIC_BURST" ]; then
+  fail "the largest prompt in the trace estimates at $max_est tokens and STATIC_BURST is $STATIC_BURST. A request larger than the burst can never fit the bucket, so arm B would refuse every one of them with 413 and admit nothing -- the exact degenerate arm the 2026-09-03 run produced. Raise STATIC_BURST above $max_est or shrink the noisy prompt."
+fi
+say "arm B tuning: $STATIC_RATE tok/s, burst $STATIC_BURST, against a largest prompt of $max_est tokens"
+
+# The tuning procedure itself, run against the trace this run will actually replay.
+#
+# The burst check above only rules out the degenerate case. This one asks the question the design spec asks:
+# would this bucket admit the same share of eligible work that C admitted? It drives the gateway's own
+# admitter through the trace's arrival times, so it answers with the real bucket rather than a model of one.
+"$WORK/benchharness" sim-cap -trace "$OUT/trace.jsonl" \
+  -rate "$STATIC_RATE" -burst "$STATIC_BURST" -long-threshold 4096 \
+  -premium-tenants "$premium_tenants" \
+  -target-admitted-fraction "$PILOT_ADMITTED_FRACTION" -tolerance "$PILOT_MATCH_TOLERANCE" \
+  || fail "arm B's frozen tuning does not match the C pilot on this trace. Re-solve it with: benchharness sim-cap -trace $OUT/trace.jsonl -rate <r> -burst <b> -premium-tenants $premium_tenants"
+
+# washout waits until the engine has actually drained, and refuses to continue if it never does.
+#
+# Rotating the arm order removes the confound between arm and POSITION. It does nothing about carry-over:
+# the arm that runs after "off" starts against a KV cache that a thousand long prompts just filled, and a
+# guard measured on that backend is being measured on the previous arm's residue.
+#
+# Sleeping a fixed number of seconds would be the same assumption in a different costume. This reads the
+# engine's own counters -- the same series the guard scrapes -- and waits for the queue to empty and the
+# cache to fall below the level the guard treats as calm. A backend that never drains is a fact about the
+# run worth stopping for: whatever the next arm measured would be the tail of this one.
+ENGINE_PF_PID=""
+washout() {
+  local why="$1" deadline=$((SECONDS + WASHOUT_TIMEOUT_S)) usage waiting
+  if [ -z "$ENGINE_PF_PID" ] || ! kill -0 "$ENGINE_PF_PID" 2>/dev/null; then
+    k port-forward -n "$NS" "svc/$ENGINE" 18081:8000 >/dev/null 2>&1 &
+    ENGINE_PF_PID=$!
+    sleep 2
+  fi
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    local body
+    body=$(curl -sf -m 5 "http://127.0.0.1:18081/metrics" 2>/dev/null) || { sleep 2; continue; }
+    waiting=$(printf '%s\n' "$body" | awk '/^vllm:num_requests_waiting/ {v=$NF} END {print (v==""?"":v)}')
+    usage=$(printf '%s\n' "$body" | awk '/^vllm:kv_cache_usage_perc/ {v=$NF} END {print v}')
+    [ -n "$usage" ] || usage=$(printf '%s\n' "$body" | awk '/^vllm:gpu_cache_usage_perc/ {v=$NF} END {print v}')
+    if [ -z "$waiting" ] || [ -z "$usage" ]; then
+      fail "the engine's /metrics carries neither a waiting-queue nor a cache-usage series, so a washout cannot be observed and every arm after the first would start on the previous one's residue"
+    fi
+    if awk -v w="$waiting" -v u="$usage" -v t="$WASHOUT_USAGE" 'BEGIN{exit !(w+0==0 && u+0<=t)}'; then
+      say "  washed out before $why (waiting 0, cache $usage <= $WASHOUT_USAGE)"
+      return 0
+    fi
+    sleep 3
+  done
+  fail "the engine did not drain within ${WASHOUT_TIMEOUT_S}s before $why (waiting=$waiting, cache=$usage). Whatever the next arm measured would be the previous arm's tail, so this stops rather than recording it as a result."
+}
+
 for rep in $(seq 1 "$REPS"); do
-  for arm in R1 off static-cap kv-aware; do
+  say "block $rep order: $(armsForBlock "$rep")"
+  for arm in $(armsForBlock "$rep"); do
     say "rep $rep arm $arm"
+    washout "rep $rep arm $arm"
     case "$arm" in
       R1|off)      deploy_gateway off "" ;;
-      static-cap)  deploy_gateway static-cap ", \"-admission-static-rate=${RATE}\", \"-admission-long-threshold=4096\"" ;;
-      kv-aware)    deploy_gateway kv-aware ", \"-admission-long-threshold=4096\"" ;;
+      static-cap)  deploy_gateway static-cap ", \"-admission-static-rate=${STATIC_RATE}\", \"-admission-static-burst=${STATIC_BURST}\", \"-admission-long-threshold=4096\"" ;;
+      kv-aware)    deploy_gateway kv-aware ", \"-admission-long-threshold=4096\", \"-admission-report-backend-state\"" ;;
     esac
 
     [ -n "$PF_PID" ] && kill "$PF_PID" 2>/dev/null
@@ -379,7 +588,7 @@ for rep in $(seq 1 "$REPS"); do
     "$WORK/benchharness" replay --manifest "$OUT/manifest-$arm-$rep.yaml" \
       --require-provenance \
       --target "http://127.0.0.1:18080" \
-      --api-keys "premium-1=premium-key,standard-noisy=standard-key,standard-probe-over=probe-over-key,standard-probe-under=probe-under-key" \
+      --api-keys "$api_keys" \
       --raw-out "$OUT/raw-$arm-$rep.jsonl" || fail "replay $arm"
     [ -s "$OUT/raw-$arm-$rep.jsonl" ] || fail "no raw evidence for $arm rep $rep"
     say "  $(wc -l < "$OUT/raw-$arm-$rep.jsonl") rows recorded"
@@ -403,23 +612,19 @@ for rep in $(seq 1 "$REPS"); do
     # A replay that completes nothing is dead whichever arm and whichever repetition it is, and there is no
     # repetition whose emptiness is acceptable -- the report needs equal counts across arms, so one dead
     # replay costs the whole run anyway. Checking all sixteen costs one pass over a file each time.
-    if true; then
-      completed=$(python3 -c "
-import json,sys
-ok=0
-for line in open(sys.argv[1]):
-    d=json.loads(line)
-    if d.get('httpStatus') == 200: ok += 1
-print(ok)" "$OUT/raw-$arm-$rep.jsonl" 2>/dev/null || echo 0)
-      say "  $completed of them completed with HTTP 200"
-      if [ "${completed:-0}" -eq 0 ]; then
-        codes=$(python3 -c "
-import json,sys,collections
-c=collections.Counter(json.loads(l).get('httpStatus') for l in open(sys.argv[1]))
-print(', '.join(f'{k}x{v}' for k,v in c.most_common(4)))" "$OUT/raw-$arm-$rep.jsonl" 2>/dev/null)
-        fail "the first replay completed nothing: $codes. Every later replay would do the same, so this stops here rather than after sixteen of them. 404 means the trace asks for a model no InferenceDeployment serves; 401 means a tenant is missing from the gateway-api-keys secret."
-      fi
-    fi
+    # Every replay is checked as it lands, by the same code the report uses.
+    #
+    # The rules are not repeated here. A copy of "usable" in bash would be a second definition, and the two
+    # would drift the first time either moved -- the shape that has already cost this project two paid runs.
+    # benchharness check-replay runs bench.Summarize and its thresholds, so the runner refuses exactly what
+    # the report would refuse, at the replay that broke instead of three hours later.
+    #
+    # What it stops on, all of which have actually happened here: a replay that completed nothing; any 401 or
+    # 403, which is decided before admission control and so measures nothing about the guard; eligible
+    # requests whose admission verdict was lost, which is what a port-forward dying mid-replay looks like; and
+    # a premium tail that lost more than one percent, since the tail is the primary endpoint.
+    "$WORK/benchharness" check-replay -raw "$OUT/raw-$arm-$rep.jsonl" -label "$arm replay $rep" \
+      || fail "replay $rep of arm $arm is unusable, so the run stops here rather than paying for the rest of it"
   done
 done
 

@@ -46,6 +46,11 @@ const ModelNameIndex = ".spec.model.name"
 type Server struct {
 	// Client reads InferenceDeployment, GPUQuotaPolicy, and the api-keys Secret from the scoped cache.
 	Client client.Client
+	// reportBackendState makes a response carry the pressure reading its admission decision was made from.
+	//
+	// The benchmark needs it: "not_engaged" at a cache usage of 0.10 and at 0.83 against a 0.85 threshold are
+	// the same string and opposite conclusions. Nobody else does, so it defaults off.
+	reportBackendState bool
 	// Namespace and APIKeySecret locate the api-keys Secret used to resolve tenants.
 	Namespace    string
 	APIKeySecret string
@@ -140,6 +145,12 @@ func (s *Server) InitRateLimiter() { s.buckets = newBucketRegistry() }
 // Why this method exists (mirrors InitRateLimiter above): admitter is unexported, so cmd/gateway/main.go cannot populate it via a struct literal.
 //
 // mode travels through the same call so the two can never drift out of step with each other.
+// ReportBackendState turns the X-Backend-State header on or off.
+//
+// Off by default and turned on only by the benchmark: a deployment serving real tenants has no reason to
+// tell a caller how full its KV cache is.
+func (s *Server) ReportBackendState(on bool) { s.reportBackendState = on }
+
 func (s *Server) SetAdmitter(mode AdmissionMode, a Admitter) {
 	s.mode = mode
 	s.admitter = a
@@ -173,6 +184,35 @@ func (s *Server) readyz(w http.ResponseWriter, _ *http.Request) {
 // The empty label records exactly that.
 //
 // The response body is the OpenAI-style JSON envelope from writeJSONError, not plaintext, so every gateway failure looks the same to a client regardless of which pipeline stage produced it.
+// HeaderAdmissionTier and HeaderAdmissionReason carry the gateway's own admission decision to the caller.
+//
+// They exist for the benchmark's evidence files, which recorded a status and nothing else: the tier the
+// gateway resolved and the reason it refused both had to be reconstructed afterwards from configuration that
+// the evidence did not contain. A header costs a few bytes on a response the caller is already receiving.
+const (
+	HeaderAdmissionTier   = "X-Admission-Tier"
+	HeaderAdmissionReason = "X-Admission-Reason"
+	// HeaderBackendState carries the pressure reading a pressure-driven admission control decided on.
+	//
+	// Off by default: backend occupancy is not a caller's business. The benchmark turns it on because the
+	// question it exists to answer -- whether the guard saw the pressure and let it through, or never saw
+	// pressure at all -- cannot be read from the decision alone.
+	HeaderBackendState = "X-Backend-State"
+)
+
+// formatBackendState renders a snapshot compactly enough to sit in a header and parse without ambiguity.
+func formatBackendState(st BackendState) string {
+	return fmt.Sprintf("kv=%.3f,waiting=%d,engaged=%d,fresh=%d",
+		st.CacheUsage, st.Waiting, boolToDigit(st.Engaged), boolToDigit(st.Fresh))
+}
+
+func boolToDigit(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 func (s *Server) fail(w http.ResponseWriter, tenant, model string, code int) {
 	requests.WithLabelValues(tenant, model, strconv.Itoa(code)).Inc()
 	writeJSONError(w, code, http.StatusText(code))
@@ -380,6 +420,15 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//
 	// tier comes from the policy already fetched in step 3, not from the request, since tier is a property of the tenant's contract rather than something a caller can assert about itself.
 	tier := tierForPolicy(policy)
+	// The tier travels on the response so a replay's evidence records what the gateway decided rather than
+	// what the client assumed.
+	//
+	// The eligible population is tier == standard AND input over the threshold, and a raw row carried only
+	// the input estimate -- so the report scored the population on half the rule and agreed with the gateway
+	// by luck, the sole premium tenant happening to send prompts far below the threshold. Set before the
+	// admission stage, so a refused request carries it too: a request that was never admitted is exactly the
+	// one whose population membership decides whether the guard is being scored fairly.
+	w.Header().Set(HeaderAdmissionTier, tier)
 	admitter := s.admitter
 	if admitter == nil {
 		// SetAdmitter was never called, so behave exactly as if the guard did not exist.
@@ -401,6 +450,26 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if !admit {
 		decision = "reject"
 	}
+	// The reason travels on every decision, not only refusals.
+	//
+	// An admit had none, so four different facts about arm C arrived as one: a backend the guard never
+	// registered, telemetry too stale to read, a backend under no pressure, and a caller outside the gated
+	// population. The first two mean the guard was bypassed -- a run spent entirely in them is arm A under
+	// arm C's name, reporting as a clean scientific FAIL with nothing in the evidence to say otherwise.
+	if reason != "" {
+		w.Header().Set(HeaderAdmissionReason, reason)
+	}
+	// The numbers the decision was made from, when the operator asked for them and the mode has any.
+	if s.reportBackendState {
+		if obs, ok := admitter.(admissionObserver); ok {
+			for _, b := range targets {
+				if st, has := obs.Observed(b); has {
+					w.Header().Set(HeaderBackendState, formatBackendState(st))
+					break
+				}
+			}
+		}
+	}
 	// Recorded for every request, admitted or not, so the admit rate and admitted-vs-offered token fraction can both be read straight off these two series without diffing against requests_total.
 	admissionDecisions.WithLabelValues(string(mode), tenant, meta.Model, decision, reason).Inc()
 	admissionInputTokens.WithLabelValues(string(mode), tenant, decision).Add(float64(meta.EstInputTokens))
@@ -409,6 +478,9 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// retry hint failReason attaches: a client obeying it would retry an arithmetically impossible request
 		// forever. 413 rather than 429 for the same reason — the caller's action is a smaller prompt, not a
 		// later one.
+		// The 413 does not go through failReason, so before the header above existed its reason reached
+		// nowhere a client could record it. That is why the 1,788 refusals in the 2026-09-03 run had to be
+		// explained months later by reading the runner's flags and the gateway's defaults.
 		if reason == reasonInputExceedsBurst {
 			s.fail(w, tenant, meta.Model, http.StatusRequestEntityTooLarge)
 			return

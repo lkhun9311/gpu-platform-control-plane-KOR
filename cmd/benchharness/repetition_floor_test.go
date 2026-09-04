@@ -18,6 +18,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -232,5 +233,66 @@ func TestReportAcceptsR1BeingShorterThanTheContendedArms(t *testing.T) {
 	}
 	if err := report(args); err != nil {
 		t.Fatalf("R1 being shorter than the contended arms was refused, which would refuse every valid run: %v", err)
+	}
+}
+
+// TestARepetitionCarryingADifferentTraceIsRefused closes a hole in the identity check.
+//
+// refuseIfTracesDisagree exists to prove the contended arms replayed identical traffic. It compared one
+// checksum per arm, and loadArmEvidence wrote that field once per FILE -- so only the last repetition's
+// checksum survived, and a repetition replayed from a different trace was invisible.
+//
+// The trigger is a workflow the runner endorses: re-running one botched arm into the same output directory.
+// Driven through the real binary, an arm holding checksums "X" and "T" among all-"T" arms reported cleanly
+// and exited 0.
+func TestARepetitionCarryingADifferentTraceIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	write := func(arm string, rep int, sum string) string {
+		path := filepath.Join(dir, fmt.Sprintf("raw-%s-%d.jsonl", arm, rep))
+		var b strings.Builder
+		for i := 1; i <= 200; i++ {
+			base := int64(1_000_000_000 + i*1_000_000)
+			row := bench.RawRow{
+				Index: i, Arm: arm, Tenant: "premium-1", SendUnixNanos: base,
+				FirstTokenUnixNanos: base + 50_000_000, EndUnixNanos: base + 60_000_000,
+				EstInputTokens: 50, OutputTokens: 8, HTTPStatus: 200,
+				TraceChecksum: sum, LongThreshold: 4096, MatchTolerance: 0.05,
+			}
+			enc, err := json.Marshal(row)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			b.Write(enc)
+			b.WriteByte('\n')
+		}
+		if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		return path
+	}
+
+	var paths []string
+	for _, arm := range []string{"R1", "off", "static-cap", "kv-aware"} {
+		for rep := 1; rep <= 2; rep++ {
+			sum := "T"
+			// The mixed repetition is not the last one, which is exactly the case last-writer-wins hid.
+			if arm == "static-cap" && rep == 1 {
+				sum = "X"
+			}
+			paths = append(paths, write(arm, rep, sum))
+		}
+	}
+
+	// Either refusal point is acceptable, and the earlier one is better: loading is where the mixture becomes
+	// visible, and refusing there means no downstream stage ever sees a pooled arm built from two workloads.
+	e, err := loadArmEvidence(paths)
+	if err == nil {
+		err = e.refuseIfTracesDisagree()
+	}
+	if err == nil {
+		t.Fatal("a repetition replayed from a different trace was accepted; the arms are not known to have seen the same traffic and the comparison means nothing")
+	}
+	if !strings.Contains(err.Error(), "static-cap") {
+		t.Errorf("the refusal does not name the arm that mixed traces: %v", err)
 	}
 }

@@ -80,3 +80,15 @@ variable "github_repository_owner_id" {
 
   # `gh api repos/<owner>/<name> --jq .owner.id`.
 }
+
+variable "mirrored_images" {
+  description = "ECR repository name -> upstream image reference, for the public images a GPU node pulls."
+  type        = map(string)
+  # The values carry no tag or digest: hack/mirror-public-images.sh reads those out of config/ so this file
+  # and the manifests cannot pin different versions of the same image.
+  default = {
+    "mirror/vllm-openai"       = "vllm/vllm-openai"
+    "mirror/k8s-device-plugin" = "nvcr.io/nvidia/k8s-device-plugin"
+    "mirror/dcgm-exporter"     = "nvcr.io/nvidia/k8s/dcgm-exporter"
+  }
+}

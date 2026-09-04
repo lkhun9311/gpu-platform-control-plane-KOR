@@ -308,3 +308,102 @@ var _ = Describe("HTTPSender", func() {
 		Expect(PoolSizeForTrace([]TraceRow{{Index: 0}}, 30*time.Second)).To(Equal(http.DefaultMaxIdleConnsPerHost))
 	})
 })
+
+var _ = Describe("the gateway's own decision in the evidence", func() {
+	// The 2026-09-03 run recorded a status and nothing else, so two analyses had to be reconstructed from
+	// configuration the evidence did not contain: which population a request belonged to (the gateway gates on
+	// tier AND input size, a raw row carried only input size) and why 1,788 requests were refused. The gateway
+	// now reports both on the response, and they are only useful if they survive into the raw row -- on the
+	// refusal path especially, which is exactly where they matter and exactly the path a streaming reader
+	// never touches.
+	send := func(h http.HandlerFunc) SendResult {
+		srv := httptest.NewServer(h)
+		defer srv.Close()
+		sender := NewHTTPSender(srv.URL, "m", nil, 5*time.Second, SenderConn{MaxIdleConnsPerHost: 8, DrainForReuse: true})
+		return sender.Send(context.Background(), TraceRow{Index: 1, PromptLenChars: 40, MaxOutputTokens: 4}, 1)
+	}
+
+	It("records the tier and the reason when the gateway refuses", func() {
+		res := send(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-Admission-Tier", "standard")
+			w.Header().Set("X-Admission-Reason", "input_exceeds_burst")
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+		})
+		Expect(res.HTTPStatus).To(Equal(http.StatusRequestEntityTooLarge))
+		Expect(res.Tier).To(Equal("standard"))
+		Expect(res.AdmissionReason).To(Equal("input_exceeds_burst"))
+	})
+
+	It("records the tier and the admit's reason when the gateway admits", func() {
+		res := send(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-Admission-Tier", "premium")
+			w.Header().Set("X-Admission-Reason", "not_engaged")
+			w.Header().Set("Content-Type", "text/event-stream")
+			f := w.(http.Flusher)
+			_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n")
+			f.Flush()
+			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+			f.Flush()
+		})
+		Expect(res.HTTPStatus).To(Equal(http.StatusOK))
+		Expect(res.Tier).To(Equal("premium"))
+		// An admit's reason is the point: "not_engaged" and "telemetry_stale" are both admits, and only one
+		// of them means the guard was working.
+		Expect(res.AdmissionReason).To(Equal("not_engaged"))
+	})
+
+	It("leaves both empty against a gateway too old to report them", func() {
+		res := send(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusForbidden) })
+		Expect(res.Tier).To(BeEmpty())
+		Expect(res.AdmissionReason).To(BeEmpty())
+	})
+})
+
+var _ = Describe("the engine's own count of the prompt", func() {
+	// The design's admission-match criterion is defined over the served tokenizer's count, and every run so
+	// far scored it on ceil(chars/4). The engine knows the real number and will report it when asked, so the
+	// harness asks -- on every admitted request, which makes it a check on the trace's own measurement rather
+	// than a second guess at it.
+	It("asks for usage and records the prompt token count from the final chunk", func() {
+		var asked bool
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]any
+			Expect(json.NewDecoder(r.Body).Decode(&body)).To(Succeed())
+			if so, ok := body["stream_options"].(map[string]any); ok {
+				asked, _ = so["include_usage"].(bool)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			f := w.(http.Flusher)
+			_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n")
+			f.Flush()
+			// vLLM sends the usage chunk with an empty choices list, just before [DONE].
+			_, _ = fmt.Fprint(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7695,\"completion_tokens\":1}}\n\n")
+			f.Flush()
+			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+			f.Flush()
+		}))
+		defer srv.Close()
+
+		sender := NewHTTPSender(srv.URL, "m", nil, 5*time.Second, SenderConn{MaxIdleConnsPerHost: 8, DrainForReuse: true})
+		res := sender.Send(context.Background(), TraceRow{Index: 1, PromptLenChars: 40000, MaxOutputTokens: 4}, 1)
+
+		Expect(asked).To(BeTrue(), "the harness did not ask for usage, so the engine had no reason to report it")
+		Expect(res.PromptTokens).To(Equal(7695))
+		Expect(res.OutputTokens).To(Equal(1), "the usage chunk carries no content delta and must not count as an output token")
+	})
+
+	It("leaves the count at zero when the engine reports none", func() {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			f := w.(http.Flusher)
+			_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n")
+			f.Flush()
+			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+			f.Flush()
+		}))
+		defer srv.Close()
+		sender := NewHTTPSender(srv.URL, "m", nil, 5*time.Second, SenderConn{MaxIdleConnsPerHost: 8, DrainForReuse: true})
+		res := sender.Send(context.Background(), TraceRow{Index: 1, PromptLenChars: 40, MaxOutputTokens: 4}, 1)
+		Expect(res.PromptTokens).To(BeZero())
+	})
+})

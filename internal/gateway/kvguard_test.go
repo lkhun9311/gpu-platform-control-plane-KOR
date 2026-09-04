@@ -498,7 +498,7 @@ var _ = Describe("kvAwareAdmitter.Admit", func() {
 		a := newKVAwareAdmitter(m, 4096)
 		ok, reason := a.Admit(ctx, longMeta, backend, "t", tierStandard)
 		Expect(ok).To(BeTrue())
-		Expect(reason).To(BeEmpty())
+		Expect(reason).To(Equal(reasonBackendUnregistered))
 	})
 
 	It("admits when telemetry is stale, even if the backend was previously engaged (fail-open bypass, not fail-closed retain)", func() {
@@ -506,7 +506,7 @@ var _ = Describe("kvAwareAdmitter.Admit", func() {
 		a := newKVAwareAdmitter(m, 4096)
 		ok, reason := a.Admit(ctx, longMeta, backend, "t", tierStandard)
 		Expect(ok).To(BeTrue())
-		Expect(reason).To(BeEmpty())
+		Expect(reason).To(Equal(reasonTelemetryStale))
 	})
 
 	It("admits when fresh but not engaged", func() {
@@ -514,7 +514,7 @@ var _ = Describe("kvAwareAdmitter.Admit", func() {
 		a := newKVAwareAdmitter(m, 4096)
 		ok, reason := a.Admit(ctx, longMeta, backend, "t", tierStandard)
 		Expect(ok).To(BeTrue())
-		Expect(reason).To(BeEmpty())
+		Expect(reason).To(Equal(reasonNotEngaged))
 	})
 
 	It("admits a premium request even when engaged and fresh", func() {
@@ -522,7 +522,7 @@ var _ = Describe("kvAwareAdmitter.Admit", func() {
 		a := newKVAwareAdmitter(m, 4096)
 		ok, reason := a.Admit(ctx, longMeta, backend, "t", tierPremium)
 		Expect(ok).To(BeTrue())
-		Expect(reason).To(BeEmpty())
+		Expect(reason).To(Equal(reasonPremiumTier))
 	})
 
 	It("rejects a standard-long request when engaged and fresh", func() {
@@ -538,7 +538,7 @@ var _ = Describe("kvAwareAdmitter.Admit", func() {
 		a := newKVAwareAdmitter(m, 4096)
 		ok, reason := a.Admit(ctx, shortMeta, backend, "t", tierStandard)
 		Expect(ok).To(BeTrue())
-		Expect(reason).To(BeEmpty())
+		Expect(reason).To(Equal(reasonBelowThreshold))
 	})
 })
 
@@ -1014,3 +1014,88 @@ type admitterFunc func(context.Context, RequestMeta, *BackendRef, string, string
 func (f admitterFunc) Admit(ctx context.Context, m RequestMeta, b *BackendRef, t, tier string) (bool, string) {
 	return f(ctx, m, b, t, tier)
 }
+
+// An admit says why, because three different admits mean three different things about the guard.
+//
+// Admit returned (true, "") when the backend was never registered, when its telemetry had gone stale, when
+// there was no pressure, and when the caller was premium. In the evidence and in the decisions metric those
+// are one outcome, so an arm C that spent a whole run blind -- scraper never succeeding, guard bypassed on
+// every request -- is indistinguishable from an arm C that watched a calm backend and correctly let
+// everything through. The first is a broken run reported as a scientific FAIL; the second is a result.
+//
+// The 2026-09-03 run cannot be told apart on this axis at all. Its evidence carries only statuses.
+var _ = Describe("why the kv-aware guard admitted a request", func() {
+	ctx := context.Background()
+	backend := &BackendRef{Namespace: "why-ns", Name: "why-backend"}
+	long := RequestMeta{EstInputTokens: 8192}
+	short := RequestMeta{EstInputTokens: 100}
+
+	It("distinguishes a guard that could not see from a guard that saw no pressure", func() {
+		blind := newKVAwareAdmitter(managerWithSnapshot(backendKey(backend), &backendSnapshot{engaged: true, fresh: false}), 4096)
+		ok, reason := blind.Admit(ctx, long, backend, "t", tierStandard)
+		Expect(ok).To(BeTrue())
+		Expect(reason).To(Equal(reasonTelemetryStale))
+
+		calm := newKVAwareAdmitter(managerWithSnapshot(backendKey(backend), &backendSnapshot{engaged: false, fresh: true}), 4096)
+		ok, reason = calm.Admit(ctx, long, backend, "t", tierStandard)
+		Expect(ok).To(BeTrue())
+		Expect(reason).To(Equal(reasonNotEngaged))
+
+		Expect(reasonTelemetryStale).NotTo(Equal(reasonNotEngaged))
+	})
+
+	It("names a backend it has no telemetry for at all", func() {
+		a := newKVAwareAdmitter(newScraperManager(scraperConfig{clock: time.Now}), 4096)
+		ok, reason := a.Admit(ctx, long, backend, "t", tierStandard)
+		Expect(ok).To(BeTrue())
+		Expect(reason).To(Equal(reasonBackendUnregistered))
+	})
+
+	It("separates the two ways of being outside the gated population", func() {
+		engaged := newKVAwareAdmitter(managerWithSnapshot(backendKey(backend), &backendSnapshot{engaged: true, fresh: true, cacheUsage: 0.9}), 4096)
+
+		ok, reason := engaged.Admit(ctx, long, backend, "t", tierPremium)
+		Expect(ok).To(BeTrue())
+		Expect(reason).To(Equal(reasonPremiumTier))
+
+		ok, reason = engaged.Admit(ctx, short, backend, "t", tierStandard)
+		Expect(ok).To(BeTrue())
+		Expect(reason).To(Equal(reasonBelowThreshold))
+
+		ok, reason = engaged.Admit(ctx, long, backend, "t", tierStandard)
+		Expect(ok).To(BeFalse())
+		Expect(reason).To(Equal(reasonKVCachePressure))
+	})
+})
+
+// What the guard SAW, not only what it decided.
+//
+// A request now records why it was admitted, which separates a guard that was blind from one that saw a calm
+// backend. It does not say how calm. "not_engaged" is the same string whether the cache was at 0.10 and the
+// load never pressured the engine, or at 0.83 against a threshold of 0.85 -- and those call for opposite
+// conclusions: the first says the experiment failed to create the condition it is testing, the second says
+// the threshold is set past where the damage happens.
+//
+// C/R1 came back at 83.747 in the last paid run with the guard rejecting 15.3% of eligible traffic, and the
+// evidence cannot distinguish those two explanations. That is the question the pilot exists to answer, so
+// the numbers the decision was made on travel with the request that made it.
+var _ = Describe("the pressure the guard was looking at", func() {
+	backend := &BackendRef{Namespace: "saw-ns", Name: "saw-backend"}
+
+	It("reports the snapshot the decision used", func() {
+		a := newKVAwareAdmitter(managerWithSnapshot(backendKey(backend),
+			&backendSnapshot{engaged: false, fresh: true, cacheUsage: 0.83, waiting: 7}), 4096)
+		state, ok := a.Observed(backend)
+		Expect(ok).To(BeTrue())
+		Expect(state.CacheUsage).To(BeNumerically("~", 0.83, 1e-9))
+		Expect(state.Waiting).To(Equal(7))
+		Expect(state.Engaged).To(BeFalse())
+		Expect(state.Fresh).To(BeTrue())
+	})
+
+	It("says it has nothing rather than reporting zeros for a backend it never scraped", func() {
+		a := newKVAwareAdmitter(newScraperManager(scraperConfig{clock: time.Now}), 4096)
+		_, ok := a.Observed(backend)
+		Expect(ok).To(BeFalse())
+	})
+})

@@ -69,6 +69,38 @@ type RawRow struct {
 	//
 	// The report measures admitted-work over this same threshold, so if the paid run tuned it the report cannot silently score a different population than the guard gated.
 	LongThreshold int `json:"longThreshold,omitempty"`
+	// ExactInputTokens is the trace's measured count for this prompt, carried through so a refused request
+	// still contributes to the offered side of the admitted-work fraction.
+	ExactInputTokens int `json:"exactInputTokens,omitempty"`
+	// EngineInputTokens is what the engine itself reported for this request, when it answered one.
+	//
+	// It exists to check ExactInputTokens rather than to replace it: the trace's value is measured once per
+	// prompt length, and this is measured on every admitted request, so a disagreement means the trace was
+	// stamped against a different tokenizer or a different prompt than the one that ran.
+	EngineInputTokens int `json:"engineInputTokens,omitempty"`
+	// BackendState is the pressure reading the guard's decision was made from, verbatim as the gateway
+	// reported it: "kv=0.834,waiting=7,engaged=0,fresh=1".
+	//
+	// Kept as the gateway's own string rather than parsed into fields here, so the evidence records what was
+	// said rather than this package's reading of it, and a format change shows up as an unparseable value
+	// instead of silently becoming zeros.
+	BackendState string `json:"backendState,omitempty"`
+	// Tier and AdmissionReason are what the GATEWAY decided, read off its response rather than assumed here.
+	//
+	// AdmissionReason is recorded for admits as well as refusals, because arm C admits for four different
+	// reasons and two of them mean the guard was not working: a backend it never registered, and telemetry
+	// too stale to read. A run spent entirely in that bypass is arm A wearing arm C's name.
+	//
+	// Both were absent from the 2026-09-03 evidence and both had to be reconstructed months later from
+	// configuration the evidence did not contain. Tier decides membership of the eligible population -- the
+	// gateway gates on tier == standard AND the threshold, while a report with no tier could only read the
+	// threshold. AdmissionReason separates a bucket that is momentarily empty from a request larger than the
+	// bucket can ever hold, which is the difference between a tuning that is tight and one that is broken.
+	//
+	// Empty on evidence written before the gateway reported them, and every consumer treats empty as
+	// "not recorded" rather than as a value, so old runs keep scoring the way they did.
+	Tier            string `json:"tier,omitempty"`
+	AdmissionReason string `json:"admissionReason,omitempty"`
 	// MatchTolerance is the pre-registered admission-match tolerance, copied from the manifest.
 	//
 	// The report reads it from here rather than a CLI default, so the frozen tolerance cannot be loosened after the fact.
@@ -99,10 +131,20 @@ type SendResult struct {
 	EndUnixNanos int64
 	// OutputTokens is the response length in tokens.
 	OutputTokens int
+	// PromptTokens is the engine's own count of the prompt, zero when it reported none.
+	PromptTokens int
+	// BackendState is the gateway's report of the pressure its decision used, empty when it reported none.
+	BackendState string
 	// HTTPStatus is the response status; 0 for a transport error or timeout.
 	HTTPStatus int
 	// ErrorKind names the failure, empty on success.
 	ErrorKind string
+	// Tier and AdmissionReason are what the gateway reported about its own admission decision.
+	//
+	// Empty against a gateway that does not report them, which is how evidence written before it did is
+	// distinguished from a gateway that decided "no tier".
+	Tier            string
+	AdmissionReason string
 }
 
 // Sender dispatches one request and reports its raw result.
@@ -176,9 +218,14 @@ func Replay(ctx context.Context, sender Sender, trace []TraceRow, opts ReplayOpt
 				FirstTokenUnixNanos: res.FirstTokenUnixNanos,
 				EndUnixNanos:        res.EndUnixNanos,
 				EstInputTokens:      estInput(tr.PromptLenChars),
+				ExactInputTokens:    tr.ExactInputTokens,
+				EngineInputTokens:   res.PromptTokens,
+				BackendState:        res.BackendState,
 				OutputTokens:        res.OutputTokens,
 				HTTPStatus:          res.HTTPStatus,
 				ErrorKind:           res.ErrorKind,
+				Tier:                res.Tier,
+				AdmissionReason:     res.AdmissionReason,
 				TraceChecksum:       opts.TraceChecksum,
 				LongThreshold:       opts.LongThreshold,
 				MatchTolerance:      opts.MatchTolerance,
@@ -214,6 +261,16 @@ func wallSleepUntil(ctx context.Context, t time.Time) {
 
 // defaultEstInputTokens mirrors the gateway's conservative ceiling-of-bytes/4 estimate.
 func defaultEstInputTokens(promptLenChars int) int {
+	return EstInputTokensForChars(promptLenChars)
+}
+
+// EstInputTokensForChars is the gateway's ceiling-of-bytes/4 input estimate, exported for the offline
+// simulation that freezes arm B's bucket tuning.
+//
+// It is exported rather than copied because the simulation decides which rows the guard would have called
+// eligible, and a second copy of this arithmetic would answer that question its own way the first time either
+// side changed.
+func EstInputTokensForChars(promptLenChars int) int {
 	return (promptLenChars + 3) / 4
 }
 
