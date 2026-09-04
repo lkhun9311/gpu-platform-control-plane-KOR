@@ -1274,3 +1274,56 @@ func TestTheRunRecordsHowTheEngineWasConfigured(t *testing.T) {
 		t.Error("the evidence does not capture the engine's resolved batch token budget, which is the setting that decides whether a long prefill runs as one scheduler step or several")
 	}
 }
+
+// TestTheMicrotestMeasuresTheEngineTheArmsMeasured pins the microtest to the same engine and model.
+//
+// The microtest exists to explain the arms' result, so it has to run the engine the arms ran. A digest or a
+// model name typed into the runner would let it answer a question about a different scheduler while looking
+// like it answered this one -- and a model name defaulted rather than read cost one paid run three hours,
+// asking a Qwen engine for a model no deployment served.
+func TestTheMicrotestMeasuresTheEngineTheArmsMeasured(t *testing.T) {
+	runner, err := os.ReadFile(filepath.Join("..", "..", "hack", "m5b-scheduler-microtest.sh"))
+	if err != nil {
+		t.Fatalf("read microtest runner: %v", err)
+	}
+	src := string(runner)
+
+	// Both come out of the manifest, which is the record of what actually ran.
+	if !strings.Contains(src, "config/vllm/deployment.yaml") {
+		t.Fatal("the microtest does not read the engine manifest; it could measure a different engine than the arms did")
+	}
+	for _, literal := range []string{"vllm/vllm-openai@sha256:", "Qwen/Qwen2.5"} {
+		for line := range strings.SplitSeq(src, "\n") {
+			if !strings.Contains(line, literal) {
+				continue
+			}
+			// A mention inside a comment or a grep pattern is fine; an assignment is not.
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") || strings.Contains(line, "grep") || strings.Contains(line, "startswith") {
+				continue
+			}
+			if strings.Contains(line, "=") {
+				t.Errorf("the microtest hardcodes %q:\n  %s\nread it from the manifest instead", literal, trimmed)
+			}
+		}
+	}
+
+	// The cells have to be the ones the pre-registration named, or the readings do not apply to them.
+	spec, err := os.ReadFile(filepath.Join("..", "..", "docs", "superpowers", "specs", "2026-09-04-scheduler-microtest.md"))
+	if err != nil {
+		t.Fatalf("read pre-registration: %v", err)
+	}
+	for _, budget := range []string{"512", "2048", "8192"} {
+		if !strings.Contains(src, budget) {
+			t.Errorf("the runner does not test a batch budget of %s, which the pre-registration names", budget)
+		}
+		if !strings.Contains(string(spec), budget) {
+			t.Errorf("the pre-registration does not name a batch budget of %s, which the runner tests", budget)
+		}
+	}
+	for _, policy := range []string{"fcfs", "priority"} {
+		if !strings.Contains(src, `"`+policy+`"`) {
+			t.Errorf("the runner does not test the %s scheduling policy, which the pre-registration names", policy)
+		}
+	}
+}
