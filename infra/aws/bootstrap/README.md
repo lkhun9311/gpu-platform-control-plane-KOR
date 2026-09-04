@@ -17,7 +17,19 @@ terraform apply \
   -var 'state_bucket_name=<globally-unique-name>' \
   -var 'github_repo=<owner>/<name>' \
   -var "github_repository_id=$(gh api repos/<owner>/<name> --jq .id)" \
-  -var "github_repository_owner_id=$(gh api repos/<owner>/<name> --jq .owner.id)"
+  -var "github_repository_owner_id=$(gh api repos/<owner>/<name> --jq .owner.id)" \
+  -var 'budget_notification_emails=["you@example.com"]'
+
+# ALWAYS pass budget_notification_emails, on every apply and not only the first.
+#
+# The budget's notifications are dynamic blocks gated on that list, and it defaults to empty. Omitting it
+# does not leave the existing alerts alone: Terraform sees a budget with no notifications configured and
+# deletes the ones the account has. The command above without that last line removes every cost alert on
+# this account as a side effect of whatever else the apply was for.
+#
+# This nearly happened on 2026-09-04. A plan for three unrelated ECR repositories showed all three
+# notifications queued for deletion, including the 10 percent one that had, the day before, delivered the
+# alert revealing the month at 14.56 dollars against a running estimate of about 8.
 
 # 2. Migrate the local state into the bucket just created.
 #

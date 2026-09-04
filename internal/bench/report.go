@@ -27,6 +27,18 @@ import (
 // httpStatusTooManyRequests is the status the gateway returns when an admission control rejects a request.
 const httpStatusTooManyRequests = 429
 
+// httpStatusInputExceedsBurst is the status the gateway returns when a prompt is larger than the bucket can ever hold.
+//
+// The gateway splits its refusals deliberately: 429 tells the caller to come back later, 413 tells it to send
+// something smaller, because a request that cannot fit any bucket would otherwise be retried forever.
+const httpStatusInputExceedsBurst = 413
+
+// httpStatusUnauthorized and httpStatusForbidden are the statuses the gateway returns before admission runs.
+const (
+	httpStatusUnauthorized = 401
+	httpStatusForbidden    = 403
+)
+
 // errKindTimeout is the RawRow.ErrorKind the replay client records when a request exceeds its deadline.
 const errKindTimeout = "timeout"
 
@@ -56,14 +68,57 @@ const (
 // isThresholdProbe reports whether tenant is one of the threshold probes.
 func isThresholdProbe(tenant string) bool { return strings.HasPrefix(tenant, thresholdProbePrefix) }
 
+// shedByAdmission reports whether the gateway refused this request as an admission decision.
+//
+// It reads the status rather than RawRow.ErrorKind because the replay client labelled only 429 "rejected" and
+// left 413 under the generic "http", so evidence already on disk carries the wrong label and the status is the
+// only field that was right at the time. Scoring off the status lets a finished paid run be re-scored.
+//
+// Counting only 429 made the arm that shed hardest the one that reported shedding nothing: a static-cap replay
+// refused 447 noisy requests with 413 and printed rejected=0, having filed all 447 under Failed instead.
+// neverEvaluated reports whether the gateway turned this request away before admission control ran.
+//
+// Authentication and authorisation are decided ahead of admission, so a request refused there carries no
+// information about the guard: the threshold, the bucket, and the cap all never saw it.
+// eligibleTier reports whether the tier the gateway recorded admits this row to the gated population.
+func eligibleTier(r RawRow) bool {
+	return r.Tier == "" || r.Tier == tierStandard
+}
+
+// tierStandard is the gateway's name for the tier its admission controls gate.
+const tierStandard = "standard"
+
+// admissionUnknown reports whether this request left no record of what the guard decided about it.
+//
+// A transport error or a timeout means no response arrived, so there are no headers to read and no status to
+// classify. It is the admission-side twin of a censored latency observation, and it is treated the same way:
+// removed from the measurement rather than guessed at, counted, and disqualifying past a threshold.
+func admissionUnknown(r RawRow) bool {
+	return r.HTTPStatus == 0 || r.ErrorKind == errKindTimeout
+}
+
+func neverEvaluated(r RawRow) bool {
+	return r.HTTPStatus == httpStatusUnauthorized || r.HTTPStatus == httpStatusForbidden
+}
+
+func shedByAdmission(r RawRow) bool {
+	return r.HTTPStatus == httpStatusTooManyRequests || r.HTTPStatus == httpStatusInputExceedsBurst
+}
+
 // ProbeOutcome is one probe tenant's admission tally, and the real token cost the estimate stood in for.
 type ProbeOutcome struct {
 	// Total is how many of this tenant's requests the arm sent.
 	Total int
-	// Rejected is how many came back 429.
+	// Rejected is how many the gateway refused on admission, whether it said 429 or 413.
 	Rejected int
 	// EstInputTokens is the score the gateway assigned, which is what the threshold is compared against.
 	EstInputTokens int
+	// Unevaluated is how many the gateway turned away before admission ran, so the threshold never judged them.
+	//
+	// A probe refused for its credentials is not a probe that passed the threshold, and the difference is the
+	// difference between evidence and none. Without this the section printed rejected=0 for probes the guard
+	// had never seen, which reads as the threshold having considered them and let them through.
+	Unevaluated int
 }
 
 type ArmSummary struct {
@@ -73,7 +128,31 @@ type ArmSummary struct {
 	Total int
 	// Completed counts requests that produced a full response (a first token and an end).
 	Completed int
-	// Rejected counts admission rejections (HTTP 429), the load the guard or static cap shed.
+	// OfferedExactTokens and AdmittedExactTokens are the admitted-work fraction in the units the design
+	// actually specifies: the served tokenizer's own count, not ceil(chars/4).
+	//
+	// The estimate is not a neutral stand-in. This project's calibration measures it 36 percent low on a
+	// 200-character prompt and 23 percent high on a 40,000-character one, so a fraction built from it weighs
+	// the population differently than the criterion says to.
+	OfferedExactTokens  int64
+	AdmittedExactTokens int64
+	// ExactTokensMissing counts eligible requests with no measured count, and ExactTokensContradicted counts
+	// those whose engine-reported count disagrees with the trace's.
+	//
+	// Either one disqualifies the admission-match check. The alternative is to fall back to the estimate,
+	// which is how the criterion came to be unevaluated for three paid runs without anyone noticing.
+	ExactTokensMissing      int
+	ExactTokensContradicted int
+	// AdmissionLost is how many ELIGIBLE requests got no admission verdict at all, so the guard's behaviour
+	// toward them is unknown.
+	//
+	// A request that never received an HTTP response was not admitted and was not refused. Counting it as
+	// either invents an observation; counting it as admitted -- which is what happened -- let an arm whose
+	// traffic died in transport report a perfect admission match on work it never offered.
+	AdmissionLost int
+	// eligibleScored is how many eligible requests did get a verdict; AdmissionLost is judged against it.
+	eligibleScored int
+	// Rejected counts admission refusals (HTTP 429 or 413), the load the guard or static cap shed.
 	Rejected int
 	// TimedOut counts requests recorded with a timeout error kind.
 	TimedOut int
@@ -149,11 +228,42 @@ func Summarize(arm string, rows []RawRow) ArmSummary {
 	var ttft, e2e []float64
 	var premiumTotal, premiumTimedOut, premiumLost int
 	for _, r := range rows {
-		// Admitted-work accounting covers the eligible population (the long requests the controls gate), for the admission-match check.
-		if r.EstInputTokens >= threshold {
-			s.OfferedInputTokens += int64(r.EstInputTokens)
-			if r.HTTPStatus != httpStatusTooManyRequests {
-				s.AdmittedInputTokens += int64(r.EstInputTokens)
+		// Admitted-work accounting covers the eligible population, for the admission-match check.
+		//
+		// The gateway gates on tier == standard AND EstInputTokens >= threshold, and this applies the same
+		// rule -- against the tier the gateway itself reported, not one inferred from a tenant name.
+		//
+		// A row with no tier predates the gateway reporting it and is scored on the threshold alone, as it
+		// always was. Treating "not recorded" as "not standard" would empty the eligible population of every
+		// run already on disk and silently rewrite its numbers.
+		//
+		// A request the gateway turned away before admission ran is outside that population entirely, in
+		// neither term of the fraction, because the guard never saw it. Counting it as offered-and-admitted
+		// scored 737,280 admitted tokens for an arm that admitted nothing: the paid run's probes estimate at
+		// exactly the 4,096 threshold, so all 180 of them per arm were eligible, and all 180 were 403.
+		if r.EstInputTokens >= threshold && eligibleTier(r) && !neverEvaluated(r) {
+			if admissionUnknown(r) {
+				// Out of both terms. The guard may have admitted this request and the connection died after,
+				// or it may never have arrived; the evidence cannot say which, and a fraction built on a
+				// guess is worse than one that reports how much it could not see.
+				s.AdmissionLost++
+			} else {
+				s.eligibleScored++
+				s.OfferedInputTokens += int64(r.EstInputTokens)
+				if !shedByAdmission(r) {
+					s.AdmittedInputTokens += int64(r.EstInputTokens)
+				}
+				switch {
+				case r.ExactInputTokens <= 0:
+					s.ExactTokensMissing++
+				case r.EngineInputTokens > 0 && r.EngineInputTokens != r.ExactInputTokens:
+					s.ExactTokensContradicted++
+				default:
+					s.OfferedExactTokens += int64(r.ExactInputTokens)
+					if !shedByAdmission(r) {
+						s.AdmittedExactTokens += int64(r.ExactInputTokens)
+					}
+				}
 			}
 		}
 
@@ -169,7 +279,10 @@ func Summarize(arm string, rows []RawRow) ArmSummary {
 			o := s.ThresholdProbe[r.Tenant]
 			o.Total++
 			o.EstInputTokens = r.EstInputTokens
-			if r.HTTPStatus == httpStatusTooManyRequests {
+			switch {
+			case neverEvaluated(r):
+				o.Unevaluated++
+			case shedByAdmission(r):
 				o.Rejected++
 			}
 			s.ThresholdProbe[r.Tenant] = o
@@ -179,7 +292,7 @@ func Summarize(arm string, rows []RawRow) ArmSummary {
 		switch {
 		case r.ErrorKind == errKindTimeout:
 			s.TimedOut++
-		case r.HTTPStatus == httpStatusTooManyRequests:
+		case shedByAdmission(r):
 			s.Rejected++
 		case r.ErrorKind != "":
 			s.Failed++
@@ -200,7 +313,7 @@ func Summarize(arm string, rows []RawRow) ArmSummary {
 			premiumTimedOut++
 			continue
 		}
-		if r.HTTPStatus == httpStatusTooManyRequests {
+		if shedByAdmission(r) {
 			continue
 		}
 		if r.ErrorKind != "" {
@@ -214,8 +327,10 @@ func Summarize(arm string, rows []RawRow) ArmSummary {
 			// truncated at 120 premium completions with 380 transport failures, and the report printed
 			// "all checks passed".
 			//
-			// A 429 stays excluded because a rejection is the treatment, not a lost measurement: shedding
-			// is what the guard is for and it is accounted separately in Rejected.
+			// An admission refusal stays excluded because a rejection is the treatment, not a lost
+			// measurement: shedding is what the guard is for and it is accounted separately in Rejected.
+			// That holds for 413 exactly as it does for 429, and reading only 429 here would have censored
+			// the tail of any arm whose premium traffic ran into the burst ceiling.
 			premiumLost++
 			continue
 		}
@@ -242,7 +357,13 @@ func Summarize(arm string, rows []RawRow) ArmSummary {
 	// Timeouts and transport/stream errors are both counted. They are the same thing for this purpose -- a
 	// premium request whose latency is unknown and was probably long -- and separating them let a whole class
 	// of degraded run through uncensored.
-	if premiumTotal > 0 && float64(premiumTimedOut+premiumLost)/float64(premiumTotal) > 0.01 {
+	// >= rather than >, because at exactly one percent the p99 is already gone.
+	//
+	// A nearest-rank p99 over n observations is the ceil(0.99n)-th, so it rests on the slowest n/100 of them.
+	// Losing exactly that many -- 18 of 1,840, which the old boundary waved through -- can remove the entire
+	// quantile mass the statistic is made of, and the ones that vanish are the ones that were slow enough to
+	// die. The reported p99 then is a p98 wearing the other name.
+	if premiumTotal > 0 && float64(premiumTimedOut+premiumLost)/float64(premiumTotal) >= 0.01 {
 		s.Censored = true
 	}
 	return s
@@ -284,6 +405,12 @@ type CI struct {
 	// truncated run disarms the gate instead of tripping it. Making the zero value invalid by construction is
 	// what stops that, rather than relying on every caller to remember.
 	Valid bool
+
+	// InvalidReason says WHY there is no usable interval, because the two causes call for different actions.
+	//
+	// The gate reported "unequal or insufficient repetitions" for every invalid interval, so a run refused
+	// for scatter would have sent an operator to check repetition counts that were fine.
+	InvalidReason string
 }
 
 // BootstrapCI returns a percentile-bootstrap confidence interval for the mean of values.
@@ -353,6 +480,68 @@ type Checks struct {
 	OverallPass bool
 }
 
+// invalidate records a reason a run cannot be certified, keeping every reason rather than the last.
+//
+// It used to assign, so a run broken three ways reported one problem and an operator fixed them one at a
+// time -- paying for a run each round to discover the next.
+func (c *Checks) invalidate(reason string) {
+	c.Invalid = true
+	if c.InvalidReason != "" {
+		c.InvalidReason += "; "
+	}
+	c.InvalidReason += reason
+}
+
+// MaxRatioScatter is the per-repetition coefficient of variation past which the incremental interval stops
+// meaning what it says.
+//
+// A percentile bootstrap over a handful of values is anti-conservative once those values spread out. Against
+// this package's own BootstrapCI at four repetitions, a true ratio of 1.00 -- no effect at all -- clears the
+// pre-registered gate 10.2 percent of the time at a coefficient of variation of 0.20, and 1.8 percent at
+// 0.10, against a nominal 5. The bound sits between them.
+//
+// The 2026-09-03 pilot measured 0.001 for the contended arms and 0.056 for the isolation-like ones, so this
+// is not expected to bind. It exists because the failure mode is a gate that PASSES when it should not, and
+// a run is not entitled to assume its variability stayed where the pilot's was. Reproduce the numbers with
+// "benchharness power".
+const MaxRatioScatter = 0.15
+
+// RatioScatterTooHigh reports whether per-repetition ratios are too scattered for their bootstrap interval
+// to be read as a 95 percent bound.
+//
+// Fewer than two values have no scatter to measure, and their interval is already invalid for that reason.
+func RatioScatterTooHigh(ratios []float64) bool {
+	if len(ratios) < 2 {
+		return false
+	}
+	mean := 0.0
+	for _, r := range ratios {
+		mean += r
+	}
+	mean /= float64(len(ratios))
+	if mean <= 0 {
+		return false
+	}
+	ss := 0.0
+	for _, r := range ratios {
+		ss += (r - mean) * (r - mean)
+	}
+	return math.Sqrt(ss/float64(len(ratios)-1))/mean > MaxRatioScatter
+}
+
+// MaxLostAdmissionFraction is the share of the eligible population whose admission verdict may go missing
+// before the admitted-work fraction stops describing the population it claims to.
+//
+// The same one percent the tail uses, for the same reason: past it the statistic is reporting on requests it
+// never saw.
+const MaxLostAdmissionFraction = 0.01
+
+// AdmissionScored is how many eligible requests did get a verdict, the denominator AdmissionLost is judged
+// against.
+func (s ArmSummary) AdmissionScored() int {
+	return s.eligibleScored
+}
+
 // MinTailSamples is the smallest premium-completion count at which the reported p99 is not simply the
 // largest observation.
 //
@@ -376,22 +565,35 @@ func EvaluateChecks(r1, staticCap, kvAware ArmSummary, incrementalCI CI, matchTo
 	// A comparison is disqualified before any check is read if a compared arm completed no premium requests or has a censored tail, since its p99 is then not a real tail.
 	for _, s := range []ArmSummary{r1, staticCap, kvAware} {
 		if s.TailSampleSize == 0 {
-			c.Invalid = true
-			c.InvalidReason = fmt.Sprintf("arm %s completed no premium requests, so its tail is undefined", s.Arm)
+			c.invalidate(fmt.Sprintf("arm %s completed no premium requests, so its tail is undefined", s.Arm))
 		}
 		if s.TailSampleSize > 0 && s.TailSampleSize < MinTailSamples {
-			c.Invalid = true
-			c.InvalidReason = fmt.Sprintf("arm %s has %d premium completions, below the %d a nearest-rank p99 needs to be anything other than the maximum",
-				s.Arm, s.TailSampleSize, MinTailSamples)
+			c.invalidate(fmt.Sprintf("arm %s has %d premium completions, below the %d a nearest-rank p99 needs to be anything other than the maximum",
+				s.Arm, s.TailSampleSize, MinTailSamples))
 		}
 		if s.RepetitionCount > 0 && s.MinRepetitionTail < MinTailSamples {
-			c.Invalid = true
-			c.InvalidReason = fmt.Sprintf("arm %s has a repetition with %d premium completions, below the %d a nearest-rank p99 needs; pooling its %d rows hides that one repetition's p99 is a maximum",
-				s.Arm, s.MinRepetitionTail, MinTailSamples, s.TailSampleSize)
+			c.invalidate(fmt.Sprintf("arm %s has a repetition with %d premium completions, below the %d a nearest-rank p99 needs; pooling its %d rows hides that one repetition's p99 is a maximum",
+				s.Arm, s.MinRepetitionTail, MinTailSamples, s.TailSampleSize))
 		}
 		if s.Censored {
-			c.Invalid = true
-			c.InvalidReason = fmt.Sprintf("arm %s tail is censored (>1%% of premium requests did not complete), so its p99 is only a lower bound", s.Arm)
+			c.invalidate(fmt.Sprintf("arm %s tail is censored (>1%% of premium requests did not complete), so its p99 is only a lower bound", s.Arm))
+		}
+		// The criterion is defined over exact tokens, so a population that cannot supply them cannot be
+		// scored against it. Refusing is the point: falling back to the estimate is what made three paid
+		// runs report a number nobody had asked for.
+		if s.ExactTokensMissing > 0 {
+			c.invalidate(fmt.Sprintf("arm %s has %d eligible requests with no measured input-token count, and the admission-match criterion is defined over the served tokenizer's own count rather than the ceil(chars/4) estimate", s.Arm, s.ExactTokensMissing))
+		}
+		if s.ExactTokensContradicted > 0 {
+			c.invalidate(fmt.Sprintf("arm %s has %d eligible requests whose engine-reported input-token count disagrees with the trace's measurement, so the trace was stamped against a different tokenizer or a different prompt ran", s.Arm, s.ExactTokensContradicted))
+		}
+		// An eligible request with no admission verdict is unknown work, not admitted work, and the
+		// admitted-work fraction is what the whole matched comparison rests on. The threshold is the tail's:
+		// past one percent the fraction is describing a population it could not see.
+		if eligible := s.AdmissionLost + s.AdmissionScored(); eligible > 0 &&
+			float64(s.AdmissionLost)/float64(eligible) >= MaxLostAdmissionFraction {
+			c.invalidate(fmt.Sprintf("arm %s lost the admission verdict for %d of %d eligible requests (>%.0f%%), so its admitted-work fraction is measured over a population it could not see",
+				s.Arm, s.AdmissionLost, eligible, MaxLostAdmissionFraction*100))
 		}
 	}
 
@@ -407,8 +609,11 @@ func EvaluateChecks(r1, staticCap, kvAware ArmSummary, incrementalCI CI, matchTo
 	// An absent interval fails the gate rather than satisfying it. See the comment on CI.Valid.
 	c.IncrementalValuePass = c.IncrementalRatio <= 0.90 && incrementalCI.Valid && incrementalCI.Hi < 1.0
 	if !incrementalCI.Valid {
-		c.Invalid = true
-		c.InvalidReason = "no incremental confidence interval was computed (unequal or insufficient repetitions), so the incremental-value check cannot be evaluated"
+		why := incrementalCI.InvalidReason
+		if why == "" {
+			why = "unequal or insufficient repetitions"
+		}
+		c.invalidate("the incremental-value check has no usable confidence interval (" + why + "), so it cannot be evaluated")
 	}
 
 	wB := admittedWorkFraction(staticCap)
@@ -437,7 +642,7 @@ func FormatReport(summaries []ArmSummary, checks Checks, matchTolerance float64)
 	//
 	// A reader who cannot see the block count has no way to tell those apart, which is the same defect the
 	// tailN column exists to prevent one level down.
-	fmt.Fprintf(&b, "%-12s %8s %8s %8s %8s %8s %8s %8s %8s %8s\n", "arm", "total", "done", "429", "timeout", "ttftP50", "ttftP95", "ttftP99", "tailN", "reps")
+	fmt.Fprintf(&b, "%-12s %8s %8s %8s %8s %8s %8s %8s %8s %8s\n", "arm", "total", "done", "shed", "timeout", "ttftP50", "ttftP95", "ttftP99", "tailN", "reps")
 	for _, s := range summaries {
 		censored := ""
 		if s.Censored {
@@ -461,6 +666,7 @@ func FormatReport(summaries []ArmSummary, checks Checks, matchTolerance float64)
 			break
 		}
 	}
+	unevaluated := false
 	if probed {
 		b.WriteString("\nEligibility threshold (probe tenants, four characters apart)\n")
 		for _, sm := range summaries {
@@ -471,11 +677,22 @@ func FormatReport(summaries []ArmSummary, checks Checks, matchTolerance float64)
 			sort.Strings(names)
 			for _, n := range names {
 				o := sm.ThresholdProbe[n]
-				fmt.Fprintf(&b, "  %-12s %-22s est=%d  sent=%d  rejected=%d\n", sm.Arm, n, o.EstInputTokens, o.Total, o.Rejected)
+				void := ""
+				if o.Unevaluated > 0 {
+					unevaluated = true
+					void = fmt.Sprintf("  VOID: %d never reached admission (401/403)", o.Unevaluated)
+				}
+				fmt.Fprintf(&b, "  %-12s %-22s est=%d  sent=%d  rejected=%d%s\n", sm.Arm, n, o.EstInputTokens, o.Total, o.Rejected, void)
 			}
 		}
-		b.WriteString("  the estimate is what the threshold compares; the measured real cost of these prompts is\n")
-		b.WriteString("  about 3171 tokens, so a rejection here fires on an over-estimate of roughly 29 percent\n")
+		if unevaluated {
+			b.WriteString("  VOID: the gateway turned these probes away on credentials, so the threshold never judged them\n")
+			b.WriteString("  and rejected=0 above is the absence of a measurement rather than the threshold letting them\n")
+			b.WriteString("  through. This run does not evidence the configured threshold.\n")
+		} else {
+			b.WriteString("  the estimate is what the threshold compares; the measured real cost of these prompts is\n")
+			b.WriteString("  about 3171 tokens, so a rejection here fires on an over-estimate of roughly 29 percent\n")
+		}
 	} else {
 		b.WriteString("\nEligibility threshold: NOT TESTED -- no probe tenant straddled it, so any threshold in a wide\n")
 		b.WriteString("  range would have produced these same arms. The configured value is not evidenced by this run.\n")

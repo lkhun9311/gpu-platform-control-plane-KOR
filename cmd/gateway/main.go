@@ -84,6 +84,8 @@ func main() {
 		admissionStaticRate    float64
 		admissionStaticBurst   int
 		admissionLongThreshold int
+		// admissionReportBackendState is the benchmark-only switch; see the flag description.
+		admissionReportBackendState bool
 
 		admissionKVEngageUsage    float64
 		admissionKVReleaseUsage   float64
@@ -100,6 +102,9 @@ func main() {
 		"static-cap mode: sustained per-backend input-token refill rate, in tokens/sec.")
 	flag.IntVar(&admissionStaticBurst, "admission-static-burst", defaultAdmissionStaticBurst,
 		"static-cap mode: per-backend input-token bucket burst capacity, in tokens.")
+	flag.BoolVar(&admissionReportBackendState, "admission-report-backend-state", false,
+		"report the pressure reading each admission decision was made from, on the response. "+
+			"For the benchmark only: a caller has no business knowing how full the engine's KV cache is.")
 	flag.IntVar(&admissionLongThreshold, "admission-long-threshold", defaultAdmissionLongThreshold,
 		"static-cap and kv-aware modes: minimum estimated input tokens for a standard-tier "+
 			"request to enter the eligible population.")
@@ -207,6 +212,7 @@ func main() {
 	// InitRateLimiter is (admitter is unexported to the gateway package), and mode travels with it
 	// so the metrics label can never disagree with which Admitter is actually running.
 	s.SetAdmitter(admissionMode, admitter)
+	s.ReportBackendState(admissionReportBackendState)
 
 	// Start the cache and flip readiness once it has synced.
 	go func() {

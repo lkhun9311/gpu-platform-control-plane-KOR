@@ -72,6 +72,14 @@ func main() {
 		err = report(os.Args[2:])
 	case "print-prompt":
 		printPrompt(os.Args[2:])
+	case "power":
+		err = power(os.Args[2:])
+	case "stamp-exact-tokens":
+		err = stampExactTokens(os.Args[2:])
+	case "check-replay":
+		err = checkReplay(os.Args[2:])
+	case "sim-cap":
+		err = simCap(os.Args[2:])
 	case "stub-serve":
 		err = stubServe(os.Args[2:])
 	default:
@@ -85,7 +93,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: benchharness <gen-trace|replay|report|print-prompt|stub-serve> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: benchharness <gen-trace|replay|report|print-prompt|check-replay|stamp-exact-tokens|sim-cap|power|stub-serve> [flags]")
 }
 
 // genTrace generates an immutable trace file and a frozen manifest that pins its checksum.
@@ -446,7 +454,19 @@ func loadArmEvidence(rawFiles []string) (*armEvidence, error) {
 		e.repP99[arm] = append(e.repP99[arm], rs.TTFTMsP99)
 		e.repTail[arm] = append(e.repTail[arm], rs.TailSampleSize)
 		e.repRows[arm] = append(e.repRows[arm], len(rows))
+		// Every repetition's checksum, not the last one's.
+		//
+		// This assigned, so loadArmEvidence kept only whichever file it read last and a repetition replayed
+		// from a different trace was invisible to refuseIfTracesDisagree -- the one check whose entire job is
+		// to prove the arms saw identical traffic. The trigger is a workflow this runner endorses: re-running
+		// one botched arm into the same output directory.
+		if prev, ok := e.checksum[arm]; ok && prev != rows[0].TraceChecksum {
+			return nil, fmt.Errorf("arm %s has repetitions replayed from different traces (%s and %s); its rows are pooled into one summary, so mixing them compares an arm against itself across two workloads", arm, prev, rows[0].TraceChecksum)
+		}
 		e.checksum[arm] = rows[0].TraceChecksum
+		if prev, ok := e.tolerance[arm]; ok && prev != rows[0].MatchTolerance {
+			return nil, fmt.Errorf("arm %s has repetitions carrying different admission-match tolerances (%v and %v); the pre-registered tolerance cannot be two values", arm, prev, rows[0].MatchTolerance)
+		}
 		e.tolerance[arm] = rows[0].MatchTolerance
 	}
 	return e, nil
@@ -580,6 +600,13 @@ func (e *armEvidence) incrementalCI() bench.CI {
 			}
 		}
 		incCI = bench.BootstrapCI(ratios, 2000, 1, 0.05)
+		// A bootstrap interval over four values only bounds what it claims to while those values are tight.
+		// Marking it invalid rather than reporting it keeps a scattered run from clearing the gate on an
+		// interval that is narrower than the evidence supports; see bench.MaxRatioScatter.
+		if bench.RatioScatterTooHigh(ratios) {
+			incCI.Valid = false
+			incCI.InvalidReason = fmt.Sprintf("the per-repetition C/B ratios scatter beyond a coefficient of variation of %.2f, past which a percentile bootstrap over %d values fires on no effect at all more often than its nominal 5 percent", bench.MaxRatioScatter, len(ratios))
+		}
 	} else if len(b) > 0 && len(c) > 0 {
 		// Unequal repetition counts leave the incremental CI at the degenerate point estimate.
 		//

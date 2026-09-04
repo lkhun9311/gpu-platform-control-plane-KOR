@@ -48,6 +48,21 @@ type TraceRow struct {
 	MaxOutputTokens int `json:"maxOutputTokens"`
 	// IsNoisy marks the long-context contender traffic, so a report can separate the victim tenant from the neighbor that pressures the KV cache.
 	IsNoisy bool `json:"isNoisy"`
+	// ExactInputTokens is the served tokenizer's own count for this prompt, measured rather than estimated.
+	//
+	// The design defines the admission-match criterion over EXACT target-tokenizer input tokens, and every
+	// run so far has computed it over ceil(chars/4) instead -- a quantity the project's own calibration
+	// records as 36 percent low on a short prompt and 23 percent high on a long one. So the pre-registered
+	// criterion has never actually been evaluated.
+	//
+	// It lives on the trace rather than only on the response because a REFUSED request never reaches the
+	// engine and has no response to read a count from, and the fraction needs the refused ones: they are its
+	// denominator. Measured once per distinct prompt length against the running engine, which is the only
+	// authority on what its tokenizer does.
+	//
+	// Zero means not measured, and a report refuses the admission-match check rather than falling back to
+	// the estimate, since falling back is how the criterion came to be unevaluated in the first place.
+	ExactInputTokens int `json:"exactInputTokens,omitempty"`
 }
 
 // TenantSpec describes one tenant's share of a trace and the shape of its requests.

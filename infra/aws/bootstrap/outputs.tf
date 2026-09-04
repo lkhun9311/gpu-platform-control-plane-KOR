@@ -41,3 +41,8 @@ output "ttl_scaledown_role_arn" {
   description = "IAM role assumed by EventBridge Scheduler for the session TTL scale-down."
   value       = aws_iam_role.ttl_scaledown.arn
 }
+
+output "mirror_repository_urls" {
+  description = "Mirror repository URLs, keyed by repository name."
+  value       = { for k, r in aws_ecr_repository.mirror : k => r.repository_url }
+}

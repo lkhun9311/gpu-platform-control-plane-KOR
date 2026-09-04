@@ -796,19 +796,39 @@ func (a *kvAwareAdmitter) AdmitIsStateless() {}
 //   - engaged, standard tier, short -> admit.
 func (a *kvAwareAdmitter) Admit(_ context.Context, meta RequestMeta, backend *BackendRef, _, tier string) (bool, string) {
 	snap, ok := a.manager.snapshotFor(backendKey(backend))
-	if !ok || !snap.fresh {
-		return true, ""
+	if !ok {
+		return true, reasonBackendUnregistered
+	}
+	if !snap.fresh {
+		return true, reasonTelemetryStale
 	}
 	if !snap.engaged {
-		return true, ""
+		return true, reasonNotEngaged
 	}
 	if tier == tierPremium {
-		return true, ""
+		return true, reasonPremiumTier
 	}
 	if meta.EstInputTokens >= a.longThreshold {
 		return false, reasonKVCachePressure
 	}
-	return true, ""
+	return true, reasonBelowThreshold
+}
+
+// Observed reports the snapshot this admitter would decide on for backend, or false if it has none.
+//
+// It reads the same published snapshot Admit does, so the numbers a request records are the numbers its own
+// decision was made from rather than a second sample taken afterwards.
+func (a *kvAwareAdmitter) Observed(backend *BackendRef) (BackendState, bool) {
+	snap, ok := a.manager.snapshotFor(backendKey(backend))
+	if !ok {
+		return BackendState{}, false
+	}
+	return BackendState{
+		CacheUsage: snap.cacheUsage,
+		Waiting:    snap.waiting,
+		Engaged:    snap.engaged,
+		Fresh:      snap.fresh,
+	}, true
 }
 
 // KVAwareConfig configures the kv-aware admission mode's thresholds and scraper.

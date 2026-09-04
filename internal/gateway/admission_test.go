@@ -32,7 +32,7 @@ var _ = Describe("offAdmitter", func() {
 		a := offAdmitter{}
 		ok, reason := a.Admit(context.Background(), RequestMeta{EstInputTokens: 1_000_000}, &BackendRef{Namespace: "ns", Name: "b"}, "t", "standard")
 		Expect(ok).To(BeTrue())
-		Expect(reason).To(BeEmpty())
+		Expect(reason).To(Equal(reasonAdmissionOff))
 	})
 })
 
@@ -87,21 +87,21 @@ var _ = Describe("staticCapAdmitter", func() {
 		a := newStaticCapAdmitter(0, 0, 4096)
 		ok, reason := a.Admit(ctx, RequestMeta{EstInputTokens: 8192}, backend, "t", "premium")
 		Expect(ok).To(BeTrue())
-		Expect(reason).To(BeEmpty())
+		Expect(reason).To(Equal(reasonPremiumTier))
 	})
 
 	It("always admits a standard request shorter than the long threshold", func() {
 		a := newStaticCapAdmitter(0, 0, 4096)
 		ok, reason := a.Admit(ctx, RequestMeta{EstInputTokens: 4095}, backend, "t", "standard")
 		Expect(ok).To(BeTrue())
-		Expect(reason).To(BeEmpty())
+		Expect(reason).To(Equal(reasonBelowThreshold))
 	})
 
 	It("admits a standard-long request while the bucket has capacity", func() {
 		a := newStaticCapAdmitter(0, 4096, 4096)
 		ok, reason := a.Admit(ctx, RequestMeta{EstInputTokens: 4096}, backend, "t", "standard")
 		Expect(ok).To(BeTrue())
-		Expect(reason).To(BeEmpty())
+		Expect(reason).To(Equal(reasonWithinBudget))
 	})
 
 	// This spec used to build the admitter with burst 0 and send a 4096-token request, which is not an
@@ -114,7 +114,7 @@ var _ = Describe("staticCapAdmitter", func() {
 		a := newStaticCapAdmitter(0, 8192, 4096)
 		ok, reason := a.Admit(ctx, RequestMeta{EstInputTokens: 8192}, backend, "t", "standard")
 		Expect(ok).To(BeTrue(), "the request that was meant to drain the bucket did not fit in it")
-		Expect(reason).To(BeEmpty())
+		Expect(reason).To(Equal(reasonWithinBudget))
 
 		ok, reason = a.Admit(ctx, RequestMeta{EstInputTokens: 4096}, backend, "t", "standard")
 		Expect(ok).To(BeFalse())
