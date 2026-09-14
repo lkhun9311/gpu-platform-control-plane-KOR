@@ -19,8 +19,13 @@ package queuelab
 import (
 	"bytes"
 	"errors"
+	"math"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -49,10 +54,15 @@ func TestRenderMLTrainingJobMatchesTraceAndQueue(t *testing.T) {
 	if job.Spec.Parallelism != 1 || job.Spec.Completions != 1 {
 		t.Fatalf("parallelism/completions must be pinned to 1 so gpuCount is the demand")
 	}
-	// The duration is an ARGUMENT now rather than text inside a shell string, which is what lets the two arms
+	// The duration is an ARGUMENT rather than text inside a shell string, which is what lets the two arms
 	// share one script: a workload spelled per-arm could drift between them without the compiler noticing.
-	if len(job.Spec.Command) != 5 || job.Spec.Command[0] != "python3" || job.Spec.Command[3] != "600" {
-		t.Fatalf("workload command = %v, want python3 -c <script> 600 <contract>", job.Spec.Command)
+	// The duty cycle joins it for the same reason, and is present even at 1.0 so one experiment has one
+	// spelling -- the command is what the termination canary fingerprints.
+	if len(job.Spec.Command) != 6 || job.Spec.Command[0] != "python3" || job.Spec.Command[3] != "600" {
+		t.Fatalf("workload command = %v, want python3 -c <script> 600 <contract> <duty>", job.Spec.Command)
+	}
+	if job.Spec.Command[5] != "1" {
+		t.Fatalf("duty argument = %q, want \"1\" for a trace row that declares none", job.Spec.Command[5])
 	}
 	if job.Labels["queuelab.gpu-platform/trace-index"] != "1" {
 		t.Fatalf("trace-index label = %q, want 1", job.Labels["queuelab.gpu-platform/trace-index"])
@@ -245,7 +255,7 @@ func TestTheShippedWorkloadActuallyRunsAndReportsWhatTheParserExpects(t *testing
 	}
 	final := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(
 		lastLine(string(out))), "finished "))
-	iters, kind, device := ReportFromMessage(final)
+	iters, kind, device, _ := ReportFromMessage(final)
 	if iters == nil {
 		t.Fatalf("the parser could not read the report the shipped workload writes: %q\nfull output:\n%s",
 			final, out)
@@ -308,7 +318,7 @@ func TestTheHonoringArmActuallyExitsOnSIGTERM(t *testing.T) {
 			"natural completion\n%s", exit.ExitCode(), termExitCode, buf.String())
 	}
 	final := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lastLine(buf.String())), "terminated "))
-	if iters, _, _ := ReportFromMessage(final); iters == nil {
+	if iters, _, _, _ := ReportFromMessage(final); iters == nil {
 		t.Fatalf("the preempted workload left no readable report, which is the evidence the arm exists to "+
 			"produce: %q\n%s", final, buf.String())
 	}
@@ -333,5 +343,208 @@ func TestTheWorkloadEmitsTheDeviceTokenThisPackageParses(t *testing.T) {
 	if !deviceStatuses[DeviceLaunchFailedMidrun] {
 		t.Fatalf("%q is not in deviceStatuses, so the workload's own report reads as an unknown status",
 			DeviceLaunchFailedMidrun)
+	}
+}
+
+// TestAnUnsetDutyRendersWhatThisTraceAlwaysRendered keeps the new axis from moving the old experiment.
+//
+// The command is part of the Pod template the termination canary fingerprints, so a row that says nothing
+// about duty must render one spelling, and it must be the spelling that means "compute throughout".
+func TestAnUnsetDutyRendersWhatThisTraceAlwaysRendered(t *testing.T) {
+	got, err := sleeperCommand(30, HonorsSIGTERM, DutyCycle(0).orFull())
+	if err != nil {
+		t.Fatalf("the historical row was refused: %v", err)
+	}
+	if n := len(got); n != 6 {
+		t.Fatalf("command has %d parts, want 6 (python3 -c script seconds honor duty): %q", n, got)
+	}
+	if got[len(got)-2] != "honor" || got[len(got)-1] != "1" {
+		t.Errorf("an unset duty rendered %q, want the full-duty spelling \"1\"", got[len(got)-2:])
+	}
+}
+
+// TestADeclaredDutyReachesTheWorkload is the axis itself.
+func TestADeclaredDutyReachesTheWorkload(t *testing.T) {
+	got, err := sleeperCommand(30, IgnoresSIGTERM, DutyCycle(0.25))
+	if err != nil {
+		t.Fatalf("a quarter-duty row was refused: %v", err)
+	}
+	if got[len(got)-1] != "0.25" {
+		t.Errorf("duty reached the workload as %q, want \"0.25\"", got[len(got)-1])
+	}
+	if !strings.Contains(got[2], "duty=float(sys.argv[3])") {
+		t.Error("the rendered script does not read a duty argument at all")
+	}
+	if !strings.Contains(got[2], "time.sleep(min((1.0-duty)*PERIOD,rest))") {
+		t.Error("the rendered script has no idle phase, so a declared duty would change nothing")
+	}
+}
+
+// TestAnImpossibleDutyIsRefusedRatherThanClamped is the measurement rule applied to a knob.
+//
+// Clamping 1.5 to 1.0 would let a trace ask for something it did not get while the record reported the value
+// it asked for. A refused trace is a trace nobody ran; a clamped one is a wrong number.
+func TestAnImpossibleDutyIsRefusedRatherThanClamped(t *testing.T) {
+	for _, d := range []DutyCycle{-1, 1.5, 2} {
+		if _, err := sleeperCommand(30, HonorsSIGTERM, d); err == nil {
+			t.Errorf("duty %v was accepted", float64(d))
+		}
+	}
+	// Zero reaches sleeperCommand only if a caller skipped orFull, and it is refused there too: a row that
+	// never computes cannot be told from one whose card was never observed.
+	if _, err := sleeperCommand(30, HonorsSIGTERM, DutyCycle(0)); err == nil {
+		t.Error("a zero duty was accepted; a row that never computes is indistinguishable from an unobserved one")
+	}
+}
+
+// TestTheDeclaredDutyIsRecoverableFromTheWorkloadItself runs the embedded script and measures it.
+//
+// The knob is only worth having if it changes what the workload does, and the two tests above check the
+// spelling rather than the behaviour: a script that read the argument and ignored it would pass both. This
+// runs the real embedded source on the CPU fallback path -- no GPU, no container -- and checks that halving
+// the duty roughly halves the work done in the same wall time.
+//
+// The tolerance is wide on purpose. A CPU iteration here is about a millisecond and the idle phase is a whole
+// second, so the boundary between them quantises; what is being checked is that the duty is the thing
+// deciding, not that it is exact.
+func TestTheDeclaredDutyIsRecoverableFromTheWorkloadItself(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("no python3 on PATH; this test runs the workload rather than reading it")
+	}
+	script := strings.Replace(workloadScript, "EXITCODE", strconv.Itoa(termExitCode), 1)
+
+	// Two whole periods, for the reason the device-path version of this records: a window that is not a
+	// multiple of the workload's period truncates its last segment, and the ratio then measures the
+	// truncation rather than the duty.
+	seconds := strconv.FormatFloat(2*workloadPeriod(t), 'f', -1, 64)
+
+	iters := func(duty string) int {
+		t.Helper()
+		out, err := exec.Command(python, "-c", script, seconds, "ignore", duty).CombinedOutput()
+		if err != nil {
+			t.Fatalf("duty %s: the workload did not finish: %v\n%s", duty, err, out)
+		}
+		m := regexp.MustCompile(`iters=(\d+)`).FindAllStringSubmatch(string(out), -1)
+		if len(m) == 0 {
+			t.Fatalf("duty %s: the workload reported no iteration count:\n%s", duty, out)
+		}
+		n, _ := strconv.Atoi(m[len(m)-1][1])
+		return n
+	}
+
+	// Ordered rather than measured against a target ratio, for the reason the device-path version of this
+	// records: iterations per second is not constant between a run that never rests and one that rests half
+	// the time, so a ratio drifts for reasons the knob has nothing to do with. An ignored argument produces
+	// three roughly equal counts, and that is what this has to exclude.
+	full := iters("1")
+	half := iters("0.5")
+	quarter := iters("0.25")
+	if full == 0 {
+		t.Fatal("the workload did nothing at full duty, so nothing below means anything")
+	}
+	if half >= full*4/5 {
+		t.Errorf("half duty did %d iterations against %d at full duty; the declared duty is not what decides "+
+			"how much work happens", half, full)
+	}
+	if quarter >= half {
+		t.Errorf("quarter duty did %d iterations and half duty %d; the declared duty does not order them",
+			quarter, half)
+	}
+}
+
+// TestAnArmsDutyReachesTheRenderedCommand is the step between a mapping and a manifest.
+//
+// DutyFor can be right while nothing applies it. The command is what the container runs and what the
+// termination canary fingerprints, so this checks the value arrives there for each arm and each row.
+func contractArg(c TerminationContract) string {
+	if c == HonorsSIGTERM {
+		return argHonor
+	}
+	return argIgnore
+}
+
+func TestAnArmsDutyReachesTheRenderedCommand(t *testing.T) {
+	for _, tc := range []struct {
+		arm  Arm
+		row  string
+		want string
+	}{
+		{ArmDFull, VictimRow, "1"},
+		{ArmDQuarter, VictimRow, "0.25"},
+		{ArmDQuarter, OwnRow, "1"},
+		{ArmDQuarter, OwnerRow, "1"},
+		{ArmAIgnore, VictimRow, "1"},
+	} {
+		duty, err := tc.arm.DutyFor(tc.row)
+		if err != nil {
+			t.Fatalf("%s/%s: %v", tc.arm, tc.row, err)
+		}
+		contract, err := tc.arm.ContractFor(tc.row)
+		if err != nil {
+			t.Fatalf("%s/%s: %v", tc.arm, tc.row, err)
+		}
+		// Rendered through RenderForArm, which is what the run path calls. Rendering with the pieces the
+		// test resolved itself would check that this test can assemble an arm, not that the run path does.
+		job, err := RenderForArm(tc.arm, TrainingTraceRow{
+			Index: 1, Name: tc.row, Tenant: "tenant-a", GPUCount: 1, DurationSec: 60,
+		}, "ns")
+		if err != nil {
+			t.Fatalf("%s/%s render: %v", tc.arm, tc.row, err)
+		}
+		got := job.Spec.Command[len(job.Spec.Command)-1]
+		if got != tc.want {
+			t.Errorf("%s/%s renders duty %q, want %q", tc.arm, tc.row, got, tc.want)
+		}
+		// The other half of what the arm decides, checked in the same render so the two cannot drift apart.
+		if arm := job.Spec.Command[len(job.Spec.Command)-2]; arm != contractArg(contract) {
+			t.Errorf("%s/%s renders contract arm %q, want the spelling of %q", tc.arm, tc.row, arm, contract)
+		}
+		_ = duty
+	}
+}
+
+// TestTheWorkloadDoesNotShareItsPeriodWithTheSampler holds the two files together.
+//
+// The workload's duty cycle has a period, and the exporter collects on one too. When they were equal a
+// quarter-duty victim executing 22,093 real kernels was reported as working in zero of 104 samples: a
+// sample landing in the idle part of the cycle landed there every time, because two processes at the same
+// frequency do not drift through each other's phase.
+//
+// A comment in each file cannot hold that, because the two values live in different files and neither edit
+// looks wrong beside the other. This reads the exporter's manifest and refuses a workload period that
+// divides into it or is divided by it.
+func TestTheWorkloadDoesNotShareItsPeriodWithTheSampler(t *testing.T) {
+	m := regexp.MustCompile(`(?m)^PERIOD=([0-9.]+)$`).FindStringSubmatch(workloadScript)
+	if m == nil {
+		t.Fatal("the workload declares no PERIOD, so nothing here can check it against the sampler's")
+	}
+	period, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		t.Fatalf("PERIOD=%q is not a number", m[1])
+	}
+
+	manifest, err := os.ReadFile(filepath.Join("..", "..", "config", "dcgm-exporter", "daemonset.yaml"))
+	if err != nil {
+		t.Fatalf("cannot read the exporter manifest, so this check verifies nothing: %v", err)
+	}
+	cm := regexp.MustCompile(`(?m)^\s*-\s*"-c"\s*\n\s*-\s*"(\d+)"`).FindSubmatch(manifest)
+	if cm == nil {
+		t.Fatal("the exporter manifest carries no -c interval; if the flag was renamed this check is stale " +
+			"and must be updated rather than deleted")
+	}
+	ms, err := strconv.Atoi(string(cm[1]))
+	if err != nil {
+		t.Fatalf("the exporter's -c value %q is not a number", cm[1])
+	}
+	sampler := float64(ms) / 1000
+
+	// Equal is the case that was measured. Integer multiples in either direction are the same trap: the
+	// phase still repeats, it just takes longer to come round.
+	ratio := period / sampler
+	if math.Abs(ratio-math.Round(ratio)) < 0.05 || math.Abs(1/ratio-math.Round(1/ratio)) < 0.05 {
+		t.Errorf("the workload's period is %gs and the exporter collects every %gs, a ratio of %.3f; the "+
+			"burst does not walk through the sampler's phase and a duty cycle can hide behind it entirely, "+
+			"which is what session qlgpu-20260906-103327 measured", period, sampler, ratio)
 	}
 }

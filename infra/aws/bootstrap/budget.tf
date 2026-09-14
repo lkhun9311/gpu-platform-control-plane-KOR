@@ -74,3 +74,20 @@ resource "aws_budgets_budget" "demo" {
     }
   }
 }
+
+# The alerts are the account's only cost tripwire, and an apply can remove them by saying nothing.
+#
+# Both notification blocks are gated on budget_notification_emails, which defaults to empty so that
+# `terraform validate` and a plan work without it -- and that default is also how every alert disappears: an
+# apply run without the variable destroys the notifications that a previous apply created, leaving the budget
+# in place and nobody told when it is crossed. The failure is silent in the direction that costs money.
+#
+# A `validation` block on the variable would catch it and would also fail the CI plan, which runs without the
+# variable on purpose. A check block is the tool that fits: it warns on every plan and apply, and it fails
+# nothing.
+check "budget_alerts_have_a_subscriber" {
+  assert {
+    condition     = length(var.budget_notification_emails) > 0
+    error_message = "budget_notification_emails is empty, so this budget has NO notifications: the ceiling is recorded and nobody is told when it is crossed. If a previous apply created alerts, this one removes them."
+  }
+}

@@ -128,7 +128,12 @@ func (r *MLTrainingJobReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	phase, cond := computeMLTJPhase(job, wl)
-	if err := r.setMLTJPhase(ctx, &mltj, phase, cond); err != nil {
+	// Kueue's own admission stamp, not this controller's clock, for the start of the wait it reports.
+	var admittedAt *metav1.Time
+	if wl != nil {
+		admittedAt = kueueAdmittedStamp(wl.Status.Conditions)
+	}
+	if err := r.setMLTJPhase(ctx, &mltj, phase, cond, admittedAt); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -382,14 +387,25 @@ func countLabelled(items []kueuev1beta1.Workload, uid string) int {
 // setMLTJPhase writes the phase and the Admitted condition to status, but only when either actually changes.
 //
 // lastTransitionTime is stamped only on a phase transition, not on every reconcile that finds the same phase.
-func (r *MLTrainingJobReconciler) setMLTJPhase(ctx context.Context, mltj *platformv1.MLTrainingJob, phase string, cond metav1.Condition) error {
+func (r *MLTrainingJobReconciler) setMLTJPhase(
+	ctx context.Context,
+	mltj *platformv1.MLTrainingJob,
+	phase string,
+	cond metav1.Condition,
+	kueueAdmittedAt *metav1.Time,
+) error {
 	desired := mltj.Status.DeepCopy()
 	phaseChanged := desired.Phase != phase
+	previousPhase := mltj.Status.Phase
 	desired.Phase = phase
 	desired.ObservedGeneration = mltj.Generation
 
 	cond.ObservedGeneration = mltj.Generation
 	meta.SetStatusCondition(&desired.Conditions, cond)
+
+	// How long the tenant waited between having quota and using it, recorded on the reconciles that saw each
+	// end of that window and refused on the ones that did not.
+	outcome := recordAdmitToRunning(desired, previousPhase, phase, kueueAdmittedAt, metav1.Now())
 
 	if equality.Semantic.DeepEqual(mltj.Status, *desired) {
 		return nil
@@ -408,6 +424,15 @@ func (r *MLTrainingJobReconciler) setMLTJPhase(ctx context.Context, mltj *platfo
 	// Increment the phase transition counter only when the phase actually changed.
 	if phaseChanged {
 		mlTrainingJobPhaseTotal.WithLabelValues(phase).Inc()
+	}
+
+	// Emitted after the status write succeeds, so a series and the record it describes cannot disagree: a
+	// counter incremented before a failed update would report a wait no object carries.
+	switch {
+	case outcome.Observed:
+		mlTrainingJobAdmitToRunningSeconds.Observe(outcome.Seconds)
+	case outcome.UnobservedReason != "":
+		mlTrainingJobAdmitToRunningUnobservedTotal.WithLabelValues(outcome.UnobservedReason).Inc()
 	}
 
 	return nil

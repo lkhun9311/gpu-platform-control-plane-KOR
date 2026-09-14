@@ -580,6 +580,15 @@ type workloadProvenance struct {
 	DeviceUseEstablished bool `json:"deviceUseEstablished"`
 	// WhyNot is the reason DeviceUseEstablished is false, and is empty when it is true.
 	WhyNot string `json:"whyNot,omitempty"`
+	// DutyCycle is the fraction of its service the victim's workload REPORTED computing for, absent when it
+	// reported none.
+	//
+	// It is published beside DeviceUseEstablished because the two answer different halves of one question. A
+	// run can establish that a card did work and still have held it idle for most of its service, and the
+	// gap between reserved GPU-seconds and observed device-seconds is exactly that. A reader comparing two
+	// arms has to be able to see whether they idled the same amount, or the difference between them is not
+	// the difference they think it is.
+	DutyCycle *float64 `json:"dutyCycle,omitempty"`
 }
 
 // cpuOnlyWorkload is the provenance every run on this cluster carries.
@@ -607,7 +616,7 @@ func cpuOnlyWorkload() workloadProvenance {
 // the middle, or a card that was allocated and idle. Those send someone to five different places.
 func workloadFrom(obs *queuelab.DeviceObservation, claim queuelab.DeviceClaim,
 	reported reportedWorkload) workloadProvenance {
-	w := workloadProvenance{Kind: reported.Kind, CountedUnit: reported.Unit}
+	w := workloadProvenance{Kind: reported.Kind, CountedUnit: reported.Unit, DutyCycle: reported.DutyCycle}
 	established, why := queuelab.EstablishesDeviceWork(obs, claim)
 	// The record must not contradict itself, and the direction of the refusal is the point.
 	//
@@ -655,6 +664,8 @@ type reportedWorkload struct {
 	// come back with the axis stuck. A test written for the positive path caught it; nothing else would have,
 	// because no run in this repository had ever reached that branch.
 	Token string
+	// DutyCycle is what the workload said it ran at, carried from the ledger rather than from the request.
+	DutyCycle *float64
 	// Kind is the workload kind the record publishes, which is the token's spelling rather than the token.
 	Kind string
 	// Unit names what one iteration is, in the terms that kind of loop uses.
@@ -711,6 +722,7 @@ func reportedWorkloadOf(events []queuelab.LifecycleEvent) reportedWorkload {
 			return unreported
 		}
 		known.DeviceStatus = e.DeviceStatus
+		known.DutyCycle = e.DutyCycle
 		return known
 	}
 	return unreported
@@ -1374,6 +1386,10 @@ func replayAgreesWithRecord(r runRecord) error {
 		{"workload.countedUnit", got.Workload.CountedUnit, want.Workload.CountedUnit},
 		{"workload.deviceUseEstablished", got.Workload.DeviceUseEstablished,
 			want.Workload.DeviceUseEstablished},
+		// The duty is compared for the reason every line above it is. It is the workload's own report,
+		// carried in the ledger so a reader holding nothing but the JSON can re-derive it -- and a field that
+		// is published but never replayed is a field the document can assert without support.
+		{"workload.dutyCycle", floatPtrValue(got.Workload.DutyCycle), floatPtrValue(want.Workload.DutyCycle)},
 	} {
 		if d.got != d.want {
 			return fmt.Errorf("decode record: measurement.%s is %v and replaying this record's own ledger "+
@@ -1410,6 +1426,13 @@ func intPtrValue(p *int) any {
 }
 
 func int64PtrValue(p *int64) any {
+	if p == nil {
+		return "absent"
+	}
+	return *p
+}
+
+func floatPtrValue(p *float64) any {
 	if p == nil {
 		return "absent"
 	}

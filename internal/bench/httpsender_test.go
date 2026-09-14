@@ -407,3 +407,51 @@ var _ = Describe("the engine's own count of the prompt", func() {
 		Expect(res.PromptTokens).To(BeZero())
 	})
 })
+
+var _ = Describe("the priority a request carries", func() {
+	// vLLM's scheduling-policy=priority reads a per-request `priority` field, and it is the only axis that
+	// moved the tail in the microtest: at a 512-token batch budget it took a short request behind a long one
+	// from 13.79x its uncontended time to 1.57x. The Go sender had no support for it at all, so the arms
+	// runner could not test the one setting that worked -- only the microtest's inline script could.
+	//
+	// Priority comes from a per-tenant map rather than from the trace row, because it is a property of the
+	// tenant's contract. That is the same rule internal/gateway states for tier: not something a caller
+	// asserts about itself. A benchmark that let each row name its own priority would be measuring a
+	// mechanism no deployment would ship.
+	capture := func(priorities map[string]int, tenant string) map[string]any {
+		var got map[string]any
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&got)
+			w.Header().Set("Content-Type", "text/event-stream")
+			f := w.(http.Flusher)
+			_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n")
+			f.Flush()
+			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+			f.Flush()
+		}))
+		defer srv.Close()
+		s := NewHTTPSender(srv.URL, "m", nil, 5*time.Second, SenderConn{MaxIdleConnsPerHost: 4, DrainForReuse: true})
+		s.SetPriorities(priorities)
+		s.Send(context.Background(), TraceRow{Index: 1, Tenant: tenant, PromptLenChars: 40, MaxOutputTokens: 4}, 1)
+		return got
+	}
+
+	It("sends the tenant's priority when one is configured", func() {
+		body := capture(map[string]int{"premium-1": 0, "standard-noisy": 1}, "premium-1")
+		Expect(body).To(HaveKeyWithValue("priority", BeNumerically("==", 0)))
+
+		body = capture(map[string]int{"premium-1": 0, "standard-noisy": 1}, "standard-noisy")
+		Expect(body).To(HaveKeyWithValue("priority", BeNumerically("==", 1)))
+	})
+
+	It("omits the field entirely when no priority is configured", func() {
+		// An engine running the default first-come policy ignores the field, but sending a default of 0 to
+		// every tenant would silently make every request equally urgent under a policy that does read it --
+		// a control arm that is not a control.
+		body := capture(nil, "premium-1")
+		Expect(body).NotTo(HaveKey("priority"))
+
+		body = capture(map[string]int{"other-tenant": 3}, "premium-1")
+		Expect(body).NotTo(HaveKey("priority"))
+	})
+})

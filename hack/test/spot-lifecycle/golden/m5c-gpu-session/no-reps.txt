@@ -1,0 +1,5 @@
+
+--- exit 1
+--- messages
+FAIL: REPS is unset. A pilot is REPS=1 and a confirmatory run is REPS=3. Which this is decides both the cost and what may be concluded, so it is not a default.
+--- files

@@ -394,13 +394,56 @@ prepare() {
 # The script's first act is to call ./queuelabrun, and a fresh checkout has no such file: the binary is
 # gitignored and no Makefile target builds it. The entry point could not run from the state it is committed
 # in, which is a poor property for the thing that spends the money.
-echo "building the runner"
-go build -o queuelabrun ./cmd/queuelabrun
+if [ "${QUEUELABRUN_PREBUILT:-0}" = "1" ]; then
+  # Shipped by the caller with a digest it already verified. Not merely "a file exists": a stale binary in
+  # somebody's working tree would then be used silently, and the reason to ship one is that its digest is
+  # known.
+  [ -x ./queuelabrun ] || { echo "QUEUELABRUN_PREBUILT=1 but ./queuelabrun is not executable" >&2; exit 1; }
+  echo "using the queuelabrun that was shipped: sha256 $(sha256sum ./queuelabrun | cut -c1-12)"
+else
+  echo "building the runner"
+  go build -o queuelabrun ./cmd/queuelabrun
+fi
 
 for W in "${WORKERS[@]}"; do
   prepare "$W"
   echo
 done
+
+# The preflight's Pod has to finish leaving before the first run qualifies the node.
+#
+# The device preflight applies a Pod that holds a card, and it releases the worker as soon as that Pod is
+# told to go -- not once it is gone. The first run then qualifies the node, finds a Pod still holding
+# nvidia.com/gpu, and refuses:
+#
+#   ENVIRONMENT NOT QUALIFIED: 1 Pod(s) already hold nvidia.com/gpu on it, which the ownership taint does
+#   not evict: "queuelab-canary"/"dp-..." (Running, terminating, 1 gpu)
+#
+# That refusal is right and stays: a run measured beside another tenant's work is not attributable, which is
+# the whole exclusivity clause. The bug is the race, not the guard, and the fix is to wait rather than to
+# soften what qualification accepts.
+#
+# The surplus occupier is deliberately NOT waited for. It holds the cards this protocol does not use, on
+# purpose, for the whole session, and qualification already accounts for it -- occupiedGPU against
+# requiredGPU. Only the preflight's own leftovers are transient.
+if [[ "${RUN_STUDY:-}" == "1" ]]; then
+  for W in "${WORKERS[@]}"; do
+    for _ in $(seq 1 60); do
+      leftover=$(kubectl get pods -A --field-selector "spec.nodeName=$W" \
+        -o jsonpath='{range .items[?(@.metadata.namespace=="queuelab-canary")]}{.metadata.name}{" "}{end}' 2>/dev/null || true)
+      # `|| true` on the assignment above, because under `set -e` a failing kubectl would kill the script
+      # here -- before the guard below could say what was wrong. This file has been bitten by that exact
+      # shape once already, at the image grep a few hundred lines up.
+      [ -z "${leftover// /}" ] && break
+      sleep 2
+    done
+    if [ -n "${leftover// /}" ]; then
+      echo "the device preflight's Pod(s) are still on $W after two minutes: $leftover" >&2
+      echo "the first run would refuse to qualify the node; not starting the study" >&2
+      exit 1
+    fi
+  done
+fi
 
 if [[ "${RUN_STUDY:-}" != "1" ]]; then
   echo "every worker is verified. To run the study through these same routes:"
@@ -425,7 +468,39 @@ mkdir -p ex
 # re-argued every time the allocation changes.
 W1="${WORKERS[0]}"
 SEQUENCE=()
+
+# STUDY selects which experiment's block is repeated, and the two do not mix.
+#
+# reclaim is what this script has always run: the axis is the victim's termination contract, and dose and
+# node alternate beside it. idling is the second study, whose axis is how much of its service the victim
+# spends computing -- D-full against D-quarter, with the contract held at the ignoring one so the observer
+# has samples inside the hold.
+#
+# They are separate sessions rather than a wider block because crossing the two axes gives four cells, twice
+# the bill, and a difference that carries both. `-compare` refuses to fold records that disagree on duty into
+# one arm, so a session that ran both and globbed them together would be refused rather than misread -- but
+# the refusal is a backstop, not the design.
+STUDY="${STUDY:-reclaim}"
+case "$STUDY" in
+  reclaim | idling) ;;
+  *)
+    echo "STUDY must be reclaim or idling; got '$STUDY'" >&2
+    exit 1
+    ;;
+esac
+
+if [[ "$STUDY" == "idling" ]]; then
+  # One dose and one node. The idling study asks one question, and every axis it does not vary is a cell it
+  # does not have to buy.
+  for ((r = 1; r <= REPS; r++)); do
+    SEQUENCE+=(
+      "grace-bounded   D-full    df$r $W1" "grace-bounded   D-quarter dq$r $W1"
+    )
+  done
+fi
+
 for ((r = 1; r <= REPS; r++)); do
+  [[ "$STUDY" == "idling" ]] && break
   if [[ ${#WORKERS[@]} -ge 2 ]]; then
     W2="${WORKERS[1]}"
     SEQUENCE+=(
@@ -440,6 +515,34 @@ for ((r = 1; r <= REPS; r++)); do
     )
   fi
 done
+
+# DOSES narrows the sequence WITHOUT reordering it.
+#
+# The default is both regimes, which is what this script has always run. A session that wants one of them --
+# the device-observation session buys grace-bounded only, because that is where the arms separated and the
+# second regime doubles the bill for a comparison it is not making -- filters here rather than by editing
+# the block above.
+#
+# Filtering after the fact rather than building a narrower sequence is deliberate. The order is the design:
+# arm, dose and node alternate through it so no comparison carries a confounding warning, and a second
+# construction path is a second chance to get that wrong. Dropping entries cannot reorder the ones that stay.
+DOSES="${DOSES:-self-completing grace-bounded}"
+if [[ "$DOSES" != "self-completing grace-bounded" ]]; then
+  FILTERED=()
+  for SPEC in "${SEQUENCE[@]}"; do
+    # shellcheck disable=SC2086
+    set -- $SPEC
+    for d in $DOSES; do
+      [[ "$1" == "$d" ]] && { FILTERED+=("$SPEC"); break; }
+    done
+  done
+  if (( ${#FILTERED[@]} == 0 )); then
+    echo "DOSES=${DOSES@Q} selected no run out of ${#SEQUENCE[@]}; the known regimes are self-completing and grace-bounded" >&2
+    exit 2
+  fi
+  echo "DOSES=$DOSES selects ${#FILTERED[@]} of ${#SEQUENCE[@]} runs"
+  SEQUENCE=("${FILTERED[@]}")
+fi
 
 # A START_AT past the end skipped every run and then printed "all runs completed" -- a false success in the
 # one wrapper that spends money, whose printed compare commands would then have read a PREVIOUS attempt's
@@ -585,10 +688,21 @@ done
 # exactly those.
 echo
 echo "all runs completed. Compare them:"
-echo "  ./queuelabrun -compare '$EXDIR/gpu-self-completing-*.json'"
-echo "  ./queuelabrun -compare '$EXDIR/gpu-grace-bounded-*-g??.json'"
-echo "  ./queuelabrun -compare '$EXDIR/gpu-self-completing-*.json,$EXDIR/gpu-grace-bounded-*-g??.json' -mode model"
-echo "  ./queuelabrun -compare '$EXDIR/gpu-*-A-honor-*.json' -mode baseline"
-if [[ ${#WORKERS[@]} -ge 2 ]]; then
-  echo "  ./queuelabrun -compare '$EXDIR/gpu-grace-bounded-A-honor-*.json' -mode node"
+# The hints are per study, because a glob for the other one returns nothing and reads as a session that
+# produced no records. This block printed the reclaim globs whatever ran, which is the shape of advice that
+# sends a reader looking for a fault in the run rather than in the command.
+if [[ "$STUDY" == "idling" ]]; then
+  echo "  ./queuelabrun -compare '$EXDIR/gpu-grace-bounded-D-*.json'"
+  echo
+  echo "the reading this study is for: reserved GPU-seconds against observed device-seconds, per arm."
+  echo "D-full held its card and used it throughout; D-quarter held the same card and used it for a"
+  echo "quarter of its service. If the two arms' waste figures agree, reservation is not tracking use."
+else
+  echo "  ./queuelabrun -compare '$EXDIR/gpu-self-completing-*.json'"
+  echo "  ./queuelabrun -compare '$EXDIR/gpu-grace-bounded-*-g??.json'"
+  echo "  ./queuelabrun -compare '$EXDIR/gpu-self-completing-*.json,$EXDIR/gpu-grace-bounded-*-g??.json' -mode model"
+  echo "  ./queuelabrun -compare '$EXDIR/gpu-*-A-honor-*.json' -mode baseline"
+  if [[ ${#WORKERS[@]} -ge 2 ]]; then
+    echo "  ./queuelabrun -compare '$EXDIR/gpu-grace-bounded-A-honor-*.json' -mode node"
+  fi
 fi

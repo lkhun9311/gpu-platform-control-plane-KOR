@@ -58,9 +58,12 @@ const (
 	// ScenarioDegradedNode marks a node unhealthy so the taint path runs; hack/chaos-fr004-degraded-node.sh.
 	//
 	// It fits the recorder -- NodeHealth reports Ready, Pending and Quarantine, so a degradation and its
-	// recovery are both visible -- but hack/m7-evidence-trail.sh does not drive it. The injection stops a
-	// kubelet, which is disruptive to whatever else is on the cluster, and the script adopts a cluster it
-	// does not own. Driving it needs a machine whose disruption nobody minds.
+	// recovery are both visible -- and hack/m7-evidence-trail.sh drives it now, with SCENARIO=DegradedNode.
+	//
+	// The machine whose disruption nobody minds turned out to be a throwaway kind cluster with a worker; the
+	// script already built its own cluster and only ever gave it one node, and stopping the control plane's
+	// kubelet takes the apiserver with it. Recorded on 2026-09-06: Ready at 0s, Quarantine at 46s, Ready
+	// again at 48s, verdict Recovered, every phase published by the operator rather than by the script.
 	ScenarioDegradedNode WorkloadRunScenario = "DegradedNode"
 )
 

@@ -2235,6 +2235,12 @@ func TestTheHeadlineNumbersAreReDerivedFromTheRecordsOwnLedger(t *testing.T) {
 		{"the workload's own account", func(m map[string]any) {
 			m["workload"].(map[string]any)["countedUnit"] = "furlongs"
 		}, "workload.countedUnit"},
+		// The duty cycle is the difference between a reserved GPU-second and an observed device-second, so a
+		// record that could claim one its ledger does not support could claim a card was idle when it was
+		// busy, or busy when it was idle. Editing it in must be refused like every other figure here.
+		{"how much of its service the card was used for", func(m map[string]any) {
+			m["workload"].(map[string]any)["dutyCycle"] = 0.25
+		}, "workload.dutyCycle"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var doc map[string]any

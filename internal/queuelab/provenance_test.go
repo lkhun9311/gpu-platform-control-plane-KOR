@@ -317,3 +317,56 @@ func TestEveryEndpointCarriesItsComponentsOwnStamp(t *testing.T) {
 		t.Fatalf("a Ready condition with no transition time produced a stamp of %d", *s)
 	}
 }
+
+// TestTheDutyTheWorkloadReportsSurvivesIntoTheLedger follows the value across the boundary it has to cross.
+//
+// The duty is the workload's own report, not the runner's request, and that is the whole point: a workload
+// that read the argument and ignored it would otherwise be recorded as idling while it computed throughout.
+// The value is only worth anything if it reaches the ledger, so this parses the message the container
+// actually writes and checks what comes out the other side.
+func TestTheDutyTheWorkloadReportsSurvivesIntoTheLedger(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		msg  string
+		want float64
+	}{
+		{"a quarter-duty device run", "iters=900 kind=cuda-fma dev=ok duty=0.25", 0.25},
+		{"full duty, spelled", "iters=4000 kind=cuda-fma dev=ok duty=1", 1},
+		{"a message from before the axis existed", "iters=4000 kind=cuda-fma dev=ok", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			iters, kind, device, duty := ReportFromMessage(tc.msg)
+			if iters == nil {
+				t.Fatalf("the message was refused entirely: %q", tc.msg)
+			}
+			if kind != KindCUDAFMA || device != DeviceOK {
+				t.Fatalf("kind=%q device=%q, so the message was read as something else", kind, device)
+			}
+			if duty != tc.want {
+				t.Errorf("duty = %v, want %v", duty, tc.want)
+			}
+		})
+	}
+}
+
+// TestADutyThisBuildCannotReadRefusesTheWholeMessage keeps the parser's own rule.
+//
+// The count and the tokens are three readings of one sentence and are refused together, because a number
+// kept from a sentence whose other half was unintelligible is a measurement invented from whatever happened
+// to be in a file. The duty is a fourth reading of the same sentence and gets the same treatment: how much
+// work an iteration count represents is exactly what the duty says.
+func TestADutyThisBuildCannotReadRefusesTheWholeMessage(t *testing.T) {
+	for _, msg := range []string{
+		"iters=900 kind=cuda-fma dev=ok duty=",
+		"iters=900 kind=cuda-fma dev=ok duty=abc",
+		"iters=900 kind=cuda-fma dev=ok duty=0",
+		"iters=900 kind=cuda-fma dev=ok duty=-0.5",
+		"iters=900 kind=cuda-fma dev=ok duty=1.5",
+		"iters=900 kind=cuda-fma dev=ok 0.25",
+		"iters=900 kind=cuda-fma dev=ok duty=0.25 extra=1",
+	} {
+		if iters, _, _, _ := ReportFromMessage(msg); iters != nil {
+			t.Errorf("%q was accepted; an unreadable duty must refuse the count beside it", msg)
+		}
+	}
+}

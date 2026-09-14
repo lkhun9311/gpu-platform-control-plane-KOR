@@ -6,5 +6,7 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: platform-worker
 spec:
+  # nodeName is the target Node object this resource tracks.
   nodeName: platform-worker
+  # gpuClass is illustrative; locally it is backed by simulated capacity.
   gpuClass: l40s

@@ -738,14 +738,13 @@ func flavorUsage(ctx context.Context, c client.Client, flavor string) (int64, er
 // submit renders and creates the trace job under its own row's contract, then records its Submitted event.
 func submit(ctx context.Context, c client.Client, col *collector, arm queuelab.Arm,
 	row queuelab.TrainingTraceRow, ns string) error {
-	// The contract is resolved per row rather than per arm because the treatment is the VICTIM's behaviour;
-	// rendering the whole arm with one contract would change all three manifests when exactly one is meant
-	// to differ.
-	contract, err := arm.ContractFor(row.Name)
-	if err != nil {
-		return err
-	}
-	mltj, err := queuelab.RenderMLTrainingJobWithContract(row, ns, contract)
+	// The arm decides two things about a row -- the termination contract and the duty cycle -- and both are
+	// per row rather than per arm because the treatment is the VICTIM's behaviour. Rendering the whole arm
+	// under one of them would change all three manifests when exactly one is meant to differ.
+	//
+	// Resolved in ONE call on purpose. This used to apply them separately, and dropping the duty line
+	// compiled, rendered the other arm's workload under this arm's label, and no test noticed.
+	mltj, err := queuelab.RenderForArm(arm, row, ns)
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,13 @@
 # Applied only for an M5-c session, and never alongside config/nvidia-device-plugin on the same node.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+# The operator's namespace, because `system` in these manifests is kubebuilder's placeholder and nothing
+# ever creates a namespace by that name. Without this line the overlay rendered `namespace: system`, so
+# every apply of it would have been refused with `namespaces "system" not found` and the time-slicing arm
+# could never have deployed at all. config/nvidia-device-plugin carried the rewrite and this file did not;
+# the contract test compared the two sharing overlays against each other and never against the cluster they
+# would be applied to, which is why it survived.
+namespace: gpu-platform-control-plane-system
 resources:
   - configmap.yaml
   - daemonset.yaml

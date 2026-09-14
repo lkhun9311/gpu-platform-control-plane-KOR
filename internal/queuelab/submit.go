@@ -113,8 +113,25 @@ const WorkloadImage = "python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c2
 // It is carried in the command rather than baked into an image on purpose. The command is part of the Pod
 // template the termination canary fingerprints, so changing the workload forces a re-take; an image would
 // only do that when its digest moved, and a script edited inside the same tag would not move it.
+//
+// PERIOD is 2.6 seconds and must not be 1.0, which is what it was when the idling study first ran.
+//
+// The exporter collects every 1000 ms. A workload whose duty cycle also has a one-second period does not
+// drift through the sampler's phase: a sample that lands in the idle part of the cycle lands there again,
+// and again. Session qlgpu-20260906-103327 measured that -- a victim executing 22,093 real kernels at a
+// declared 0.25 duty was reported by DCGM as working in ZERO of 104 samples, while the same exporter in the
+// same run read 98 for a continuously computing neighbour and named every Pod on every card.
+//
+// 2.6 shares no period with 1000 ms, so the burst walks through the sampler's phase and cannot hide behind
+// it. It is also long enough that a quarter of it is 0.65 s, which is comfortably wider than the interval
+// NVML averages over, so a sample landing in a burst reads a burst rather than an edge.
+//
+// This is a fix and a test at once. If a quarter-duty run still reports zeros at this period, the phase
+// explanation was wrong and the blind spot is somewhere else.
 const workloadScript = `import ctypes,signal,sys,time
 seconds=float(sys.argv[1]); honor=sys.argv[2]=="honor"
+duty=float(sys.argv[3]) if len(sys.argv)>3 else 1.0
+PERIOD=2.6
 n=0; kind="cpu-float"; dev="not-attempted"
 PTX=b""".version 6.3
 .target sm_75
@@ -148,7 +165,7 @@ ret;
 """
 try: tl=open("/dev/termination-log","w")
 except Exception: tl=None
-def msg(): return "iters=%d kind=%s dev=%s"%(n,kind,dev)
+def msg(): return "iters=%d kind=%s dev=%s duty=%g"%(n,kind,dev,duty)
 def mark():
     if tl is None: return
     tl.seek(0); tl.write(msg()); tl.truncate(); tl.flush()
@@ -194,15 +211,20 @@ if launch is not None: kind="cuda-fma"
 end=time.monotonic()+seconds; last=time.monotonic(); x=1.0
 mark()
 while time.monotonic()<end:
-    if launch is None:
-        for _ in range(50000): x=(x*1.0000001)%1000000.0
-    else:
-        rc=launch()
-        if rc!=0:
-            dev="launch-failed-midrun"; mark(); print("aborted "+msg(),flush=True); sys.exit(1)
-    n+=1
-    t=time.monotonic()
-    if t-last>0.5: last=t; mark(); print(msg(),flush=True)
+    seg=time.monotonic()+duty*PERIOD
+    while time.monotonic()<seg and time.monotonic()<end:
+        if launch is None:
+            for _ in range(50000): x=(x*1.0000001)%1000000.0
+        else:
+            rc=launch()
+            if rc!=0:
+                dev="launch-failed-midrun"; mark(); print("aborted "+msg(),flush=True); sys.exit(1)
+        n+=1
+        t=time.monotonic()
+        if t-last>0.5: last=t; mark(); print(msg(),flush=True)
+    if duty<1.0:
+        rest=end-time.monotonic()
+        if rest>0: time.sleep(min((1.0-duty)*PERIOD,rest))
 mark(); print("finished "+msg(),flush=True)`
 
 // localQueueName is the deterministic LocalQueue name a tenant's jobs are admitted through.
@@ -221,6 +243,16 @@ func localQueueName(tenant string) string {
 // A measured "preemption" against such a workload is not a preemption, so the contract has to be chosen
 // deliberately rather than inherited from how the command happened to be written.
 type TerminationContract string
+
+// argHonor and argIgnore are how the two contracts are spelled in the workload's own argv.
+//
+// They are constants for the reason the kind tokens are: the script compares argv[2] against one of them, and
+// a Go side that kept its own spelling could drift from the Python side without anything failing to compile.
+// TestTheContractTokensAreWhatTheScriptCompares holds the two together.
+const (
+	argHonor  = "honor"
+	argIgnore = "ignore"
+)
 
 const (
 	// HonorsSIGTERM keeps the shell as PID 1 with a TERM trap, so a preemption actually stops the work.
@@ -267,10 +299,29 @@ func RenderMLTrainingJob(row TrainingTraceRow, namespace string) (*platformv1.ML
 //
 // Parallelism and completions are pinned to 1 so a row's gpuCount is exactly its demand (one Pod), which the
 // occupancy and demand-satisfaction accounting assumes.
+// RenderForArm renders one trace row as the given arm defines it.
+//
+// It exists so the two things an arm decides about a row -- the termination contract and the duty cycle --
+// cannot be applied one at a time. The caller used to resolve both and then set one of them on the row by
+// hand; deleting that one line compiled, rendered the other arm's workload under this arm's label, and no
+// test noticed. An arm is a closed set of experimental conditions, so resolving it is one operation.
+func RenderForArm(arm Arm, row TrainingTraceRow, namespace string) (*platformv1.MLTrainingJob, error) {
+	contract, err := arm.ContractFor(row.Name)
+	if err != nil {
+		return nil, err
+	}
+	duty, err := arm.DutyFor(row.Name)
+	if err != nil {
+		return nil, err
+	}
+	row.Duty = duty
+	return RenderMLTrainingJobWithContract(row, namespace, contract)
+}
+
 func RenderMLTrainingJobWithContract(
 	row TrainingTraceRow, namespace string, contract TerminationContract,
 ) (*platformv1.MLTrainingJob, error) {
-	command, err := sleeperCommand(row.DurationSec, contract)
+	command, err := sleeperCommand(row.DurationSec, contract, row.Duty.orFull())
 	if err != nil {
 		return nil, err
 	}
@@ -310,16 +361,30 @@ func RenderMLTrainingJobWithContract(
 // The contract is the experimental axis of this study, so an unrecognized value must not fall through to the
 // ignoring arm: that would run the contrast arm under the honoring arm's label and produce a plausible wrong
 // result, which is the exact failure class the measurement work exists to eliminate.
-func sleeperCommand(durationSec int, contract TerminationContract) ([]string, error) {
+func sleeperCommand(durationSec int, contract TerminationContract, duty DutyCycle) ([]string, error) {
 	// Substituted rather than formatted: the script is full of Python %d verbs and handing it to fmt.Sprintf
 	// makes Go try to interpret them, which go vet catches and a reader would not.
 	script := strings.Replace(workloadScript, "EXITCODE", strconv.Itoa(termExitCode), 1)
+	if err := duty.validate(); err != nil {
+		return nil, err
+	}
+	var arm string
 	switch contract {
 	case HonorsSIGTERM:
-		return []string{"python3", "-c", script, strconv.Itoa(durationSec), "honor"}, nil
+		arm = argHonor
 	case IgnoresSIGTERM:
-		return []string{"python3", "-c", script, strconv.Itoa(durationSec), "ignore"}, nil
+		arm = argIgnore
 	default:
 		return nil, fmt.Errorf("unknown TerminationContract %q", contract)
 	}
+	// The duty argument is always passed, even at 1.0.
+	//
+	// The workload defaults to 1.0 when the argument is absent, so omitting it at full duty would render the
+	// same behaviour -- and a DIFFERENT command string. The command is part of the Pod template the
+	// termination canary fingerprints, so two spellings of the same experiment would need two canaries and
+	// would compare as different mechanisms. One spelling.
+	return []string{
+		"python3", "-c", script, strconv.Itoa(durationSec), arm,
+		strconv.FormatFloat(float64(duty), 'f', -1, 64),
+	}, nil
 }

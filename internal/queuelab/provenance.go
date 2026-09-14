@@ -92,6 +92,14 @@ type ObservedState struct {
 	// three fields empty rather than a guess, because the message is a channel the workload controls.
 	WorkloadKind string
 	DeviceStatus string
+	// DutyCycle is the fraction of its service the workload spent computing, as the workload itself reported
+	// it, and nil when the message did not carry one.
+	//
+	// It is the workload's report rather than the runner's request on purpose. A workload that read the
+	// argument and ignored it would otherwise be recorded as having idled while it computed throughout, and
+	// the difference between a reserved GPU-second and an observed device-second is exactly what this field
+	// is for.
+	DutyCycle *float64
 }
 
 // ClassifyWorkload reads a Workload's conditions into the authoritative admission/preemption state.
@@ -151,10 +159,14 @@ func ClassifyJob(job *batchv1.Job) ObservedState {
 // measured to it would undercount exactly the grace window this event exists to capture.
 func ClassifyPod(pod *corev1.Pod) ObservedState {
 	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
-		code, iters, finished, kind, device := soleTerminated(pod)
-		return ObservedState{Event: EventAttemptStopped, Reason: string(pod.Status.Phase),
+		code, iters, finished, kind, device, duty := soleTerminated(pod)
+		st := ObservedState{Event: EventAttemptStopped, Reason: string(pod.Status.Phase),
 			ExitCode: code, Iterations: iters, ComponentStampUnixNanos: finished,
 			WorkloadKind: kind, DeviceStatus: device}
+		if duty > 0 {
+			st.DutyCycle = &duty
+		}
+		return st
 	}
 	if pod.Status.Phase == corev1.PodRunning && podConditionTrue(pod, corev1.PodReady) {
 		return ObservedState{Event: EventPodReady, Reason: string(corev1.PodReady),
@@ -190,24 +202,24 @@ func podConditionTrue(pod *corev1.Pod, condType corev1.PodConditionType) bool {
 // grew a sidecar would make any choice here a guess presented as a measurement. nil then reports that the
 // stop was observed but its kind could not be established, which is a weaker claim than a number and the
 // only true one.
-func soleTerminated(pod *corev1.Pod) (code *int32, iters *int, finished *int64, kind, device string) {
+func soleTerminated(pod *corev1.Pod) (code *int32, iters *int, finished *int64, kind, device string, duty float64) {
 	for i := range pod.Status.ContainerStatuses {
 		t := pod.Status.ContainerStatuses[i].State.Terminated
 		if t == nil {
 			continue
 		}
 		if code != nil {
-			return nil, nil, nil, "", ""
+			return nil, nil, nil, "", "", 0
 		}
 		c := t.ExitCode
 		code = &c
-		iters, kind, device = ReportFromMessage(t.Message)
+		iters, kind, device, duty = ReportFromMessage(t.Message)
 		if !t.FinishedAt.IsZero() {
 			f := t.FinishedAt.UnixNano()
 			finished = &f
 		}
 	}
-	return code, iters, finished, kind, device
+	return code, iters, finished, kind, device, duty
 }
 
 // Workload kind tokens, as the workload spells them in its own report.
@@ -266,30 +278,49 @@ var deviceStatuses = map[string]bool{
 // launched, so it cannot appear beside the CPU fallback; and the device kind can only carry ok or the
 // mid-run failure, because every earlier failure returns before the kind is set. A pair outside that
 // relation was not written by this workload.
-func ReportFromMessage(msg string) (iters *int, kind, device string) {
+func ReportFromMessage(msg string) (iters *int, kind, device string, duty float64) {
 	fields := strings.Fields(strings.TrimSpace(msg))
-	if len(fields) != 3 {
-		return nil, "", ""
+	// Three fields or four. The fourth is the duty cycle, and a message without it came from a build whose
+	// workload could only compute continuously -- so full duty is what it ran at, not a value being guessed.
+	// Accepting both shapes is what keeps every record written before the axis existed readable; refusing the
+	// old shape would make this build unable to read its own history, which is a worse failure than the one
+	// the strictness is for.
+	if len(fields) != 3 && len(fields) != 4 {
+		return nil, "", "", 0
 	}
 	n, err := strconv.Atoi(strings.TrimPrefix(fields[0], "iters="))
 	if !strings.HasPrefix(fields[0], "iters=") || err != nil || n < 0 {
-		return nil, "", ""
+		return nil, "", "", 0
 	}
 	if !strings.HasPrefix(fields[1], "kind=") || !strings.HasPrefix(fields[2], "dev=") {
-		return nil, "", ""
+		return nil, "", "", 0
 	}
 	k := strings.TrimPrefix(fields[1], "kind=")
 	d := strings.TrimPrefix(fields[2], "dev=")
 	if !deviceStatuses[d] {
-		return nil, "", ""
+		return nil, "", "", 0
 	}
 	switch {
 	case k == KindCPUFloat && d != DeviceOK:
 	case k == KindCUDAFMA && (d == DeviceOK || d == DeviceLaunchFailedMidrun):
 	default:
-		return nil, "", ""
+		return nil, "", "", 0
 	}
-	return &n, k, d
+	u := 1.0
+	if len(fields) == 4 {
+		if !strings.HasPrefix(fields[3], "duty=") {
+			return nil, "", "", 0
+		}
+		// Refused alongside the rest, for the reason the count is: a duty this build cannot read makes the
+		// iteration count beside it uninterpretable, because how much work an iteration count represents is
+		// exactly what the duty says.
+		v, derr := strconv.ParseFloat(strings.TrimPrefix(fields[3], "duty="), 64)
+		if derr != nil || v <= 0 || v > 1 {
+			return nil, "", "", 0
+		}
+		u = v
+	}
+	return &n, k, d, u
 }
 
 // conditionStamp is the component's own transition time for a metav1 condition, or nil when it published none.

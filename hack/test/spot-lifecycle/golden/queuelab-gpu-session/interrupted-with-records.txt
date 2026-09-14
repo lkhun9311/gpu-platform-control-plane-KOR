@@ -1,0 +1,58 @@
+aws sts get-caller-identity --query Account --output text
+aws s3api head-bucket --bucket stub-bucket
+aws iam get-instance-profile --instance-profile-name queuelab-gpu
+aws s3 cp <OUT>/source.tgz s3://stub-bucket/run/src/source.tgz
+upload: <SIZE> bytes to stub-bucket/run/src/source.tgz
+aws s3 cp <OUT>/queuelabrun s3://stub-bucket/run/bin/queuelabrun
+upload: <SIZE> bytes to stub-bucket/run/bin/queuelabrun
+aws ssm get-parameter --region ap-northeast-2 --name /aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-ubuntu-22.04/latest/ami-id --query Parameter.Value --output text
+aws ec2 describe-instance-type-offerings --region ap-northeast-2 --location-type availability-zone --filters Name=instance-type,Values=g5.12xlarge --query InstanceTypeOfferings[].Location --output text
+aws ec2 describe-subnets --region ap-northeast-2 --filters Name=default-for-az,Values=true Name=map-public-ip-on-launch,Values=true Name=availability-zone,Values=ap-northeast-2a --query Subnets[0].SubnetId --output text
+aws ec2 run-instances --region ap-northeast-2 --image-id ami-0stubgpu --instance-type g5.12xlarge --subnet-id subnet-ap-northeast-2a --iam-instance-profile Name=queuelab-gpu --instance-initiated-shutdown-behavior terminate --block-device-mappings [{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":300,"VolumeType":"gp3","DeleteOnTermination":true}}] --instance-market-options {"MarketType":"spot","SpotOptions":{"MaxPrice":"3.90","SpotInstanceType":"one-time"}} --user-data file://<USERDATA> --tag-specifications ResourceType=instance,Tags=[{Key=Name,Value=queuelab-gpu},{Key=purpose,Value=queuelab-device-observation}] --query Instances[0].InstanceId --output text
+user-data: matches the copy saved in the run directory
+aws s3api head-object --bucket stub-bucket --key run/DONE
+aws ec2 describe-instances --region ap-northeast-2 --instance-ids i-0stub --query Reservations[0].Instances[0].State.Name --output text
+sleep 30
+aws s3api head-object --bucket stub-bucket --key run/DONE
+aws ec2 describe-instances --region ap-northeast-2 --instance-ids i-0stub --query Reservations[0].Instances[0].State.Name --output text
+aws s3 cp s3://stub-bucket/run/session.tgz <OUT>/session.tgz
+aws s3 cp s3://stub-bucket/run/commit.txt <OUT>/commit.txt
+aws s3 cp s3://stub-bucket/run/log.txt <OUT>/log.txt
+aws s3 cp s3://stub-bucket/run/preflight.txt <OUT>/preflight.txt
+aws s3 cp s3://stub-bucket/run/preflight-nodes.txt <OUT>/preflight-nodes.txt
+aws s3 cp s3://stub-bucket/run/preflight-nvidia-smi.csv <OUT>/preflight-nvidia-smi.csv
+aws s3 cp s3://stub-bucket/run/preflight-why.txt <OUT>/preflight-why.txt
+aws s3 cp s3://stub-bucket/run/device-util.tsv.gz <OUT>/device-util.tsv.gz
+aws s3 cp s3://stub-bucket/run/device-scrape-first.txt <OUT>/device-scrape-first.txt
+aws s3 cp s3://stub-bucket/run/device-scrape-last.txt <OUT>/device-scrape-last.txt
+aws s3 cp --recursive s3://stub-bucket/run/runs <OUT>/runs
+recursive: 2 object(s) from stub-bucket/run/runs
+aws ec2 terminate-instances --region ap-northeast-2 --instance-ids i-0stub
+queuelabrun checksum: user-data matches the uploaded binary
+--- exit 1
+--- messages
+== study  queuelab reclaim, with the device observed
+== doses  grace-bounded   reps 4   (both arms, interleaved by gpu-session.sh)
+== output <OUT>
+== source <COMMIT> <TREE STATE>
+== uploading the source archive
+== queuelabrun <SIZE>, sha256 <SHA12>
+== g5.12xlarge is offered in: ap-northeast-2a ap-northeast-2c
+== user-data: 16560 of 25600 encoded bytes
+== launching g5.12xlarge spot (max $3.90/h)
+== trying ap-northeast-2a (subnet-ap-northeast-2a)
+== instance i-0stub
+== waiting for results (driver, cluster, operator and four preflight checks come first)
+== instance ended before writing DONE
+== records recovered before the end: 2
+== terminating i-0stub
+FAIL: the instance was terminated before it wrote its completion marker; 2 record(s) were recovered and <OUT>/log.txt is whatever it managed to upload
+--- files
+./instance-id
+./launch-errors.txt
+./log.txt
+./queuelabrun
+./runs/gpu-grace-bounded-A-honor-gh1.json
+./runs/gpu-grace-bounded-A-ignore-gi1.json
+./source.tgz
+./user-data.sh

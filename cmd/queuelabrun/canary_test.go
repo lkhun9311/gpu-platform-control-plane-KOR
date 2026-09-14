@@ -188,8 +188,29 @@ func TestCanaryContractMirrorsWhatTheHarnessActuallyRenders(t *testing.T) {
 	if honor == ignore {
 		t.Fatalf("both probes run the same command %q, so the canary would compare a workload with itself", honor)
 	}
-	if !strings.HasSuffix(ignore, " ignore") || !strings.HasSuffix(honor, " honor") {
-		t.Fatalf("the probes are not the two contract arms: honour=%q ignore=%q", honor, ignore)
+	// Checked by POSITION-INDEPENDENT comparison rather than by suffix.
+	//
+	// This used to require the commands to END in " honor" and " ignore", which was true only while the
+	// contract happened to be the last argument. Adding the duty cycle after it broke the assertion without
+	// breaking anything it was protecting. What it is really for is that the two probes differ by the
+	// contract and by nothing else, so that is what it now says.
+	if len(c.HonorCommand) != len(c.IgnoreCommand) {
+		t.Fatalf("the probes have different shapes: %d vs %d arguments", len(c.HonorCommand), len(c.IgnoreCommand))
+	}
+	diffs := 0
+	for i := range c.HonorCommand {
+		if c.HonorCommand[i] == c.IgnoreCommand[i] {
+			continue
+		}
+		diffs++
+		if c.HonorCommand[i] != "honor" || c.IgnoreCommand[i] != "ignore" {
+			t.Fatalf("the probes differ at argument %d as %q vs %q, which is not the contract arm",
+				i, c.HonorCommand[i], c.IgnoreCommand[i])
+		}
+	}
+	if diffs != 1 {
+		t.Fatalf("the probes differ in %d arguments; the contrast must be the contract and nothing else "+
+			"(honour=%q ignore=%q)", diffs, honor, ignore)
 	}
 	if c.GraceSec != terminationGraceSec {
 		t.Fatalf("the contract requires a %ds grace period, but the protocol's horizon is derived from %ds",

@@ -58,8 +58,68 @@ spec:
             - Qwen/Qwen2.5-3B-Instruct
             - --dtype=half
             - --max-model-len=16384
+            # Half the flagship's 64, so the CARD admits the same concurrency under either topology.
+            #
+            # Under `shared` both tenants compete for one engine's 64 slots; under a split each gets a
+            # guaranteed 32. That difference IS the mechanism being measured, and holding the total at 64 is
+            # what keeps it the only difference. Per-engine 64 would offer the card twice the concurrency in
+            # the split arms and confound separation with a larger batch.
             - --max-num-seqs=32
+            # BOTH memory flags are passed, and they do two different jobs. Dropping either one kills a run.
+            #
+            # --gpu-memory-utilization is the STARTUP ADMISSION GATE and nothing else here. vLLM's
+            # request_memory() raises ValueError when free memory is below utilization * total, it reads the
+            # fraction whether or not an absolute cache is configured, and the default is 0.92. On this card
+            # that would demand 20.30 GiB free; the 2026-09-12 pilot measured the second engine to profile
+            # seeing 13.81 GiB, because the first already held its weights and cache. Drop this flag and
+            # BOTH split arms fail to start -- which would have bought a card to measure nothing.
+            #
+            # 0.475 is not a slice of anything now. It is this engine asking "is my own half free?":
+            # (3.2 GiB of cache + 7.32 GiB of weights, activation and graphs) / 22.06 GiB is 0.477.
             - --gpu-memory-utilization=0.475
+            # An ABSOLUTE KV budget, because the fraction is a fraction of the WHOLE CARD and not of a half.
+            #
+            # This is the SIZING, and it overrides the fraction for that purpose: vLLM skips profiling and
+            # says so in its own log -- "reserved ... as specified by kv_cache_memory_bytes config and
+            # skipped memory profiling. This does not respect the gpu_memory_utilization config."
+            #
+            # --gpu-memory-utilization=0.475 was measured producing two engines with different caches: the
+            # one that started second saw the first's allocation as memory already consumed, computed its
+            # own usage as 8.38 GiB against 6.56, and was left with 1.52 GiB of KV against 3.33 -- 44,144
+            # tokens against 97,056, which is 5.7 of this study's contender prompts against 12.5. The
+            # smaller engine then timed out 188 of the contender's 238 requests and reading 4b declared the
+            # run INVALID, correctly, for a floor it missed at 50.
+            #
+            # A fraction cannot express "half the card" to a process that can see what the other half is
+            # doing. vLLM says so itself in the line the runner captured: "Replace gpu_memory_utilization
+            # config with --kv-cache-memory=... to fit into requested memory." That line says REPLACE and
+            # taking it literally is the trap: it is advice about sizing, and the gate above still reads the
+            # fraction. Nothing in vLLM checks that this absolute value fits, either -- an over-large budget
+            # is an OOM during the run rather than a refusal at startup.
+            #
+            # 3.2 GiB each, derived from the engines' own report rather than chosen: 22.06 GiB visible,
+            # 7.32 GiB per engine of weights, activation and CUDA graphs, and a gigabyte of driver reserve,
+            # leaves (22.06 - 14.64 - 1.0)/2. That is about 93,500 tokens per engine, twelve contender
+            # prompts, and the same on both sides whichever starts first.
+            - --kv-cache-memory=3435973836
+            # Prefix caching OFF, matching config/vllm/deployment.yaml, because this matrix varies TOPOLOGY.
+            #
+            # vLLM's V1 engine turns automatic prefix caching on by default and these manifests said nothing,
+            # so the split arms would have cached the prefix the exclusive arm recomputes on every request.
+            # The trace replays one prompt shape, so that is most of the prefill: the split arms would have
+            # beaten `shared` by a wide margin for a reason that is not the card being split, and the
+            # write-up would have credited it to separation. The flagship manifest argues this same flag at
+            # length for this same trace; this is that argument applied to the other half of the comparison.
+            - --no-enable-prefix-caching
+            # The batch budget is STATED rather than left to the engine, and 2048 is measured, not chosen.
+            #
+            # The price-of-protection run resolved the whole-card engine's default by running an arm that
+            # asked for 2048 explicitly and reproducing the control's throughput to 1.2 ms. That is B0. A
+            # half-card engine derives its own default from what it has, so leaving this unset risks the
+            # split arms running a different budget from the exclusive arm -- and that run measured the
+            # budget moving the premium tail about fivefold, which is the size of effect this matrix is
+            # looking for. Pinning it holds the knob still so topology is the only thing that moves.
+            - --max-num-batched-tokens=2048
             - --port=8000
           ports:
             - name: http

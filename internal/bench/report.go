@@ -143,6 +143,56 @@ type ArmSummary struct {
 	// which is how the criterion came to be unevaluated for three paid runs without anyone noticing.
 	ExactTokensMissing      int
 	ExactTokensContradicted int
+	// OutputTokens, OutputTokensPerSecond, TPOTMsP50/P99 and OutputTokensByTenant are what protection cost.
+	//
+	// Every check in this report is a TTFT ratio, and that is half an answer. The paid run's static-cap arm
+	// held the tail at the isolated arm's latency AND at its throughput -- 46.3 output tokens per second
+	// against 46.4 -- because it did not make the engine efficient, it discarded the long tenant's work
+	// entirely. The unprotected arm ran 24 percent faster in aggregate. None of that was visible.
+	//
+	// TPOT is the inter-token time a first-token metric cannot see: a guard that protects the first token and
+	// wrecks the stream after it would pass every check here. The rows have carried all of this from the
+	// start; only the report was not reading it.
+	OutputTokens int64
+	// ActiveSeconds is the wall clock the ARM occupied, and it is not derivable from pooled rows: a report
+	// pools four repetitions separated by washout pauses, so max(end) - min(send) over the pool charges the
+	// arm for minutes in which it sent nothing. Summarize fills this from the rows it is given, which is
+	// right for one repetition; a caller that pools MUST sum the per-repetition values instead, exactly as
+	// it already does for RepetitionCount and MinRepetitionTail.
+	ActiveSeconds         float64
+	OutputTokensPerSecond float64
+	TPOTMsP50             float64
+	TPOTMsP99             float64
+	// OutputTokensByTenant is the share each tenant actually received, which is how protection-by-discarding
+	// is told apart from protection.
+	OutputTokensByTenant map[string]int64
+	// OutputTokensFromFailedStreams is how much of OutputTokens arrived on a stream that then broke.
+	//
+	// Those tokens are counted, because the GPU produced them and the tenant received them, and dropping
+	// them would understate what a contending tenant got -- the exact quantity the share exists to
+	// measure. But a share that is a third truncated streams does not mean what an intact one means, and
+	// a quantity may not be described by a cause its ledger does not establish. So the amount is
+	// disclosed rather than folded in.
+	OutputTokensFromFailedStreams int64
+	// OutputTokensFromFailedStreamsByTenant is the same quantity per tenant, which is the form a reading needs.
+	//
+	// M5-c's reading 2 asks whether the contender's COMPLETED output fell below a fraction of its output
+	// under the control. OutputTokensByTenant does not answer that: the sender keeps HTTPStatus at 200 for a
+	// stream that broke after its headers arrived, so the tokens it managed to deliver are added there --
+	// which is the opposite of what tallyDelivered's own comment says it does. An arm that completes half
+	// the contender's responses and breaks the other half after fifteen of sixteen tokens then reports 97
+	// percent of the control's output instead of 50, and reading 2 never fires.
+	OutputTokensFromFailedStreamsByTenant map[string]int64
+	// TPOTMsP50ByTenant and TPOTMsP99ByTenant split the inter-token time by who received it.
+	//
+	// The arm-wide TPOT above pools every tenant, because it is accumulated before the premium-only filter,
+	// and that answers "how did this arm's streams behave". The pre-registered criterion asks something
+	// else: whether the PROTECTED tenant paid for its fast first token with a slow stream. On the paid
+	// evidence the arm-wide figure is 266.8 ms for arms whose premium and noisy streams need not resemble
+	// each other, and quoting it against a premium criterion would describe one tenant with another's
+	// number.
+	TPOTMsP50ByTenant map[string]float64
+	TPOTMsP99ByTenant map[string]float64
 	// AdmissionLost is how many ELIGIBLE requests got no admission verdict at all, so the guard's behaviour
 	// toward them is unknown.
 	//
@@ -158,6 +208,21 @@ type ArmSummary struct {
 	TimedOut int
 	// Failed counts other non-completing requests (transport or stream errors).
 	Failed int
+	// RepetitionTTFTMsP99 is each repetition's own premium TTFT p99, attached by the caller that knows the
+	// split. The price-of-protection run's reading 3 compares a cell's improvement against the CONTROL'S
+	// repetition-to-repetition spread, so without these the reading has no threshold and must decline to
+	// decide rather than report a cell as failing to beat noise nobody measured.
+	RepetitionTTFTMsP99 []float64
+	// DispositionByTenant is what happened to each tenant's offered requests, and it exists because a share
+	// alone cannot say why a share is small.
+	//
+	// The price-of-protection run's reading 2 fires only when the contending tenant's missing work was
+	// REJECTED OR DISCARDED rather than delayed, and it says why in its own text: a reduced share is equally
+	// consistent with work discarded, work delayed past the window, and work starved but still queued, which
+	// are three findings and only one of them is deletion. The arm-wide Rejected/TimedOut/Failed counts above
+	// cannot separate them per tenant, so a reading built on those would be attributing a quantity to a cause
+	// its ledger does not establish -- which is the one thing this package's rules forbid outright.
+	DispositionByTenant map[string]Disposition
 	// TTFTMsP50/P95/P99 are the time-to-first-token percentiles over COMPLETED requests, in ms.
 	TTFTMsP50 float64
 	TTFTMsP95 float64
@@ -195,6 +260,31 @@ type ArmSummary struct {
 	// tests that build summaries by hand do not.
 	RepetitionCount int
 
+	// AnyRepetitionCensored is true when ANY repetition was censored, whatever the pool says.
+	//
+	// Censoring is a fraction, and pooling averages it away: a repetition that lost 1.50% of its premium
+	// requests sits beside two clean ones as 0.75% of the pool, under the 1% bar, and the readings that
+	// refuse a censored control never see it. A review reproduced exactly that on the eighth pilot's rows
+	// and reading 5 fired on a censored control. Attached by the caller that knows how the rows were split,
+	// for the same reason RepetitionCount is.
+	AnyRepetitionCensored bool
+
+	// WorstRepetitionServedFractionByTenant is the lowest completed/offered any repetition reached, per tenant.
+	//
+	// A COUNT and a FRACTION are different questions and the floor only asked the first. Repetitions of
+	// 100/139 and 139/139 both clear a hundred-completion floor while the first lost 28% of its load, and a
+	// run whose contention was delivered that unevenly cannot be compared against one where it was not.
+	// Carried per tenant so the CONTROL is checked too: every ratio in this study is measured against
+	// `shared`, and a control that lost a third of its contender load is a weakened denominator.
+	WorstRepetitionServedFractionByTenant map[string]float64
+
+	// MinRepetitionCompletedByTenant is the thinnest repetition's completed count, per tenant.
+	//
+	// MinRepetitionTail answers the same question for the premium tenant only, which left the contender's
+	// floor applicable to the POOL and nowhere else. Attached by the caller that knows how the rows were
+	// split, for the same reason RepetitionCount is: Summarize sees pooled rows and cannot tell.
+	MinRepetitionCompletedByTenant map[string]int
+
 	// MinRepetitionTail is the smallest premium-completion count among the arm's repetitions.
 	MinRepetitionTail int
 
@@ -225,9 +315,20 @@ func Summarize(arm string, rows []RawRow) ArmSummary {
 		threshold = rows[0].LongThreshold
 	}
 
-	var ttft, e2e []float64
+	var ttft, e2e, tpot []float64
+	tpotByTenant := map[string][]float64{}
 	var premiumTotal, premiumTimedOut, premiumLost int
+	var firstSend, lastEnd int64
 	for _, r := range rows {
+		// The wall clock the arm occupied, taken from the rows rather than from a timer the runner kept, so a
+		// re-scored evidence file yields the same throughput as the run that produced it.
+		if r.SendUnixNanos > 0 && (firstSend == 0 || r.SendUnixNanos < firstSend) {
+			firstSend = r.SendUnixNanos
+		}
+		if r.EndUnixNanos > lastEnd {
+			lastEnd = r.EndUnixNanos
+		}
+		tpot = s.tallyDelivered(r, tpot, tpotByTenant)
 		// Admitted-work accounting covers the eligible population, for the admission-match check.
 		//
 		// The gateway gates on tier == standard AND EstInputTokens >= threshold, and this applies the same
@@ -242,29 +343,7 @@ func Summarize(arm string, rows []RawRow) ArmSummary {
 		// scored 737,280 admitted tokens for an arm that admitted nothing: the paid run's probes estimate at
 		// exactly the 4,096 threshold, so all 180 of them per arm were eligible, and all 180 were 403.
 		if r.EstInputTokens >= threshold && eligibleTier(r) && !neverEvaluated(r) {
-			if admissionUnknown(r) {
-				// Out of both terms. The guard may have admitted this request and the connection died after,
-				// or it may never have arrived; the evidence cannot say which, and a fraction built on a
-				// guess is worse than one that reports how much it could not see.
-				s.AdmissionLost++
-			} else {
-				s.eligibleScored++
-				s.OfferedInputTokens += int64(r.EstInputTokens)
-				if !shedByAdmission(r) {
-					s.AdmittedInputTokens += int64(r.EstInputTokens)
-				}
-				switch {
-				case r.ExactInputTokens <= 0:
-					s.ExactTokensMissing++
-				case r.EngineInputTokens > 0 && r.EngineInputTokens != r.ExactInputTokens:
-					s.ExactTokensContradicted++
-				default:
-					s.OfferedExactTokens += int64(r.ExactInputTokens)
-					if !shedByAdmission(r) {
-						s.AdmittedExactTokens += int64(r.ExactInputTokens)
-					}
-				}
-			}
+			s.tallyEligibleWork(r)
 		}
 
 		// The probe tally is keyed by tenant rather than by a flag on the row, because what makes a request a
@@ -289,20 +368,33 @@ func Summarize(arm string, rows []RawRow) ArmSummary {
 		}
 
 		// Overall outcome counts cover every offered request, so load shedding is always visible as a rejection.
+		// The same verdict is recorded against the tenant, because "why is this tenant's share small" is a
+		// different question from "how much did this arm shed", and only the second one is answerable here.
+		if s.DispositionByTenant == nil {
+			s.DispositionByTenant = map[string]Disposition{}
+		}
+		d := s.DispositionByTenant[r.Tenant]
+		d.Offered++
 		switch {
 		case r.ErrorKind == errKindTimeout:
 			s.TimedOut++
+			d.TimedOut++
 		case shedByAdmission(r):
 			s.Rejected++
+			d.Rejected++
 		case r.ErrorKind != "":
 			s.Failed++
+			d.Failed++
 		default:
 			if _, ok := r.TTFTNanos(); ok {
 				s.Completed++
+				d.Completed++
 			} else {
 				s.Failed++
+				d.Failed++
 			}
 		}
+		s.DispositionByTenant[r.Tenant] = d
 
 		// The tail is premium-only; the contender's requests never enter the protected metric.
 		if r.IsNoisy {
@@ -363,6 +455,26 @@ func Summarize(arm string, rows []RawRow) ArmSummary {
 	// Losing exactly that many -- 18 of 1,840, which the old boundary waved through -- can remove the entire
 	// quantile mass the statistic is made of, and the ones that vanish are the ones that were slow enough to
 	// die. The reported p99 then is a p98 wearing the other name.
+	s.SetActiveSeconds(nanosToMs(lastEnd-firstSend) / 1000)
+	// Sorted here for the same reason ttft and e2e are sorted above: percentile is nearest-rank over an
+	// ORDERED slice, and handing it arrival order returns whichever sample happens to sit at that index.
+	//
+	// This shipped unsorted. The metric's own test used a single observation, and with one sample every
+	// ordering is the same ordering, so nothing failed. Three samples arriving as 100, 1, 2 ms reported a
+	// p99 of 2 -- not a tail, and not even the second largest value.
+	sort.Float64s(tpot)
+	s.TPOTMsP50 = percentile(tpot, 0.50)
+	s.TPOTMsP99 = percentile(tpot, 0.99)
+	if len(tpotByTenant) > 0 {
+		s.TPOTMsP50ByTenant = map[string]float64{}
+		s.TPOTMsP99ByTenant = map[string]float64{}
+		for tenant, samples := range tpotByTenant {
+			sort.Float64s(samples)
+			s.TPOTMsP50ByTenant[tenant] = percentile(samples, 0.50)
+			s.TPOTMsP99ByTenant[tenant] = percentile(samples, 0.99)
+		}
+	}
+
 	if premiumTotal > 0 && float64(premiumTimedOut+premiumLost)/float64(premiumTotal) >= 0.01 {
 		s.Censored = true
 	}
@@ -627,10 +739,102 @@ func EvaluateChecks(r1, staticCap, kvAware ArmSummary, incrementalCI CI, matchTo
 	return c
 }
 
+// tallyEligibleWork scores one request of the eligible population into the admitted-work fraction.
+//
+// Split out of Summarize only to keep that function under the complexity limit; the eligibility test stays
+// at the call site because that predicate IS the population definition and belongs where it is read.
+func (s *ArmSummary) tallyEligibleWork(r RawRow) {
+	if admissionUnknown(r) {
+		// Out of both terms. The guard may have admitted this request and the connection died after, or it
+		// may never have arrived; the evidence cannot say which, and a fraction built on a guess is worse
+		// than one that reports how much it could not see.
+		s.AdmissionLost++
+		return
+	}
+	s.eligibleScored++
+	s.OfferedInputTokens += int64(r.EstInputTokens)
+	if !shedByAdmission(r) {
+		s.AdmittedInputTokens += int64(r.EstInputTokens)
+	}
+	switch {
+	case r.ExactInputTokens <= 0:
+		s.ExactTokensMissing++
+	case r.EngineInputTokens > 0 && r.EngineInputTokens != r.ExactInputTokens:
+		s.ExactTokensContradicted++
+	default:
+		s.OfferedExactTokens += int64(r.ExactInputTokens)
+		if !shedByAdmission(r) {
+			s.AdmittedExactTokens += int64(r.ExactInputTokens)
+		}
+	}
+}
+
+// tallyDelivered adds one row's delivered output to the arm's totals, appending its inter-token time.
+//
+// Split out of Summarize only to keep that function under the complexity limit; it is one step of the same
+// loop and holds no state of its own.
+func (s *ArmSummary) tallyDelivered(r RawRow, tpot []float64, byTenant map[string][]float64) []float64 {
+	// Tokens count only where a response actually produced them; a refusal carries none, and a stream that
+	// died partway delivered nothing the client could use.
+	if r.OutputTokens <= 0 || r.HTTPStatus != 200 {
+		return tpot
+	}
+	s.OutputTokens += int64(r.OutputTokens)
+	if s.OutputTokensByTenant == nil {
+		s.OutputTokensByTenant = map[string]int64{}
+	}
+	s.OutputTokensByTenant[r.Tenant] += int64(r.OutputTokens)
+	// A stream that broke partway is not a measurement of inter-token time.
+	//
+	// The sender keeps HTTPStatus at 200 for these, because the response headers did arrive, and records
+	// the failure in ErrorKind instead. EndUnixNanos is then the moment the stream died -- for a timeout,
+	// the deadline -- so (end - firstToken) / (tokens - 1) reports the deadline divided by a token count.
+	// A 30-second timeout after two tokens enters the tail as a 30,000 ms inter-token time.
+	//
+	// That matters because reading 1 fails a cell whose TPOT p99 exceeds 1.25x the isolated baseline, so
+	// admitting deadlines would fail whichever arm timed out most on a statistic that never described its
+	// streams.
+	if r.ErrorKind != "" {
+		s.OutputTokensFromFailedStreams += int64(r.OutputTokens)
+		if s.OutputTokensFromFailedStreamsByTenant == nil {
+			s.OutputTokensFromFailedStreamsByTenant = map[string]int64{}
+		}
+		s.OutputTokensFromFailedStreamsByTenant[r.Tenant] += int64(r.OutputTokens)
+		return tpot
+	}
+	// Inter-token time needs at least two tokens to have a gap between them.
+	if r.OutputTokens > 1 && r.FirstTokenUnixNanos > 0 && r.EndUnixNanos > r.FirstTokenUnixNanos {
+		v := nanosToMs(r.EndUnixNanos-r.FirstTokenUnixNanos) / float64(r.OutputTokens-1)
+		tpot = append(tpot, v)
+		byTenant[r.Tenant] = append(byTenant[r.Tenant], v)
+	}
+	return tpot
+}
+
+// SetActiveSeconds records the arm's active wall clock and derives the throughput from it.
+//
+// The division lives here and nowhere else so that a caller correcting the span for pooled repetitions
+// cannot end up with a rate computed from one number and a span printed from another.
+func (s *ArmSummary) SetActiveSeconds(seconds float64) {
+	s.ActiveSeconds = seconds
+	s.OutputTokensPerSecond = 0
+	if seconds > 0 {
+		s.OutputTokensPerSecond = float64(s.OutputTokens) / seconds
+	}
+}
+
 // FormatReport renders the summaries and checks as a plain-text report.
 //
 // It states explicitly when the comparison is invalid (admission match missed) or the tail is censored, so a reader is never handed a clean-looking number that the methodology already disqualified.
-func FormatReport(summaries []ArmSummary, checks Checks, matchTolerance float64) string {
+// FormatReport renders the measurements, and the criteria only when there were criteria.
+//
+// checks is a POINTER because "not evaluated" has to be unrepresentable as a zero value. It used to be
+// passed by value, and a study whose readings are not implemented was handed an empty Checks{} -- which
+// rendered as three lines of `0.000 FAIL` under the heading "Pre-registered checks", followed by
+// "VERDICT: not all checks passed". Nothing had been evaluated. The caller was careful and said so on
+// stderr, and the page still printed a verdict a skimming reader would take for the study's result.
+// A nil pointer cannot be mistaken for a run that failed everything.
+func FormatReport(summaries []ArmSummary, checks *Checks, matchTolerance float64) string {
 	var b strings.Builder
 	b.WriteString("M5-b benchmark report\n\n")
 	// reps is printed for the same reason tailN is. The incremental interval below is a bootstrap over
@@ -642,7 +846,7 @@ func FormatReport(summaries []ArmSummary, checks Checks, matchTolerance float64)
 	//
 	// A reader who cannot see the block count has no way to tell those apart, which is the same defect the
 	// tailN column exists to prevent one level down.
-	fmt.Fprintf(&b, "%-12s %8s %8s %8s %8s %8s %8s %8s %8s %8s\n", "arm", "total", "done", "shed", "timeout", "ttftP50", "ttftP95", "ttftP99", "tailN", "reps")
+	fmt.Fprintf(&b, "%-*s %8s %8s %8s %8s %8s %8s %8s %8s %8s\n", ArmColumnWidth, "arm", "total", "done", "shed", "timeout", "ttftP50", "ttftP95", "ttftP99", "tailN", "reps")
 	for _, s := range summaries {
 		censored := ""
 		if s.Censored {
@@ -654,9 +858,41 @@ func FormatReport(summaries []ArmSummary, checks Checks, matchTolerance float64)
 		if s.TailSampleSize > 0 && s.TailSampleSize < MinTailSamples {
 			thin = fmt.Sprintf(" (p99 is the maximum: %d < %d premium completions)", s.TailSampleSize, MinTailSamples)
 		}
-		fmt.Fprintf(&b, "%-12s %8d %8d %8d %8d %8.1f %8.1f %8.1f %8d %8d%s%s\n",
-			s.Arm, s.Total, s.Completed, s.Rejected, s.TimedOut, s.TTFTMsP50, s.TTFTMsP95, s.TTFTMsP99, s.TailSampleSize, s.RepetitionCount, censored, thin)
+		fmt.Fprintf(&b, "%-*s %8d %8d %8d %8d %8.1f %8.1f %8.1f %8d %8d%s%s\n",
+			ArmColumnWidth, s.Arm, s.Total, s.Completed, s.Rejected, s.TimedOut, s.TTFTMsP50, s.TTFTMsP95, s.TTFTMsP99, s.TailSampleSize, s.RepetitionCount, censored, thin)
 	}
+	// What the protection cost, printed beside what it bought.
+	//
+	// Every check below is a TTFT ratio, and the paid run showed that is half an answer: the arm that held
+	// the tail best also served the fewest tokens, because it was discarding one tenant's work rather than
+	// making the engine efficient. An arm's throughput and its tenants' shares belong next to its tail.
+	b.WriteString("\nWhat it cost\n")
+	// premTPOT99 is printed beside the arm-wide figure because the pre-registered criterion is about the
+	// PROTECTED tenant's stream, and the arm-wide number pools every tenant. On the paid evidence they
+	// differ by 57 ms on one arm, which is the difference between quoting the right tenant and the wrong one.
+	fmt.Fprintf(&b, "%-*s %10s %10s %10s %10s %10s\n", ArmColumnWidth,
+		"arm", "out tok/s", "tpotP50", "tpotP99", "premTPOT99", "tenant shares")
+	for _, s := range summaries {
+		shares := make([]string, 0, len(s.OutputTokensByTenant))
+		names := make([]string, 0, len(s.OutputTokensByTenant))
+		for n := range s.OutputTokensByTenant {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			if s.OutputTokens > 0 {
+				shares = append(shares, fmt.Sprintf("%s %.0f%%", n, 100*float64(s.OutputTokensByTenant[n])/float64(s.OutputTokens)))
+			}
+		}
+		prem := "—"
+		if v, ok := s.TPOTMsP99ByTenant[PremiumTenant]; ok {
+			prem = fmt.Sprintf("%.1f", v)
+		}
+		fmt.Fprintf(&b, "%-*s %10.1f %10.1f %10.1f %10s  %s\n",
+			ArmColumnWidth,
+			s.Arm, s.OutputTokensPerSecond, s.TPOTMsP50, s.TPOTMsP99, prem, strings.Join(shares, " · "))
+	}
+
 	// The threshold's own evidence, printed before the checks because it qualifies them: the checks compare
 	// arms, and this says whether the number those arms were configured with did any work at all.
 	probed := false
@@ -682,7 +918,7 @@ func FormatReport(summaries []ArmSummary, checks Checks, matchTolerance float64)
 					unevaluated = true
 					void = fmt.Sprintf("  VOID: %d never reached admission (401/403)", o.Unevaluated)
 				}
-				fmt.Fprintf(&b, "  %-12s %-22s est=%d  sent=%d  rejected=%d%s\n", sm.Arm, n, o.EstInputTokens, o.Total, o.Rejected, void)
+				fmt.Fprintf(&b, "  %-*s %-22s est=%d  sent=%d  rejected=%d%s\n", ArmColumnWidth, sm.Arm, n, o.EstInputTokens, o.Total, o.Rejected, void)
 			}
 		}
 		if unevaluated {
@@ -696,6 +932,18 @@ func FormatReport(summaries []ArmSummary, checks Checks, matchTolerance float64)
 	} else {
 		b.WriteString("\nEligibility threshold: NOT TESTED -- no probe tenant straddled it, so any threshold in a wide\n")
 		b.WriteString("  range would have produced these same arms. The configured value is not evidenced by this run.\n")
+	}
+
+	if checks == nil {
+		// No heading that looks like a results table, and no VERDICT line. The measurements above stand on
+		// their own; what must not happen is a reader coming away with a judgement nobody made.
+		// Deliberately says nothing about whether the study has criteria of its own. The three checks below
+		// are M5-b's, and a study that does not use them may still have readings, which are rendered
+		// separately by FormatPriceOfProtection. Claiming here that a run was not evaluated would be the
+		// same defect one level along.
+		b.WriteString("\nPre-registered checks: NOT APPLICABLE. The three checks above this line are the M5-b\n")
+		b.WriteString("  gateway study's, and this evidence is not from it. Nothing here is a verdict on these arms.\n")
+		return b.String()
 	}
 
 	b.WriteString("\nPre-registered checks (primary endpoint: TTFT p99)\n")

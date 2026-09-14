@@ -83,6 +83,32 @@ func parseAPIKeys(s string) map[string]string {
 	return out
 }
 
+// parsePriorities turns "tenant=0,tenant2=5" into the per-tenant scheduling priority map.
+//
+// Unlike parseAPIKeys it refuses malformed input instead of skipping it. A dropped API key fails loudly on
+// the first request; a dropped priority does not fail at all -- the run completes, the rows look healthy,
+// and the arm that was supposed to carry the treatment silently replays the control. An arm whose whole
+// hypothesis is the priority field must not be able to lose it quietly.
+func parsePriorities(s string) (map[string]int, error) {
+	out := map[string]int{}
+	for pair := range strings.SplitSeq(s, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(pair, "=")
+		if !ok {
+			return nil, fmt.Errorf("priority %q is not tenant=int", pair)
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return nil, fmt.Errorf("priority for tenant %q: %q is not an integer", strings.TrimSpace(k), strings.TrimSpace(v))
+		}
+		out[strings.TrimSpace(k)] = n
+	}
+	return out, nil
+}
+
 // stubConnIDKey carries a per-connection identifier on every request context the stub server handles.
 //
 // It is a private struct type rather than a string so nothing else can collide with it in the context.

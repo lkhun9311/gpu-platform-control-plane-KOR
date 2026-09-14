@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="604" viewBox="0 0 960 604" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11">
+<rect width="960" height="604" fill="#fbfbfa"/>
+<text x="64" y="24" font-size="14" fill="#1a1a1a">qlgpu-20260906-012813</text>
+<text x="64" y="41" fill="#555">54s sampled, 4 card(s), 2 pod(s) named by the exporter</text>
+<rect x="64" y="96" width="872" height="90" fill="#fff" stroke="#e2e2e0"/>
+<line x1="64" y1="96.0" x2="936" y2="96.0" stroke="#eee"/>
+<text x="56" y="99.0" text-anchor="end" fill="#888">100</text>
+<line x1="64" y1="141.0" x2="936" y2="141.0" stroke="#eee"/>
+<text x="56" y="144.0" text-anchor="end" fill="#888">50</text>
+<line x1="64" y1="186.0" x2="936" y2="186.0" stroke="#eee"/>
+<text x="56" y="189.0" text-anchor="end" fill="#888">0</text>
+<polyline points="64.00,186.00 96.30,186.00 128.59,186.00 160.89,186.00 193.19,186.00 225.48,186.00 257.78,186.00 290.07,186.00 322.37,186.00 354.67,186.00 386.96,186.00 419.26,186.00 451.56,186.00 483.85,186.00 516.15,186.00 548.44,186.00 580.74,186.00 613.04,186.00 645.33,186.00 677.63,186.00 709.93,186.00 742.22,186.00 774.52,186.00 806.81,186.00 839.11,186.00 871.41,186.00 903.70,186.00 936.00,186.00" fill="none" stroke="#2f6f9f" stroke-width="1.4"/>
+<text x="64" y="90" fill="#1a1a1a">gpu 0 &#183; 0/28 samples above zero &#183; no pod named on any sample</text>
+<rect x="64" y="216" width="872" height="90" fill="#fff" stroke="#e2e2e0"/>
+<line x1="64" y1="216.0" x2="936" y2="216.0" stroke="#eee"/>
+<text x="56" y="219.0" text-anchor="end" fill="#888">100</text>
+<line x1="64" y1="261.0" x2="936" y2="261.0" stroke="#eee"/>
+<text x="56" y="264.0" text-anchor="end" fill="#888">50</text>
+<line x1="64" y1="306.0" x2="936" y2="306.0" stroke="#eee"/>
+<text x="56" y="309.0" text-anchor="end" fill="#888">0</text>
+<polyline points="64.00,306.00 96.30,306.00 128.59,306.00 160.89,306.00 193.19,306.00 225.48,306.00 257.78,306.00 290.07,306.00 322.37,306.00 354.67,306.00 386.96,306.00 419.26,306.00 451.56,306.00 483.85,306.00 516.15,306.00 548.44,306.00 580.74,306.00 613.04,306.00 645.33,306.00 677.63,306.00 709.93,306.00 742.22,306.00 774.52,306.00 806.81,306.00 839.11,306.00 871.41,306.00 903.70,306.00 936.00,306.00" fill="none" stroke="#c1633c" stroke-width="1.4"/>
+<text x="64" y="210" fill="#1a1a1a">gpu 1 &#183; 0/28 samples above zero &#183; queuelab-surplus-occupier-qlgpu-worker</text>
+<rect x="64" y="336" width="872" height="90" fill="#fff" stroke="#e2e2e0"/>
+<line x1="64" y1="336.0" x2="936" y2="336.0" stroke="#eee"/>
+<text x="56" y="339.0" text-anchor="end" fill="#888">100</text>
+<line x1="64" y1="381.0" x2="936" y2="381.0" stroke="#eee"/>
+<text x="56" y="384.0" text-anchor="end" fill="#888">50</text>
+<line x1="64" y1="426.0" x2="936" y2="426.0" stroke="#eee"/>
+<text x="56" y="429.0" text-anchor="end" fill="#888">0</text>
+<polyline points="64.00,426.00 96.30,426.00 128.59,426.00 160.89,426.00 193.19,426.00 225.48,426.00 257.78,426.00 290.07,426.00 322.37,426.00 354.67,426.00 386.96,426.00 419.26,426.00 451.56,426.00 483.85,426.00 516.15,426.00 548.44,426.00 580.74,426.00 613.04,426.00 645.33,426.00 677.63,426.00 709.93,426.00 742.22,426.00 774.52,426.00 806.81,426.00 839.11,426.00 871.41,426.00 903.70,426.00 936.00,426.00" fill="none" stroke="#4c9a5a" stroke-width="1.4"/>
+<text x="64" y="330" fill="#1a1a1a">gpu 2 &#183; 0/28 samples above zero &#183; queuelab-surplus-occupier-qlgpu-worker</text>
+<rect x="64" y="456" width="872" height="90" fill="#fff" stroke="#e2e2e0"/>
+<line x1="64" y1="456.0" x2="936" y2="456.0" stroke="#eee"/>
+<text x="56" y="459.0" text-anchor="end" fill="#888">100</text>
+<line x1="64" y1="501.0" x2="936" y2="501.0" stroke="#eee"/>
+<text x="56" y="504.0" text-anchor="end" fill="#888">50</text>
+<line x1="64" y1="546.0" x2="936" y2="546.0" stroke="#eee"/>
+<text x="56" y="549.0" text-anchor="end" fill="#888">0</text>
+<polyline points="64.00,546.00 96.30,546.00 128.59,546.00 160.89,546.00 193.19,546.00 225.48,546.00 257.78,546.00 290.07,546.00 322.37,546.00 354.67,546.00 386.96,546.00 419.26,546.00 451.56,546.00 483.85,546.00 516.15,546.00 548.44,546.00 580.74,546.00 613.04,546.00 645.33,546.00 677.63,546.00 709.93,546.00 742.22,546.00 774.52,546.00 806.81,546.00 839.11,457.80 871.41,457.80 903.70,457.80 936.00,457.80" fill="none" stroke="#8a5fa8" stroke-width="1.4"/>
+<text x="64" y="450" fill="#1a1a1a">gpu 3 &#183; 4/28 samples above zero &#183; dp-ba1c7be7</text>
+<text x="64" y="592" fill="#777">DCGM_FI_DEV_GPU_UTIL as the exporter reported it. Percent of sampled time the card had work, not a share of any budget.</text>
+</svg>

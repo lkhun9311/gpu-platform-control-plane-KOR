@@ -2,16 +2,32 @@
 
 > **Status (2026-08-07).** This document surveys the whole project; the areas it covers are at different
 > stages, matched here to the README's evidence table — this banner does not upgrade or soften any of them.
-> **Built:** `NodeHealth` (node readiness — but the CR is hand-created and there is no GPU-specific fault
-> detection: no DCGM, Xid, or ECC anywhere in the Go tree), `GPUQuotaPolicy` (quota), `InferenceDeployment`
-> (serving), `MLTrainingJob` + Kueue (training admission — the only milestone with live end-to-end
-> evidence). **Built and unit-tested, never deployed:** the gateway. **Built and unit-tested, never run on
-> a GPU** (its vLLM metrics fixture is synthetic, so the engage/release thresholds are unvalidated): the
-> M5-b admission guard and benchmark harness. **Designed only — no CRD, no code:** `GpuSharingBenchmark` /
-> performance isolation, failure & recovery (M7), the SQLite ledger, the `platformctl` CLI. **Code written
-> and offline-validated, never applied to AWS:** the AWS hosting path. **Retracted:** the published queuelab
-> reclaim result — there are currently zero valid queuelab experimental numbers. No GPU in this project is
-> real; every GPU is simulated by a fake device plugin.
+> **Built:** `NodeHealth` (node readiness — but the CR is hand-created and no GPU fault signal reaches it:
+> nothing Xid or ECC exists at all, and the DCGM code that does exist is a utilisation reader the queuelab
+> uses, not a health input), `GPUQuotaPolicy` (quota), `InferenceDeployment` (serving), `MLTrainingJob` +
+> Kueue (training admission). **Built and unit-tested, never deployed:** the gateway. **Built and MEASURED
+> on a paid GPU:** the M5-b admission guard and benchmark harness — four repetitions on 2026-09-03 and an
+> engine-level scheduler microtest on 2026-09-04. The guard failed: 83.7x against a pre-registered 1.25x
+> premium-tail target, and the harness declared the run invalid rather than reporting a protection claim.
+> **Built, and run for real on kind:** failure & recovery (M7) — a `WorkloadRun` CRD, a controller and a
+> driver, with a recorded run in which deleting a serving Pod produced a recovery trail nobody wrote by
+> hand. **Designed only — no CRD, no code:** `GpuSharingBenchmark` / performance isolation (though its
+> sizing arithmetic and run script exist), the SQLite ledger, the `platformctl` CLI. **Code written and
+> offline-validated, never applied to AWS:** the `cluster` half of the AWS hosting path. **Withdrawn once,
+> then re-measured, then observed on hardware:** the queuelab reclaim result. Twelve runs on a kind cluster
+> carried the banner `device: NOT OBSERVED`; a $3.90 session then reproduced it on four A10Gs, eight runs
+> accepted by `-require-device`, and the banner is gone. Owner wait separates by 28.8 s there against 29.0 s
+> on kind, so the result survived its own instrument. A second study then showed reservation and use coming
+> apart by a factor of four while every reservation-based figure stayed the same, and found that a duty cycle
+> synchronised with the exporter's collection interval is reported by whichever single phase the sampler
+> happens to sit on -- zero in the run that was measured, but as plausibly a full 98. Every GPU in the kind
+> clusters is still simulated by a fake device plugin, and those runs are still reservation.
+>
+> **Built, and the reason the paid numbers are worth reading:** a characterization harness that pins what
+> each GPU-renting script does before it may be run against a card. Three runners, 25 scenarios, each
+> driving the real script with recording stubs and diffing the AWS calls, the exit status, what the operator
+> was told and what the run directory held. It fixes the host side only, which is stated where it is used
+> rather than left to be assumed.
 
 A Kubernetes-native control plane for multi-tenant GPU inference workloads — GPU quota, node readiness, LLM serving, performance isolation, noisy-neighbor benchmarking, and observability-driven operations.
 
@@ -43,7 +59,7 @@ A multi-tenant GPUaaS control plane that:
 |-----------------------|----------------------------------------------|----------------------------------------------------------------------------------------------------------------------|
 | `InferenceDeployment` | declare a model-serving intent               | type + serving reconciler (Deployment/Service, phase ladder) — M4-a merged                                           |
 | `GPUQuotaPolicy`      | per-tenant GPU quota / rate limit            | type + reconciler (ResourceQuota sync, drift recovery) — M3 merged; `rateLimit` feeds the M4-b gateway — **M4-b merged, gateway built and unit-tested, never deployed** |
-| `NodeHealth`          | GPU node intake and operational state        | type + reconciler (observe + taint, finalizer, drift recovery) — M2/M3 merged; **no GPU-specific fault detection** (no DCGM, Xid, or ECC in the Go tree) |
+| `NodeHealth`          | GPU node intake and operational state        | type + reconciler (observe + taint, finalizer, drift recovery) — M2/M3 merged; **no GPU fault signal reaches it** — nothing Xid or ECC exists, and the DCGM code that does exist reads utilisation for the queuelab rather than health for this controller |
 | `GpuSharingBenchmark` | declare a noisy-neighbor / sharing benchmark | designed — spec `2026-07-04-gpusharingbenchmark-crd-design.md`; no code yet (M5)                                     |
 | `WorkloadRun`         | record a workload execution                  | sketched (doc 02) only; no spec or code yet (M7)                                                                     |
 | `MLTrainingJob`       | Kueue-admitted training job                  | type + full reconciler — translates to a `batch/v1` Job admitted through Kueue, two-tenant cohort borrowing/reclaim preemption, run end-to-end on kind (`hack/m6-kind-e2e.md`) — **M6 merged, built, only milestone with live end-to-end evidence** |

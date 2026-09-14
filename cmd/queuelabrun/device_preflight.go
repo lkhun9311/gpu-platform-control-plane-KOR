@@ -486,7 +486,7 @@ type workloadVerdict struct {
 // was not passed through; ptx-load-failed is a kernel this driver would not compile. Three different
 // afternoons.
 func preflightWorkload(t *corev1.ContainerStateTerminated) workloadVerdict {
-	iters, kind, device := queuelab.ReportFromMessage(t.Message)
+	iters, kind, device, _ := queuelab.ReportFromMessage(t.Message)
 	if iters == nil {
 		return workloadVerdict{err: fmt.Errorf(
 			"the preflight workload left no report this build can read (exit %d, message %q). That is not a "+

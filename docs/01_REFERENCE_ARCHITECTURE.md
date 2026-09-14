@@ -5,10 +5,15 @@
 > for `InferenceDeployment`, `GPUQuotaPolicy`, and `NodeHealth` are **built**; `MLTrainingJob` + Kueue is
 > **built** (M6, the only milestone with live end-to-end evidence); the gateway (routing, auth, rate limit,
 > proxy, metrics) is **built and unit-tested but never deployed**; the M5-b admission guard and benchmark
-> harness are **built and unit-tested but never run on a GPU**; `GpuSharingBenchmark` and its "thin status
-> writer" are **designed only — no CRD, no code**; DCGM/eBPF/Nsight are **not implemented at all** (zero
-> DCGM/Xid/ECC references in the Go tree). No GPU in this project is real; every GPU is simulated by a fake
-> device plugin.
+> harness are **built, and MEASURED on a paid GPU**: four repetitions on 2026-09-03 and an engine-level scheduler microtest on 2026-09-04. The guard failed — 83.7x against a pre-registered 1.25x premium-tail target — and the harness declared the run invalid rather than reporting a protection claim; `GpuSharingBenchmark` and its "thin status
+> writer" are **designed only — no CRD, no code**. eBPF and Nsight are **not implemented at all**, and
+> neither is Xid or ECC fault detection. DCGM is a narrower case and the blanket claim about it was wrong:
+> a reader for `DCGM_FI_DEV_GPU_UTIL` exists (`internal/queuelab/dcgm.go`), fourteen Go files reference
+> DCGM, and `config/dcgm-exporter/` deploys the exporter. What does NOT exist is any GPU fault detection in
+> the health path — the DCGM code answers "did this card do work, and whose Pod was it", which the queuelab
+> uses to tell reserved GPU-seconds from observed ones, and it has never been pointed at a real card. Every
+> GPU in the kind clusters is simulated by a fake device plugin. The GPUs in the two paid EC2 sessions were
+> real.
 
 ## One-page view
 
@@ -66,10 +71,10 @@ Each CRD encodes an operator intent. A controller reconciles it toward the desir
 | CRDs + controllers                          | yes (envtest, kind)                                              | —                         |
 | Admission / quota / status                  | yes                                                              | —                         |
 | Gateway routing + rate limit                | **built** — M4-b merged, unit-tested (envtest/httptest); binary and manifests exist but the gateway has **never been deployed** | —                         |
-| Gateway admission guard (M5)                | **built and unit-tested** (envtest, synthetic/golden vLLM metrics fixture — engage/release thresholds unvalidated); **never run on a GPU** | yes (real latency effect) |
+| Gateway admission guard (M5)                | **built and measured on a paid GPU.** Four repetitions 2026-09-03. The guard missed its 1.25x target at 83.7x and the run was declared invalid rather than reported. Its engage/release thresholds were the failure: the gateway cannot observe the pressure it gates on | yes (real latency effect) |
 | vLLM serving                                | smoke only (no real inference throughput)                        | yes (real serving)        |
-| DCGM / GPU metrics                          | **not implemented** — no DCGM/Xid/ECC code exists (verified: zero occurrences in the Go tree) | yes (real metrics)        |
-| Noisy-neighbor p99, MPS, time-slicing, eBPF | methodology only for `GpuSharingBenchmark` (designed only — no CRD or code); the separate M5-b admission-guard benchmark harness is **built and unit-tested**, never run on a GPU | yes (measured evidence)   |
+| DCGM / GPU metrics                          | **partly implemented, never run on a card.** A `DCGM_FI_DEV_GPU_UTIL` reader, a Pod-attribution resolver, an exporter deployment and a pre-spend gate exist (14 Go files, `config/dcgm-exporter/`). No Xid or ECC. No GPU fault detection feeds NodeHealth | yes (real metrics)        |
+| Noisy-neighbor p99, MPS, time-slicing, eBPF | no `GpuSharingBenchmark` CRD, though its sizing arithmetic and run script exist and the matrix has never run. The separate M5-b harness is **built and has produced paid-GPU evidence** | yes (measured evidence)   |
 
 The killer-feature benchmark (doc 04) produces **measured** evidence only when run on a real GPU node. Locally it produces the M5-b benchmark harness and the report skeleton; the `GpuSharingBenchmark` CRD itself is **designed only and not yet implemented**. Numbers are filled from a real-GPU run, and any unmeasured claim is labeled as such.
 

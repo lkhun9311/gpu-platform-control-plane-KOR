@@ -1,12 +1,15 @@
 # Control Plane API
 
 > **Status (2026-08-07).** Per CRD: `InferenceDeployment`, `GPUQuotaPolicy`, and `NodeHealth` are **built**
-> (`NodeHealth` has no GPU-specific fault detection — no DCGM, Xid, or ECC in the Go tree). `MLTrainingJob`
+> (`NodeHealth` gets no GPU fault signal — nothing Xid or ECC exists, and the DCGM code that does exist is
+> a utilisation reader for the queuelab rather than a health input). `MLTrainingJob`
 > is **built** (M6, the only milestone with live end-to-end evidence, run on kind — never on real hardware).
-> `GpuSharingBenchmark` is **designed only — no CRD, no code**. `WorkloadRun` is **designed only — no code**
-> (M7). The gateway (Layer 4, M4-b) is **built and unit-tested but never deployed**; the M5 KV-cache-aware
-> admission guard is **built and unit-tested but never run on a GPU**, and its metrics fixture is synthetic.
-> No GPU in this project is real.
+> `GpuSharingBenchmark` is **designed only — no CRD**, though its sizing arithmetic and run script exist.
+> `WorkloadRun` is **built and has been run for real on kind** (M7): a CRD, a controller, a driver, and a
+> recorded run in which deleting a serving Pod produced a recovery trail nobody wrote by hand. The gateway
+> (Layer 4, M4-b) is **built and unit-tested but never deployed**. The M5 KV-cache-aware admission guard is
+> **built, and MEASURED on a paid GPU**: four repetitions on 2026-09-03 and an engine-level scheduler microtest on 2026-09-04. The guard failed — 83.7x against a pre-registered 1.25x premium-tail target — and the harness declared the run invalid rather than reporting a protection claim. Every GPU in the kind clusters is simulated by a fake device plugin. The GPUs in the two paid EC2
+> sessions were real.
 
 The control plane is a set of CRDs in API group `platform.lkhun9311.github.io/v1`, each reconciled by a controller that converges native Kubernetes objects toward the declared intent. (Some pasted designs use a shorter `platform.ai/v1` as a conceptual surface; the implemented group is the one above, and all examples here use it.)
 

@@ -1014,3 +1014,88 @@ func TestTheModelCheckSaysWhenTheRegimesWereNotInterleaved(t *testing.T) {
 			"that interleaved; session drift would land entirely on one regime and arrive as the kink")
 	}
 }
+
+// withDuty is cmpRec with the workload's reported duty attached.
+func withDuty(r runRecord, duty float64) runRecord {
+	d := duty
+	r.Measurement.Workload.DutyCycle = &d
+	return r
+}
+
+// TestAnArmWhoseRunsIdledDifferentlyIsRefused is the dose guard's rule applied to the duty.
+//
+// An arm is one experiment. Averaging a run that computed throughout with one that held its card idle for
+// three quarters of its service produces a mean describing neither, and that mean is what every finding is
+// built on.
+func TestAnArmWhoseRunsIdledDifferentlyIsRefused(t *testing.T) {
+	_, err := compareRecords([]runRecord{
+		withDuty(cmpRec("r001", "A-honor", "grace-bounded", "2026-09-06T05:45:57Z", 41.0, int64(time.Second)), 1),
+		withDuty(cmpRec("r002", "A-ignore", "grace-bounded", "2026-09-06T05:48:56Z", 0.0, int64(time.Second)), 1),
+		withDuty(cmpRec("r003", "A-honor", "grace-bounded", "2026-09-06T05:52:50Z", 40.9, int64(time.Second)), 0.25),
+	})
+	if err == nil {
+		t.Fatal("an arm holding one full-duty run and one quarter-duty run was accepted")
+	}
+	for _, want := range []string{"duty cycles", "describes neither"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not say %q: %v", want, err)
+		}
+	}
+}
+
+// TestARecordFromBeforeTheAxisIsNotTheSameAsOneThatMeasuredFullDuty keeps two different facts apart.
+//
+// An absent duty is a run whose workload could only compute continuously. A reported 1.0 is a run that
+// measured and said so. Folding them into one arm would average a run this build can vouch for with one that
+// predates the axis.
+func TestARecordFromBeforeTheAxisIsNotTheSameAsOneThatMeasuredFullDuty(t *testing.T) {
+	_, err := compareRecords([]runRecord{
+		withDuty(cmpRec("r001", "A-honor", "grace-bounded", "2026-09-06T05:45:57Z", 41.0, int64(time.Second)), 1),
+		cmpRec("r002", "A-ignore", "grace-bounded", "2026-09-06T05:48:56Z", 0.0, int64(time.Second)),
+		cmpRec("r003", "A-honor", "grace-bounded", "2026-09-06T05:52:50Z", 40.9, int64(time.Second)),
+	})
+	if err == nil {
+		t.Fatal("an arm mixing a measured full duty with a record from before the axis was accepted")
+	}
+	if !strings.Contains(err.Error(), "before the axis existed") {
+		t.Errorf("the refusal does not distinguish an absent duty from a measured one: %v", err)
+	}
+}
+
+// TestArmsThatIdledDifferentlyAreReportedRatherThanRefused is the other half of the rule.
+//
+// Varying the duty BETWEEN arms is the experiment reading 2 exists for, so it must be allowed. What it must
+// not be is silent: a reader scanning two waste figures will attribute their difference to the thing the arms
+// are named for.
+func TestArmsThatIdledDifferentlyAreReportedRatherThanRefused(t *testing.T) {
+	c, err := compareRecords([]runRecord{
+		withDuty(cmpRec("r001", "full", "grace-bounded", "2026-09-06T05:45:57Z", 41.0, int64(time.Second)), 1),
+		withDuty(cmpRec("r002", "quarter", "grace-bounded", "2026-09-06T05:48:56Z", 41.0, int64(time.Second)), 0.25),
+		withDuty(cmpRec("r003", "full", "grace-bounded", "2026-09-06T05:52:50Z", 40.9, int64(time.Second)), 1),
+		withDuty(cmpRec("r004", "quarter", "grace-bounded", "2026-09-06T05:55:30Z", 40.9, int64(time.Second)), 0.25),
+	})
+	if err != nil {
+		t.Fatalf("a deliberate duty comparison was refused: %v", err)
+	}
+	out := renderComparison(c)
+	if !strings.Contains(out, "DUTY DIFFERS ACROSS ARMS") {
+		t.Errorf("two arms that idled differently rendered without saying so:\n%s", out)
+	}
+	if !strings.Contains(out, "full=1") || !strings.Contains(out, "quarter=0.25") {
+		t.Errorf("the notice does not name each arm's duty:\n%s", out)
+	}
+}
+
+// TestArmsThatIdledTheSameSayNothingAboutIt keeps the notice from becoming noise.
+func TestArmsThatIdledTheSameSayNothingAboutIt(t *testing.T) {
+	c, err := compareRecords([]runRecord{
+		withDuty(cmpRec("r001", "A-honor", "grace-bounded", "2026-09-06T05:45:57Z", 41.0, int64(time.Second)), 1),
+		withDuty(cmpRec("r002", "A-ignore", "grace-bounded", "2026-09-06T05:48:56Z", 0.0, int64(time.Second)), 1),
+	})
+	if err != nil {
+		t.Fatalf("compare: %v", err)
+	}
+	if strings.Contains(renderComparison(c), "DUTY DIFFERS") {
+		t.Error("two arms at the same duty were reported as differing")
+	}
+}

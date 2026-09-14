@@ -43,12 +43,24 @@ func writeRepetition(t *testing.T, dir, name, arm string, n int, ttftBaseMs int6
 	}
 	defer func() { _ = f.Close() }()
 
+	// Every repetition gets its own send epoch, because two real replays never start at the same nanosecond.
+	//
+	// This helper used to stamp SendUnixNanos: 1 on every row of every file, so two repetitions of one arm
+	// were byte-identical in the field that identifies a replay. That was harmless until `report` learned
+	// to refuse a replay counted twice -- and then it was these fixtures, not the runner, that looked like
+	// duplicates. The epoch is derived from the file name so it is stable across runs of the suite.
+	var epoch int64 = 1
+	for _, b := range []byte(name) {
+		epoch = epoch*131 + int64(b)
+	}
+	epoch = epoch%1_000_000_000 + 1
+
 	enc := json.NewEncoder(f)
 	for i := range n {
 		ttft := (ttftBaseMs + int64(i)) * 1e6
 		row := bench.RawRow{
 			Index: i, Arm: arm, Tenant: "premium", HTTPStatus: 200,
-			SendUnixNanos: 1, FirstTokenUnixNanos: 1 + ttft, EndUnixNanos: 1 + ttft + 1e6,
+			SendUnixNanos: epoch + int64(i), FirstTokenUnixNanos: epoch + int64(i) + ttft, EndUnixNanos: epoch + int64(i) + ttft + 1e6,
 			EstInputTokens: 10, MatchTolerance: 0.05, TraceChecksum: "0000000000000000000000000000000000000000000000000000000000000000",
 		}
 		if err := enc.Encode(row); err != nil {
@@ -58,7 +70,7 @@ func writeRepetition(t *testing.T, dir, name, arm string, n int, ttftBaseMs int6
 	for i := range rejected {
 		r := bench.RawRow{
 			Index: n + i, Arm: arm, Tenant: "premium", HTTPStatus: 429,
-			SendUnixNanos: 1, EstInputTokens: 10, MatchTolerance: 0.05,
+			SendUnixNanos: epoch + int64(n+i), EstInputTokens: 10, MatchTolerance: 0.05,
 			TraceChecksum: "0000000000000000000000000000000000000000000000000000000000000000",
 		}
 		if err := enc.Encode(r); err != nil {
@@ -251,7 +263,8 @@ func TestARepetitionCarryingADifferentTraceIsRefused(t *testing.T) {
 		path := filepath.Join(dir, fmt.Sprintf("raw-%s-%d.jsonl", arm, rep))
 		var b strings.Builder
 		for i := 1; i <= 200; i++ {
-			base := int64(1_000_000_000 + i*1_000_000)
+			// Each repetition gets its own epoch: two real replays never share a send nanosecond.
+			base := int64(1_000_000_000+i*1_000_000) + int64(rep)*1_000_000_000_000
 			row := bench.RawRow{
 				Index: i, Arm: arm, Tenant: "premium-1", SendUnixNanos: base,
 				FirstTokenUnixNanos: base + 50_000_000, EndUnixNanos: base + 60_000_000,

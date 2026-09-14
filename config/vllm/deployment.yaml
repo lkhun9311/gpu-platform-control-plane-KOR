@@ -102,6 +102,17 @@ spec:
             # page assumed -- and the derived rate is about 1.58/s rather than 17. Ten times too much load
             # would have censored every tail and disqualified the run after the card was paid for.
             - --no-enable-prefix-caching
+            # 2048 STATES the default this engine already resolved to; it does not change it.
+            #
+            # The price-of-protection run left this unset in its control and ran a separate arm that asked
+            # for 2048 explicitly. The two reproduced each other's throughput to 1.2 ms, which is how B0 was
+            # established as 2048 rather than guessed.
+            #
+            # Stating it matters because config/vllm-shared now pins the same number, and the M5-c matrix
+            # compares this engine against that pair. Left as a default here, the agreement would rest on
+            # a memory of a paid run and on both engines deriving the same value from different amounts of
+            # card -- neither of which a test can check. Written down, it is one string compared to another.
+            - --max-num-batched-tokens=2048
             - --port=8000
           ports:
             - name: http
