@@ -210,6 +210,150 @@ func TestTheFlagshipAndTheSharingMatrixAgreeOnModelAndDtype(t *testing.T) {
 	}
 }
 
+// mustDifferAcrossTopology names the only engine flags a split card may change, and says why for each.
+//
+// Everything absent from this map has to be identical in the flagship and in both sharing engines. That is
+// the direction the check has to run: the matrix varies TOPOLOGY, so a flag that differs without a reason
+// here is a second variable, and the write-up would attribute its effect to separation.
+var mustDifferAcrossTopology = map[string]string{
+	"--max-num-seqs": "half each, so the card admits the same total concurrency under either topology",
+}
+
+// mustAccompanyAcrossTopology names a flag the split engines add ALONGSIDE one the flagship passes, and why.
+//
+// This began as mayReplace -- the split engines were to express the budget as an absolute and drop the
+// fraction. That was wrong, and reading vLLM v0.27.1 rather than its log message is what showed it. The two
+// flags do two different jobs:
+//
+//	--gpu-memory-utilization  is the startup ADMISSION GATE. request_memory() raises ValueError when free
+//	                          memory is below utilization * total. It reads the fraction whether or not an
+//	                          absolute cache is set, and its default is 0.92 -- 20.30 GiB of this card.
+//	--kv-cache-memory         is the SIZING, and it does override the fraction for that: vLLM skips
+//	                          profiling and logs "This does not respect the gpu_memory_utilization config."
+//
+// Dropping the fraction therefore does not relax the gate, it raises it to the default. The 2026-09-12
+// pilot measured the second engine to profile seeing 13.81 GiB free, so both split arms would have failed
+// to start on a card that had just been rented. The engine's own advice -- "Replace gpu_memory_utilization
+// config with --kv-cache-memory=..." -- is about sizing, and taking it literally is what nearly did it.
+var mustAccompanyAcrossTopology = map[string]string{
+	"--gpu-memory-utilization": "--kv-cache-memory",
+}
+
+// The sharing engines must match the flagship on every flag the split does not force them to change.
+//
+// This is the check that was missing, and its absence was not hypothetical. The sharing manifests carried no
+// --no-enable-prefix-caching while the flagship argues that flag at length for the same trace, so vLLM's V1
+// default would have left prefix caching ON in the split arms only. Every request in this trace repeats one
+// prompt shape, which is most of the prefill, so the split arms would have beaten the exclusive arm by a
+// wide margin because of a cache rather than because the card was divided -- and nothing in the run would
+// have looked wrong.
+//
+// The unclassified-flag branch is the part that keeps this from rotting: a flag added to the flagship later
+// fails here until someone either mirrors it into the sharing engines or writes down why it may differ.
+func TestTheSharingEnginesDifferFromTheFlagshipOnlyWhereTheSplitForcesIt(t *testing.T) {
+	flagship := vllmFlagsIn(t, "../../config/vllm/deployment.yaml")
+	if len(flagship) == 0 {
+		t.Fatal("no vLLM flags found in the flagship manifest; the comparison below would pass vacuously")
+	}
+
+	files, err := filepath.Glob("../../config/vllm-shared/engine-*.yaml")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no sharing engine manifests found: %v", err)
+	}
+	for _, f := range files {
+		got := vllmFlagsIn(t, f)
+		if len(got) == 0 {
+			t.Errorf("%s passes no vLLM flags at all", f)
+			continue
+		}
+		for name, want := range flagship {
+			if companion, accompanied := mustAccompanyAcrossTopology[name]; accompanied {
+				have, present := got[name]
+				if !present {
+					t.Errorf("%s passes no %s, so vLLM applies its 0.92 default as the startup gate and "+
+						"demands 20.30 GiB free on a card the other engine is already holding: this engine "+
+						"would not start at all", f, name)
+				} else if have == want {
+					t.Errorf("%s passes %q, the same gate as the whole-card flagship. Two engines cannot "+
+						"each be admitted for most of one card", f, have)
+				}
+				if _, ok := got[companion]; !ok {
+					t.Errorf("%s passes %s but no %s, so its cache size is profiled against a card another "+
+						"engine is already using -- the asymmetry that invalidated the 2026-09-12 pilot",
+						f, name, companion)
+				}
+				continue
+			}
+			reason, mayDiffer := mustDifferAcrossTopology[name]
+			have, present := got[name]
+			switch {
+			case !present:
+				t.Errorf("%s: the flagship passes %q and this engine passes no %s at all, so the two arms "+
+					"would run different engines and the matrix would credit the difference to topology",
+					f, want, name)
+			case mayDiffer && have == want:
+				t.Errorf("%s passes %q, the same as the flagship, but %s is supposed to differ on a split "+
+					"card: %s", f, have, name, reason)
+			case !mayDiffer && have != want:
+				t.Errorf("%s passes %q where the flagship passes %q; %s is not in mustDifferAcrossTopology, "+
+					"so the matrix would vary it alongside the topology it exists to measure",
+					f, have, want, name)
+			}
+		}
+		companions := map[string]bool{}
+		for _, r := range mustAccompanyAcrossTopology {
+			companions[r] = true
+		}
+		for name, have := range got {
+			if companions[name] {
+				continue
+			}
+			if _, ok := flagship[name]; !ok {
+				t.Errorf("%s passes %q, which the flagship does not pass at all; the exclusive arm is "+
+					"supposed to be the flagship's own engine, so this is a knob only the split arms turn",
+					f, have)
+			}
+		}
+	}
+}
+
+// vllmFlagsIn returns the --flag arguments a manifest passes to its vLLM container, keyed by flag name.
+//
+// Read textually rather than decoded because these files hold a Deployment and a Service in one stream and
+// sigs.k8s.io/yaml decodes a single document; the contract tests above read them the same way. Positional
+// arguments -- the served model -- are skipped, because TestTheFlagshipAndTheSharingMatrixAgreeOnModelAndDtype
+// already owns that comparison.
+func vllmFlagsIn(t *testing.T, path string) map[string]string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	flags := map[string]string{}
+	inArgs := false
+	for line := range strings.SplitSeq(string(b), "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "args:":
+			inArgs = true
+		case !inArgs:
+			// Outside the block entirely.
+		case trimmed == "" || strings.HasPrefix(trimmed, "#"):
+			// Blank lines and the long rationale comments are part of the block, not the end of it.
+		case strings.HasPrefix(trimmed, "- "):
+			arg := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
+			if strings.HasPrefix(arg, "--") {
+				name, _, _ := strings.Cut(arg, "=")
+				flags[name] = arg
+			}
+		default:
+			// Any other key at this indentation ends the list; `ports:` is the one that follows in practice.
+			inArgs = false
+		}
+	}
+	return flags
+}
+
 // No engine manifest may pin a namespace, because both runs place their engines themselves.
 //
 // A pinned `namespace: system` defeated that silently in two different ways at once. `kubectl apply -k`
@@ -479,6 +623,21 @@ func compareVersions(a, b string) int {
 		}
 	}
 	return 0
+}
+
+// sliceBetween returns the text between the first occurrence of start and the first end after it.
+func sliceBetween(t *testing.T, body, start, end string) string {
+	t.Helper()
+	i := strings.Index(body, start)
+	if i < 0 {
+		t.Fatalf("did not find %q", start)
+	}
+	rest := body[i+len(start):]
+	j := strings.Index(rest, end)
+	if j < 0 {
+		t.Fatalf("did not find %q after %q", end, start)
+	}
+	return rest[:j]
 }
 
 // readRepoFile reads a file relative to the repository root.
@@ -918,9 +1077,11 @@ func TestEveryGeneratedTenantIsProvisioned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read generator: %v", err)
 	}
-	// The generator names two tenants as literals and the probe pair through the constants below, so the
-	// constants are resolved here rather than matched as text.
-	generated := map[string]bool{ProbeUnderTenant: true, ProbeOverTenant: true}
+	// The generator names some tenants as literals and the rest through the constants below, so the
+	// constants are resolved here rather than matched as text. NoisyTenant joined them when the
+	// price-of-protection readings started comparing that tenant's output share and the name became
+	// load-bearing in two packages; resolving it is strictly better than matching a string that can move.
+	generated := map[string]bool{ProbeUnderTenant: true, ProbeOverTenant: true, NoisyTenant: true}
 	for _, m := range regexp.MustCompile(`\{Tenant: "([^"]+)"`).FindAllSubmatch(genSrc, -1) {
 		generated[string(m[1])] = true
 	}
@@ -1326,4 +1487,161 @@ func TestTheMicrotestMeasuresTheEngineTheArmsMeasured(t *testing.T) {
 			t.Errorf("the runner does not test the %s scheduling policy, which the pre-registration names", policy)
 		}
 	}
+}
+
+// TestThePriorityMapIsDerivedFromTheOneTenantList keeps a fifth copy of the tenant list from appearing.
+//
+// The runner already derives the API key secret, the --api-keys flag and each GPUQuotaPolicy from one
+// TENANTS array, because four hand-kept copies drifted twice: the first paid run had two of four tenants in
+// the secret and answered a quarter of every replay with 401, the second gave two of them no policy and
+// answered their probes with 403. A priority map would fail more quietly than either -- a tenant missing
+// from it does not error, it silently sends no priority field and replays the control.
+func TestThePriorityMapIsDerivedFromTheOneTenantList(t *testing.T) {
+	runner := readRepoFile(t, "hack/m5b-arms.sh")
+	loop := sliceBetween(t, runner, `for entry in "${TENANTS[@]}"; do`, "\ndone")
+	for _, want := range []string{
+		`priorities="${priorities:+$priorities,}$tenant=0"`,
+		`priorities="${priorities:+$priorities,}$tenant=5"`,
+	} {
+		if !strings.Contains(loop, want) {
+			t.Errorf("the priority map is not derived inside the TENANTS loop: missing %s", want)
+		}
+	}
+	// A literal tenant name in the map would be the copy this test exists to prevent.
+	for _, tenant := range []string{"premium-1", "standard-noisy", "standard-probe-over", "standard-probe-under"} {
+		if strings.Contains(runner, tenant+"=0") || strings.Contains(runner, tenant+"=5") {
+			t.Errorf("the runner names %s in a priority pair; the map must come from TENANTS alone", tenant)
+		}
+	}
+}
+
+// TestThePriorityArmRefusesAnFCFSEngine fixes the failure that would be invisible in the evidence.
+//
+// vLLM accepts and ignores the per-request priority field under its default fcfs policy. Every request is
+// served, every row looks healthy, and the treatment arm reproduces the control exactly -- which would be
+// read as "priority does not help", the most expensive wrong conclusion available here. The runner must
+// check the engine's own startup log, not the flags it believes it passed.
+func TestThePriorityArmRefusesAnFCFSEngine(t *testing.T) {
+	runner := readRepoFile(t, "hack/m5b-arms.sh")
+	guard := sliceBetween(t, runner, `if [ "${PRIORITIES:-0}" = "1" ]; then`, "fi\n")
+	if !strings.Contains(guard, "engine-config.txt") {
+		t.Error("the priority guard does not read the engine's recorded startup configuration")
+	}
+	if !strings.Contains(guard, "fail ") {
+		t.Error("the priority guard does not stop the run when the engine is not on the priority policy")
+	}
+	// The guard's PATTERN is run, not merely inspected.
+	//
+	// Asserting that a guard exists is how a guard that never fires passes review: an earlier version of
+	// this test checked only that the block mentioned the config file and called fail, and a mangled grep
+	// expression sailed through it. A guard is verified by feeding it the input it is supposed to reject.
+	pattern := regexp.MustCompile(`grep -qiE? "([^"]+)"`).FindStringSubmatch(guard)
+	if pattern == nil {
+		t.Fatalf("the priority guard has no grep pattern to test:\n%s", guard)
+	}
+
+	// The cases are the engine's OWN OUTPUT, not a rendering of it anybody typed.
+	//
+	// This is the second time this test has been rewritten, and the first rewrite is why. It ran the
+	// runner's real pattern -- the right mechanism -- against two lines invented for the occasion:
+	//
+	//     scheduling_policy='priority', max_num_batched_tokens=512
+	//
+	// described in a comment as one of "the forms vLLM has printed it". vLLM has never printed that. It
+	// writes a Python dict with a colon, 'scheduling_policy': 'priority', so the pattern under test could
+	// not match a single line the engine emits, and the test said it could. Running the real pattern
+	// against fabricated input is the same defect as not running it at all, one level deeper.
+	//
+	// So the input is a fixture captured from the paid 2026-09-04 microtest, and every cell in it is
+	// exercised: the three priority cells must match and the three fcfs cells must not.
+	for _, c := range parseStartupFixture(t) {
+		for _, line := range c.lines {
+			if !strings.Contains(line, "non-default args") {
+				continue
+			}
+			cmd := exec.Command("grep", "-qiE", pattern[1])
+			cmd.Stdin = strings.NewReader(line + "\n")
+			matched := cmd.Run() == nil
+			want := c.policy == "priority"
+			if matched != want {
+				t.Errorf("cell %s/%s: the runner pattern %q matched=%v, want %v against the engine's own line:\n  %s",
+					c.budget, c.policy, pattern[1], matched, want, line)
+			}
+		}
+	}
+
+	// The deployment argv is the other half of engine-config.txt, and it is a real form: the runner
+	// records it with kubectl jsonpath over the container args. Both spellings are covered because a
+	// manifest may use either.
+	for _, tc := range []struct {
+		name   string
+		config string
+		want   bool
+	}{
+		{"argv, space separated", "[--model,Qwen,--scheduling-policy priority,--max-num-batched-tokens 512]", true},
+		{"argv, equals separated", "[--model,Qwen,--scheduling-policy=priority,--max-num-batched-tokens=512]", true},
+		{"argv naming fcfs", "[--model,Qwen,--scheduling-policy=fcfs,--max-num-batched-tokens=2048]", false},
+		{"policy absent entirely", "[--model,Qwen,--max-num-batched-tokens=2048]", false},
+	} {
+		cmd := exec.Command("grep", "-qiE", pattern[1])
+		cmd.Stdin = strings.NewReader(tc.config + "\n")
+		matched := cmd.Run() == nil
+		if matched != tc.want {
+			t.Errorf("%s: the runner pattern %q matched=%v, want %v against %q",
+				tc.name, pattern[1], matched, tc.want, tc.config)
+		}
+	}
+	// The guard must come before any replay spends card time on an arm that is not an arm.
+	if strings.Index(runner, `if [ "${PRIORITIES:-0}" = "1" ]; then`) > strings.Index(runner, `"$WORK/benchharness" replay`) {
+		t.Error("the priority guard runs after the first replay; it must refuse before any card time is spent")
+	}
+}
+
+// startupCell is one cell's worth of captured engine output.
+type startupCell struct {
+	budget string
+	policy string
+	lines  []string
+}
+
+// parseStartupFixture reads the verbatim vLLM startup lines captured from the paid microtest.
+//
+// The fixture exists so that a guard against the engine's configuration is tested against what the
+// engine writes. Its header records the image, the model and the run it came from, because a fixture
+// whose provenance is unknown is only a slower way of inventing input.
+func parseStartupFixture(t *testing.T) []startupCell {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("testdata", "vllm_startup_lines.txt"))
+	if err != nil {
+		t.Fatalf("read startup fixture: %v", err)
+	}
+	var cells []startupCell
+	header := regexp.MustCompile(`^\[cell\] max_num_batched_tokens=(\S+) scheduling_policy=(\S+)$`)
+	for line := range strings.SplitSeq(string(body), "\n") {
+		if m := header.FindStringSubmatch(line); m != nil {
+			cells = append(cells, startupCell{budget: m[1], policy: m[2]})
+			continue
+		}
+		if strings.HasPrefix(line, "#") || strings.TrimSpace(line) == "" || len(cells) == 0 {
+			continue
+		}
+		cells[len(cells)-1].lines = append(cells[len(cells)-1].lines, line)
+	}
+	// A fixture that silently emptied would make every assertion below vacuous.
+	if len(cells) != 6 {
+		t.Fatalf("startup fixture has %d cells, want the 6 the microtest measured", len(cells))
+	}
+	var priority int
+	for _, c := range cells {
+		if c.policy == "priority" {
+			priority++
+		}
+		if len(c.lines) == 0 {
+			t.Fatalf("cell %s/%s carries no captured lines", c.budget, c.policy)
+		}
+	}
+	if priority != 3 {
+		t.Fatalf("startup fixture has %d priority cells, want 3", priority)
+	}
+	return cells
 }

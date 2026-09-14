@@ -88,7 +88,7 @@ func (s *DeviceScraper) Observe(ctx context.Context) (*DeviceObservation, int, e
 			}
 		} else {
 			failures = 0
-			samples, missed, unlabelled, perr := ParseDCGMUtilisation(body, at, s.Resolve)
+			samples, missed, unlabelled, unavailable, perr := ParseDCGMUtilisation(body, at, s.Resolve)
 			if perr != nil {
 				// A malformed scrape is not a gap: the exporter answered and said something this build cannot
 				// read, which is a different problem from it being absent, and guessing which is not this
@@ -99,6 +99,7 @@ func (s *DeviceScraper) Observe(ctx context.Context) (*DeviceObservation, int, e
 			obs.Samples = append(obs.Samples, samples...)
 			unattributed += missed
 			obs.UnlabelledBusySamples += unlabelled
+			obs.UnavailableSamples += unavailable
 		}
 		select {
 		case <-ctx.Done():

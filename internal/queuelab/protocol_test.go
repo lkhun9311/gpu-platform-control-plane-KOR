@@ -127,3 +127,112 @@ func TestArmAssertCardinality(t *testing.T) {
 		t.Fatal("a missing row must be rejected")
 	}
 }
+
+// TestTheIdlingArmsDifferOnlyInDuty is the claim that makes the study a study.
+//
+// Two axes at once would give a difference that carries both. These two arms must be identical in policy and
+// in termination contract, and differ in exactly one thing: how much of its service the victim computes for.
+func TestTheIdlingArmsDifferOnlyInDuty(t *testing.T) {
+	rows := []string{OwnRow, VictimRow, OwnerRow}
+
+	fullPolicy, err := ArmDFull.PolicyVariant()
+	if err != nil {
+		t.Fatalf("D-full has no policy: %v", err)
+	}
+	quarterPolicy, err := ArmDQuarter.PolicyVariant()
+	if err != nil {
+		t.Fatalf("D-quarter has no policy: %v", err)
+	}
+	if fullPolicy != quarterPolicy {
+		t.Errorf("the idling arms apply different reclaim policies (%q vs %q), so a difference between them "+
+			"carries the policy too", fullPolicy, quarterPolicy)
+	}
+
+	for _, row := range rows {
+		fc, err := ArmDFull.ContractFor(row)
+		if err != nil {
+			t.Fatalf("D-full contract for %s: %v", row, err)
+		}
+		qc, err := ArmDQuarter.ContractFor(row)
+		if err != nil {
+			t.Fatalf("D-quarter contract for %s: %v", row, err)
+		}
+		if fc != qc {
+			t.Errorf("row %s renders %q under D-full and %q under D-quarter; the contract is meant to be the "+
+				"constant in this study", row, fc, qc)
+		}
+	}
+
+	// The one difference, and it is on the victim alone.
+	for _, row := range rows {
+		fd, err := ArmDFull.DutyFor(row)
+		if err != nil {
+			t.Fatalf("D-full duty for %s: %v", row, err)
+		}
+		qd, err := ArmDQuarter.DutyFor(row)
+		if err != nil {
+			t.Fatalf("D-quarter duty for %s: %v", row, err)
+		}
+		switch row {
+		case VictimRow:
+			if fd != FullDuty || qd != QuarterDuty {
+				t.Errorf("the victim runs at %v under D-full and %v under D-quarter, want %v and %v",
+					fd, qd, FullDuty, QuarterDuty)
+			}
+		default:
+			if fd != FullDuty || qd != FullDuty {
+				t.Errorf("row %s idles under one of the arms (%v, %v); only the victim's occupancy is under "+
+					"test, and idling the others makes the difference unattributable", row, fd, qd)
+			}
+		}
+	}
+}
+
+// TestTheIdlingArmsUseTheIgnoringContract records why, because it is not arbitrary.
+//
+// A honouring victim stops in milliseconds, so its hold is shorter than a scrape interval and the observer
+// has nothing inside it. That is the defect that invalidated a measured run once already. The idling study
+// needs samples inside the hold, so it fixes the contract at the ignoring one.
+func TestTheIdlingArmsUseTheIgnoringContract(t *testing.T) {
+	for _, a := range []Arm{ArmDFull, ArmDQuarter} {
+		got, err := a.ContractFor(VictimRow)
+		if err != nil {
+			t.Fatalf("%s: %v", a, err)
+		}
+		if got != IgnoresSIGTERM {
+			t.Errorf("%s renders the victim as %q; a honouring victim's hold is shorter than a scrape "+
+				"interval and the observer sees nothing inside it", a, got)
+		}
+	}
+}
+
+// TestTheReclaimArmsAreUnchanged keeps the new arms from moving the old study.
+func TestTheReclaimArmsAreUnchanged(t *testing.T) {
+	for _, tc := range []struct {
+		arm      Arm
+		row      string
+		contract TerminationContract
+		duty     DutyCycle
+	}{
+		{ArmAHonor, VictimRow, HonorsSIGTERM, FullDuty},
+		{ArmAIgnore, VictimRow, IgnoresSIGTERM, FullDuty},
+		{ArmNRef, VictimRow, HonorsSIGTERM, FullDuty},
+		{ArmAIgnore, OwnRow, HonorsSIGTERM, FullDuty},
+		{ArmAIgnore, OwnerRow, HonorsSIGTERM, FullDuty},
+	} {
+		c, err := tc.arm.ContractFor(tc.row)
+		if err != nil {
+			t.Fatalf("%s/%s: %v", tc.arm, tc.row, err)
+		}
+		if c != tc.contract {
+			t.Errorf("%s/%s renders %q, want %q", tc.arm, tc.row, c, tc.contract)
+		}
+		d, err := tc.arm.DutyFor(tc.row)
+		if err != nil {
+			t.Fatalf("%s/%s duty: %v", tc.arm, tc.row, err)
+		}
+		if d != tc.duty {
+			t.Errorf("%s/%s runs at duty %v, want %v", tc.arm, tc.row, d, tc.duty)
+		}
+	}
+}

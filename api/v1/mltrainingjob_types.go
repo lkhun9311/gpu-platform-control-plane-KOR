@@ -187,6 +187,52 @@ type MLTrainingJobStatus struct {
 	// +optional
 	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
 
+	// Kueue가 이 job의 Workload를 admit한 시각이며, Kueue 자신이 찍은 condition의 시각을 그대로 가져온다.
+	//
+	// 기록 조건: admit은 됐고 아직 Running이 아닌 상태를 본 reconcile에서만 기록한다.
+	//
+	// 설계 근거: admission부터 running까지의 구간 내내 controller가 죽어 있었어도, 나중에 깨어나서
+	// Kueue의 시각 도장을 읽는 것 자체는 가능하다.
+	//
+	// 그때 그 값을 쓰면 아무도 지켜보지 않은 구간의 길이를 보고하는 셈이 되고, 그것이 queuelab의 원장이
+	// 거부하려고 존재하는 바로 그 결함이다.
+	//
+	// 그래서 이 필드가 있다는 것은 "admission이 일어났다"가 아니라 "그 구간을 관찰했다"는 뜻이다.
+	//
+	// +optional
+	AdmittedAt *metav1.Time `json:"admittedAt,omitempty"`
+
+	// 이 controller가 Job이 활성 Pod를 보고하는 것을 처음 본 시각이다.
+	//
+	// 이름이 곧 정의다. AdmittedAt과 달리 이것은 행동한 구성요소가 찍어 준 도장이 아니라 이 controller의
+	// 관찰이며, kubelet이 Pod를 띄운 시점과 이 reconcile이 그것을 본 시점 사이의 watch 지연을 안고 있다.
+	//
+	// 따라서 AdmitToRunningSeconds의 양 끝은 서로 다른 시계에서 읽힌다. queuelab이 두 시계로 보고하는
+	// 것과 같은 사정이고, 이유도 같다.
+	//
+	// +optional
+	RunningObservedAt *metav1.Time `json:"runningObservedAt,omitempty"`
+
+	// 테넌트가 quota를 가진 시점부터 그것을 실제로 쓰기 시작한 시점까지 기다린 시간이다.
+	//
+	// 설계 근거: quota를 산 쪽이 궁금해하는 양인데 이 플랫폼은 지금까지 한 번도 보고한 적이 없다.
+	//
+	// queuelab이 선점 상황에서 이 값을 쟀다. 선점당한 차용자가 SIGTERM을 존중했을 때 2.180초,
+	// 존중하지 않았을 때 31.213초였고, admission webhook이 terminationGracePeriodSeconds에 상한을
+	// 두는 근거가 이것이다.
+	//
+	// 최악의 경우에 상한만 걸어 두고 실제 값은 보고하지 않으면, 그 값을 치른 테넌트는 자기 청구서를
+	// 볼 방법이 없다.
+	//
+	// Go 문법 설명: 타입이 string인 이유는 값이 YAML을 그대로 왕복하게 하기 위해서다.
+	// RunManifest.matchTolerance가 string인 것과 같은 이유다.
+	//
+	// 구간을 관찰하지 못했으면 빈 문자열이고, 그 경우 왜 그런지는 AdmitToRunningObserved condition이
+	// 말한다. "없음"과 "0"이 같아 보여서는 안 된다.
+	//
+	// +optional
+	AdmitToRunningSeconds string `json:"admitToRunningSeconds,omitempty"`
+
 	// MLTrainingJob resource의 현재 상태 표현이다.
 	//
 	// 각 condition의 status는 True, False, Unknown 중 하나다.

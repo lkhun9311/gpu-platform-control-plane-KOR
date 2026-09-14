@@ -7,12 +7,19 @@ metadata:
   name: bert-finetune
   namespace: default
 spec:
+  # queue is the Kueue LocalQueue name (same namespace) this job is admitted through.
   queue: team-vision-queue
+  # image is the training container image.
   image: pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
+  # command overrides the container entrypoint.
   command:
     - python
     - train.py
+  # gpuClass is illustrative; locally it is backed by simulated capacity.
   gpuClass: l40s
+  # gpuCount is GPUs per pod (nvidia.com/gpu).
   gpuCount: 2
+  # parallelism is the batch/v1 Job parallelism (concurrent pods).
   parallelism: 2
+  # completions is the batch/v1 Job completions (successful pods required).
   completions: 2

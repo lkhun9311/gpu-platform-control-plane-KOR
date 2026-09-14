@@ -109,4 +109,35 @@ var (
 		},
 		[]string{"phase"},
 	)
+
+	// mlTrainingJobAdmitToRunningSeconds is how long a tenant waited between having quota and using it.
+	//
+	// A histogram rather than a counter because the interesting thing is the tail: a cohort where reclaim
+	// usually costs two seconds and occasionally costs two minutes is not the same platform as one where it
+	// always costs twenty, and a mean hides which one you are running.
+	//
+	// The buckets are chosen around the two numbers that already exist. queuelab measured 2.180 s when a
+	// preempted borrower honoured SIGTERM and 31.213 s when it ignored it, and the admission webhook caps
+	// terminationGracePeriodSeconds at 120. So the range that matters runs from about a second to about two
+	// minutes, and the buckets are placed to separate those three regimes rather than spread evenly.
+	mlTrainingJobAdmitToRunningSeconds = promauto.With(metrics.Registry).NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    metricPrefix + "mltrainingjob_admit_to_running_seconds",
+			Help:    "Seconds between Kueue admitting a training job and this controller observing it running.",
+			Buckets: []float64{0.5, 1, 2, 5, 10, 20, 30, 45, 60, 90, 120, 240},
+		},
+	)
+
+	// mlTrainingJobAdmitToRunningUnobservedTotal counts the jobs whose wait could not be measured.
+	//
+	// It exists because a quiet histogram has two causes that look identical: nothing ran, or everything ran
+	// and nothing was watched. A platform that cannot tell those apart reports "reclaim is fast" from an
+	// empty series, which is the failure this repository keeps finding in its own instruments.
+	mlTrainingJobAdmitToRunningUnobservedTotal = promauto.With(metrics.Registry).NewCounterVec(
+		prometheus.CounterOpts{
+			Name: metricPrefix + "mltrainingjob_admit_to_running_unobserved_total",
+			Help: "Training jobs seen running whose admission-to-running window this controller did not observe.",
+		},
+		[]string{"reason"},
+	)
 )

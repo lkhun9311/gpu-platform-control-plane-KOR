@@ -44,7 +44,7 @@ import (
 
 func main() {
 	var (
-		armFlag  = flag.String("arm", "", "arm: A-honor | A-ignore | N-ref")
+		armFlag  = flag.String("arm", "", "arm: A-honor | A-ignore | N-ref | D-full | D-quarter")
 		runID    = flag.String("runid", "", "unique run id (required, no default: a reused id can confound a run)")
 		worker   = flag.String("worker", "platform-worker", "node to dedicate to this run")
 		doseFlag = flag.String("dose", string(queuelab.DoseSelfCompleting),

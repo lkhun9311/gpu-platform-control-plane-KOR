@@ -46,10 +46,18 @@ type RunManifest struct {
 	// SchemaVersion pins the manifest shape, so a future incompatible change to this struct can
 	// be detected instead of silently misparsed.
 	SchemaVersion string `json:"schemaVersion"`
-	// Arm names which of the four pre-registered conditions this run measures.
+	// Study names the pre-registered experiment this run belongs to.
 	//
-	// Must be one of "R1", "off", "static-cap", "kv-aware" (design spec "The experiment: four
-	// conditions" section).
+	// It exists because arm names are not unique across experiments and never were: M5-b's "off" is
+	// the gateway with its guard disabled, and the price-of-protection run's control is the engine at
+	// its default batch budget with no gateway at all. Without this field the two produce rows a
+	// report cannot tell apart, and pooling them silently answers a question nobody asked.
+	//
+	// Empty means the evidence predates studies, and is read as StudyM5BGateway.
+	Study string `json:"study,omitempty"`
+	// Arm names which pre-registered condition of Study this run measures.
+	//
+	// The admissible values come from the study registry in study.go, not from a list here.
 	Arm string `json:"arm"`
 	// GatewayURL is the target the replay client sends requests to.
 	GatewayURL string `json:"gatewayURL"`
@@ -110,14 +118,6 @@ type RunManifest struct {
 	//
 	// It is frozen here so the report scores admitted-work over the same population the guard used, even if the paid pilot tuned the gateway's --admission-long-threshold.
 	LongThreshold int `json:"longThreshold,omitempty"`
-}
-
-// allowedArms is the set of Arm values the design's four conditions permit.
-var allowedArms = map[string]bool{
-	"R1":         true,
-	"off":        true,
-	"static-cap": true,
-	"kv-aware":   true,
 }
 
 // LoadManifest reads, validates, and returns the manifest at path.
@@ -194,8 +194,12 @@ func (m *RunManifest) validateFields() error {
 			m.PromptCorpusSHA, PromptCorpusSHA256)
 	}
 
-	if !allowedArms[m.Arm] {
-		return fmt.Errorf("arm %q is not one of the allowed arms (R1, off, static-cap, kv-aware)", m.Arm)
+	study, ok := LookupStudy(m.Study)
+	if !ok {
+		return fmt.Errorf("study %q is not registered; known studies are %s", m.Study, strings.Join(KnownStudyIDs(), ", "))
+	}
+	if !study.Admits(m.Arm) {
+		return fmt.Errorf("arm %q is not one of study %s's arms (%s)", m.Arm, study.ID, strings.Join(study.Arms, ", "))
 	}
 
 	if m.TimeoutMs <= 0 {

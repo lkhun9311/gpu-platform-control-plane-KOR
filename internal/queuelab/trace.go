@@ -55,6 +55,56 @@ type TrainingTraceRow struct {
 	GPUCount int `json:"gpuCount"`
 	// DurationSec is the uninterrupted service time; the sleeper runs this long unless preempted.
 	DurationSec int `json:"durationSec"`
+	// Duty is the fraction of its service time this row's workload spends computing, 0 meaning the default.
+	//
+	// It exists to make one reading decidable that the first hardware session could not decide. That session
+	// found reserved GPU-seconds and observed device-seconds agreeing to within a tenth of the run's floor,
+	// which sounds like reservation being a good proxy for use -- but the trace workload computes
+	// continuously by construction, so agreement was the only answer it could give. A row that holds its card
+	// and idles for a KNOWN fraction of its service turns that reading from "did they happen to agree" into
+	// "does the instrument recover a planted difference", which is the question the axis is for.
+	//
+	// Zero rather than one is the unset value because a zero-valued struct must render what this trace has
+	// always rendered. orFull maps it.
+	Duty DutyCycle `json:"duty,omitempty"`
+}
+
+// DutyCycle is the fraction of a row's service time spent computing, in (0, 1].
+//
+// A card is allocated to a Pod for the whole of its service whatever this is: allocation is Kubernetes'
+// answer and it does not consult the workload. The duty is what the DEVICE was doing inside that
+// allocation, which is exactly the difference between a reserved GPU-second and an observed device-second.
+type DutyCycle float64
+
+// FullDuty is the historical behaviour: compute for the whole service time.
+const FullDuty DutyCycle = 1
+
+// QuarterDuty is the planted difference the idling study asks the instrument to recover.
+//
+// A quarter rather than a half because the question is whether reservation and occupancy can be told apart
+// at all, and the answer is clearest when the gap is large against the run's own floor. It is not so small
+// that the victim's device work becomes hard to observe: at a quarter of a fifty-second hold the card is
+// still busy for about twelve seconds, which is many scrape intervals.
+const QuarterDuty DutyCycle = 0.25
+
+// orFull maps the zero value to FullDuty, so a trace row that says nothing renders what it always did.
+func (d DutyCycle) orFull() DutyCycle {
+	if d == 0 {
+		return FullDuty
+	}
+	return d
+}
+
+// validate refuses a duty the workload cannot honour, rather than clamping one.
+//
+// Clamping would let a trace ask for 1.5 and get 1.0, and the record would then report a duty the run did
+// not have. A refused trace is a trace nobody ran; a clamped one is a wrong number.
+func (d DutyCycle) validate() error {
+	if d <= 0 || d > 1 {
+		return fmt.Errorf("duty cycle %v is not in (0, 1]; a row that never computes cannot be told from one "+
+			"whose card was never observed, and a row above 1 is asking for more service than it has", float64(d))
+	}
+	return nil
 }
 
 // ReclaimScenario builds the trace for the reclaim study (Never vs Any).

@@ -41,12 +41,28 @@ const (
 	ArmAIgnore Arm = "A-ignore"
 	// ArmNRef is the no-reclamation reference, with workloads identical to A-honor.
 	ArmNRef Arm = "N-ref"
+	// ArmDFull and ArmDQuarter are the idling study, whose only axis is how much of its service the victim
+	// spends computing.
+	//
+	// They exist because the first hardware session could not decide the reading it was built to decide.
+	// Reserved GPU-seconds and observed device-seconds agreed to within a tenth of the run's floor, which
+	// sounds like reservation being a good proxy for use and is not evidence of it: the trace workload
+	// computes continuously by construction, so agreement was the only answer available. These two arms plant
+	// a difference and ask whether the instrument recovers it.
+	//
+	// The termination contract is FIXED across them, at the ignoring arm's, and that is the whole point of
+	// keeping this separate from the reclaim study. Two axes at once would give four cells and a session
+	// twice as long, and any difference would carry both. Here the contract is a constant and the duty is the
+	// only thing that moves. The ignoring contract is chosen rather than the honouring one because its hold
+	// is tens of seconds rather than milliseconds, so the observer has samples inside it.
+	ArmDFull    Arm = "D-full"
+	ArmDQuarter Arm = "D-quarter"
 )
 
 // PolicyVariant returns the ClusterQueue reclaimWithinCohort setting this arm applies.
 func (a Arm) PolicyVariant() (string, error) {
 	switch a {
-	case ArmAHonor, ArmAIgnore:
+	case ArmAHonor, ArmAIgnore, ArmDFull, ArmDQuarter:
 		return "Any", nil
 	case ArmNRef:
 		return "Never", nil
@@ -69,10 +85,41 @@ func (a Arm) ContractFor(rowName string) (TerminationContract, error) {
 	if _, err := a.PolicyVariant(); err != nil {
 		return "", err
 	}
-	if a == ArmAIgnore && rowName == VictimRow {
-		return IgnoresSIGTERM, nil
+	if rowName == VictimRow {
+		switch a {
+		// The idling arms hold the contract constant at the ignoring one, so the only thing that differs
+		// between them is the duty. A honouring victim would stop in milliseconds and leave the observer
+		// nothing to see inside the hold, which is the defect that invalidated a measured run once already.
+		case ArmAIgnore, ArmDFull, ArmDQuarter:
+			return IgnoresSIGTERM, nil
+		}
 	}
 	return HonorsSIGTERM, nil
+}
+
+// DutyFor returns the fraction of its service this arm's row spends computing.
+//
+// Per row for the reason ContractFor is per row: the treatment is the VICTIM's behaviour, and an arm-wide
+// duty would idle the owner and the co-tenant too. Their occupancy is not what any reading here is about,
+// and changing three manifests when one is meant to differ is how a difference stops being attributable.
+func (a Arm) DutyFor(rowName string) (DutyCycle, error) {
+	switch rowName {
+	case OwnRow, VictimRow, OwnerRow:
+	default:
+		return 0, fmt.Errorf("unknown trace row %q", rowName)
+	}
+	if _, err := a.PolicyVariant(); err != nil {
+		return 0, err
+	}
+	if rowName != VictimRow {
+		return FullDuty, nil
+	}
+	switch a {
+	case ArmDQuarter:
+		return QuarterDuty, nil
+	default:
+		return FullDuty, nil
+	}
 }
 
 // AssertCardinality checks that a reconstructed run has the shape the protocol declares.

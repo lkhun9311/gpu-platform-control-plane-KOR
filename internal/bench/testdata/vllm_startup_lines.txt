@@ -1,0 +1,49 @@
+# vLLM startup lines, captured verbatim from the 2026-09-04 paid microtest.
+#
+# These are the bytes the engine wrote, not a form anyone typed. They exist because a guard was
+# written against an INVENTED rendering of this output -- scheduling_policy='priority' with an
+# equals sign -- and its contract test fed it that same invention, so the test passed while the
+# pattern could not match anything the engine actually prints.
+#
+# image     vllm/vllm-openai@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967
+# model     Qwen/Qwen2.5-3B-Instruct
+# captured  2026-09-04, g5.xlarge Spot, hack/m5b-scheduler-microtest.sh
+# source    results.json, cells[].startup, gitignored because the run directory is 7 MB
+#
+# One block per cell. The cell header says what the runner ASKED for, so a test can assert that
+# what the engine reported agrees with it.
+
+[cell] max_num_batched_tokens=512 scheduling_policy=fcfs
+(APIServer pid=1) INFO 09-04 08:59:18 [api_utils.py:273] non-default args: {'model_tag': 'Qwen/Qwen2.5-3B-Instruct', 'model': 'Qwen/Qwen2.5-3B-Instruct', 'dtype': 'half', 'max_model_len': 16384, 'gpu_memory_utilization': 0.9, 'enable_prefix_caching': False, 'max_num_batched_tokens': 512, 'max_num_seqs': 64}
+(APIServer pid=1) INFO 09-04 09:01:09 [scheduler.py:242] Chunked prefill is enabled with max_num_batched_tokens=512.
+(EngineCore pid=84) INFO 09-04 09:04:04 [gpu_worker.py:563] Available KV cache memory: 13.28 GiB
+(EngineCore pid=84) INFO 09-04 09:04:04 [kv_cache_utils.py:2235] GPU KV cache size: 386,912 tokens
+
+[cell] max_num_batched_tokens=512 scheduling_policy=priority
+(APIServer pid=1) INFO 09-04 09:05:10 [api_utils.py:273] non-default args: {'model_tag': 'Qwen/Qwen2.5-3B-Instruct', 'model': 'Qwen/Qwen2.5-3B-Instruct', 'dtype': 'half', 'max_model_len': 16384, 'gpu_memory_utilization': 0.9, 'enable_prefix_caching': False, 'max_num_batched_tokens': 512, 'max_num_seqs': 64, 'scheduling_policy': 'priority'}
+(APIServer pid=1) INFO 09-04 09:05:28 [scheduler.py:242] Chunked prefill is enabled with max_num_batched_tokens=512.
+(EngineCore pid=83) INFO 09-04 09:06:12 [gpu_worker.py:563] Available KV cache memory: 13.28 GiB
+(EngineCore pid=83) INFO 09-04 09:06:12 [kv_cache_utils.py:2235] GPU KV cache size: 386,912 tokens
+
+[cell] max_num_batched_tokens=2048 scheduling_policy=fcfs
+(APIServer pid=1) INFO 09-04 09:06:58 [api_utils.py:273] non-default args: {'model_tag': 'Qwen/Qwen2.5-3B-Instruct', 'model': 'Qwen/Qwen2.5-3B-Instruct', 'dtype': 'half', 'max_model_len': 16384, 'gpu_memory_utilization': 0.9, 'enable_prefix_caching': False, 'max_num_batched_tokens': 2048, 'max_num_seqs': 64}
+(EngineCore pid=83) INFO 09-04 09:08:00 [gpu_worker.py:563] Available KV cache memory: 12.69 GiB
+(EngineCore pid=83) INFO 09-04 09:08:00 [kv_cache_utils.py:2235] GPU KV cache size: 369,680 tokens
+
+[cell] max_num_batched_tokens=2048 scheduling_policy=priority
+(APIServer pid=1) INFO 09-04 09:08:45 [api_utils.py:273] non-default args: {'model_tag': 'Qwen/Qwen2.5-3B-Instruct', 'model': 'Qwen/Qwen2.5-3B-Instruct', 'dtype': 'half', 'max_model_len': 16384, 'gpu_memory_utilization': 0.9, 'enable_prefix_caching': False, 'max_num_batched_tokens': 2048, 'max_num_seqs': 64, 'scheduling_policy': 'priority'}
+(EngineCore pid=83) INFO 09-04 09:09:47 [gpu_worker.py:563] Available KV cache memory: 12.69 GiB
+(EngineCore pid=83) INFO 09-04 09:09:47 [kv_cache_utils.py:2235] GPU KV cache size: 369,680 tokens
+
+[cell] max_num_batched_tokens=8192 scheduling_policy=fcfs
+(APIServer pid=1) INFO 09-04 09:10:33 [api_utils.py:273] non-default args: {'model_tag': 'Qwen/Qwen2.5-3B-Instruct', 'model': 'Qwen/Qwen2.5-3B-Instruct', 'dtype': 'half', 'max_model_len': 16384, 'gpu_memory_utilization': 0.9, 'enable_prefix_caching': False, 'max_num_batched_tokens': 8192, 'max_num_seqs': 64}
+(APIServer pid=1) INFO 09-04 09:10:50 [scheduler.py:242] Chunked prefill is enabled with max_num_batched_tokens=8192.
+(EngineCore pid=83) INFO 09-04 09:11:35 [gpu_worker.py:563] Available KV cache memory: 13.23 GiB
+(EngineCore pid=83) INFO 09-04 09:11:35 [kv_cache_utils.py:2235] GPU KV cache size: 385,216 tokens
+
+[cell] max_num_batched_tokens=8192 scheduling_policy=priority
+(APIServer pid=1) INFO 09-04 09:12:18 [api_utils.py:273] non-default args: {'model_tag': 'Qwen/Qwen2.5-3B-Instruct', 'model': 'Qwen/Qwen2.5-3B-Instruct', 'dtype': 'half', 'max_model_len': 16384, 'gpu_memory_utilization': 0.9, 'enable_prefix_caching': False, 'max_num_batched_tokens': 8192, 'max_num_seqs': 64, 'scheduling_policy': 'priority'}
+(APIServer pid=1) INFO 09-04 09:12:35 [scheduler.py:242] Chunked prefill is enabled with max_num_batched_tokens=8192.
+(EngineCore pid=82) INFO 09-04 09:13:21 [gpu_worker.py:563] Available KV cache memory: 13.23 GiB
+(EngineCore pid=82) INFO 09-04 09:13:21 [kv_cache_utils.py:2235] GPU KV cache size: 385,216 tokens
+

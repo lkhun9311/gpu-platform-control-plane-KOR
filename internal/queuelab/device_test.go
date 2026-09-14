@@ -82,10 +82,22 @@ func TestAnIdleCardDoesNotEstablishWork(t *testing.T) {
 	if ok, _ := EstablishesDeviceWork(o, SameWindowClaim("victim-uid", 10_000_000_000, 30_000_000_000)); ok {
 		t.Fatal("a single non-zero sample established that the device did work")
 	}
-	// And two inside the window do carry it, or the threshold would be a refusal of everything.
+	// Two ADJACENT busy samples are still one instant, because this observer scrapes faster than its source
+	// updates and the exporter serves a cached snapshot in between. This fixture samples every second, which
+	// is inside minBusySeparation, so these two can be one collection read twice.
+	//
+	// This is the case that was passing and should not have been. On real hardware every value in the
+	// victim's series repeated in pairs for exactly this reason.
 	o.Samples[21].UtilisationPercent = 60
+	if ok, why := EstablishesDeviceWork(o, SameWindowClaim("victim-uid", 10_000_000_000, 30_000_000_000)); ok {
+		t.Fatalf("two busy samples closer together than the observer's own source cadence established work: %s", why)
+	}
+	// And two far enough apart to be two collections do carry it, or the threshold would be a refusal of
+	// everything.
+	o.Samples[21].UtilisationPercent = 0
+	o.Samples[22].UtilisationPercent = 60
 	if ok, why := EstablishesDeviceWork(o, SameWindowClaim("victim-uid", 10_000_000_000, 30_000_000_000)); !ok {
-		t.Fatalf("two busy samples across the interval did not establish work: %s", why)
+		t.Fatalf("two busy samples a full separation apart did not establish work: %s", why)
 	}
 }
 
@@ -205,9 +217,13 @@ func TestAnObservationMustAdmitItsSourceWasDeclared(t *testing.T) {
 }
 
 // Two busy rows from ONE instant are a reading, not a state. DCGM emits duplicated device-wide series, and
-// MIG and label drift make that ordinary — so the count has to be over distinct times.
+// MIG and label drift make that ordinary — so the count cannot be over rows.
 //
-// Mutation that turns this red: count busy rows instead of distinct busy instants.
+// Distinct timestamps are not enough either, which TestAnIdleCardDoesNotEstablishWork covers: this observer
+// scrapes faster than the exporter collects, so one collection arrives at several distinct timestamps. The
+// count is over instants at least minBusySeparation apart.
+//
+// Mutation that turns this red: count busy rows instead of separated busy instants.
 func TestTwoBusyRowsFromOneInstantAreNotAState(t *testing.T) {
 	o := &DeviceObservation{
 		Observer: ObserverDCGM, ObserverIdentity: "dcgm@sha256:abc", Declared: true,
@@ -228,7 +244,7 @@ func TestTwoBusyRowsFromOneInstantAreNotAState(t *testing.T) {
 	if ok {
 		t.Fatal("two busy rows from one scrape established that the card was working")
 	}
-	if !strings.Contains(why, "ONE instant") {
+	if !strings.Contains(why, "separate instants") || !strings.Contains(why, "one collection read several times") {
 		t.Fatalf("the refusal does not say why one instant is not enough: %s", why)
 	}
 
@@ -363,5 +379,95 @@ func TestALabelInTheStaleMarginStillDefeatsAttribution(t *testing.T) {
 	})
 	if ok, why := EstablishesDeviceWork(far, SameWindowClaim("victim-uid", 10_000_000_000, 30_000_000_000)); !ok {
 		t.Fatalf("a label nine seconds before the window defeated attribution: %s", why)
+	}
+}
+
+// TestAnUnattributedRunDoesNotAccuseTheExporterOfBeingOff is the distinction a paid session found missing.
+//
+// A run on real hardware was refused with "an exporter with its kubernetes mapping off or its pod-resources
+// mount broken" while the same observation named nine distinct Pods across 667 of its 760 samples. The
+// mapping was plainly on, and the message sent an operator to fix a component that was working. An
+// unlabelled busy card alone does not establish a broken exporter; only an exporter that names nobody does.
+func TestAnUnattributedRunDoesNotAccuseTheExporterOfBeingOff(t *testing.T) {
+	// The observer watched the whole interval and attributed plenty -- to somebody else.
+	o := &DeviceObservation{
+		Observer:         ObserverDCGM,
+		ObserverIdentity: "nvcr.io/nvidia/k8s/dcgm-exporter@sha256:abc", Declared: true,
+		StartedNs:             0,
+		EndedNs:               40_000_000_000,
+		UnlabelledBusySamples: 3,
+	}
+	for at := int64(0); at <= 40_000_000_000; at += int64(time.Second) {
+		o.Samples = append(o.Samples, DeviceSample{
+			AtNs: at, DeviceUUID: "GPU-1234", PodUID: "someone-else", UtilisationPercent: 97,
+		})
+		o.Samples = append(o.Samples, DeviceSample{
+			AtNs: at, DeviceUUID: "GPU-5678", PodUID: "the-occupier", UtilisationPercent: 0,
+		})
+	}
+
+	ok, why := EstablishesDeviceWork(o, SameWindowClaim("victim-uid", 10_000_000_000, 30_000_000_000))
+	if ok {
+		t.Fatal("work was established for a Pod no sample ever named")
+	}
+	if strings.Contains(why, "kubernetes mapping off") || strings.Contains(why, "pod-resources mount broken") {
+		t.Errorf("the refusal blamed the exporter while that same exporter named two other Pods: %s", why)
+	}
+	if !strings.Contains(why, "is working") {
+		t.Errorf("the refusal does not say the mapping was working, which is the fact that rules the exporter out: %s", why)
+	}
+	if !strings.Contains(why, "not established") {
+		t.Errorf("the refusal names a cause it cannot support instead of declining to: %s", why)
+	}
+}
+
+// TestAnExporterThatNamesNobodyIsStillAccused keeps the accusation that IS supported.
+//
+// Full utilisation with nothing naming a tenant is what a broken kubernetes mapping looks like, and the
+// refusal must still send the operator to the exporter rather than to the workload.
+func TestAnExporterThatNamesNobodyIsStillAccused(t *testing.T) {
+	o := &DeviceObservation{
+		Observer:         ObserverDCGM,
+		ObserverIdentity: "nvcr.io/nvidia/k8s/dcgm-exporter@sha256:abc", Declared: true,
+		StartedNs:             0,
+		EndedNs:               40_000_000_000,
+		UnlabelledBusySamples: 40,
+	}
+
+	ok, why := EstablishesDeviceWork(o, SameWindowClaim("victim-uid", 10_000_000_000, 30_000_000_000))
+	if ok {
+		t.Fatal("work was established from an observation with no attributed sample at all")
+	}
+	if !strings.Contains(why, "kubernetes mapping off") {
+		t.Errorf("an exporter that named nobody while cards worked was not accused: %s", why)
+	}
+	if !strings.Contains(why, "Fix the observer, not the workload") {
+		t.Errorf("the refusal does not send the operator to the exporter: %s", why)
+	}
+}
+
+// TestACardNobodyUsedIsNotAnExporterFault is the third of the three, unchanged and still distinct.
+func TestACardNobodyUsedIsNotAnExporterFault(t *testing.T) {
+	o := &DeviceObservation{
+		Observer:         ObserverDCGM,
+		ObserverIdentity: "nvcr.io/nvidia/k8s/dcgm-exporter@sha256:abc", Declared: true,
+		StartedNs: 0,
+		EndedNs:   40_000_000_000,
+	}
+	for at := int64(0); at <= 40_000_000_000; at += int64(time.Second) {
+		o.Samples = append(o.Samples, DeviceSample{
+			AtNs: at, DeviceUUID: "GPU-1234", PodUID: "someone-else", UtilisationPercent: 0,
+		})
+	}
+
+	ok, why := EstablishesDeviceWork(o, SameWindowClaim("victim-uid", 10_000_000_000, 30_000_000_000))
+	if ok {
+		t.Fatal("work was established for a Pod nothing sampled")
+	}
+	if !strings.Contains(why, "is a reservation") {
+		t.Errorf("a device held by a Pod nothing sampled was not called a reservation: %s", why)
+	}
+	if strings.Contains(why, "kubernetes mapping off") {
+		t.Errorf("the exporter was blamed when no card was ever seen working: %s", why)
 	}
 }

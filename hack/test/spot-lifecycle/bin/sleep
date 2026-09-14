@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Records the wait and returns immediately, so a scenario that would take an hour of polling runs in
+# milliseconds. The duration is recorded because it is part of the behaviour under test: shortening a
+# backstop or a poll interval is a real change and has to show up in the transcript.
+set -uo pipefail
+printf 'sleep %s\n' "${1:-}" >> "$STUB_TRANSCRIPT"
+exit 0

@@ -320,12 +320,26 @@ secret_args=()
 api_keys=""
 premium_tenants=""
 policies=""
+# The engine-side priority map, derived from the SAME list as the keys and the policies.
+#
+# vLLM's priority scheduler reads a per-request integer and lower is more urgent, so premium is 0 and
+# everyone else is 5. It is derived rather than written out because a fifth hand-kept copy of the tenant
+# list is how the first two paid runs lost a quarter of their traffic to 401s and their probe tenants to
+# 403s -- and this copy would fail more quietly than either: a tenant missing from the priority map does
+# not error, it silently replays the control.
+#
+# Empty unless PRIORITIES=1. The engine must be running with --scheduling-policy=priority for the field to
+# mean anything, and an arm that ships priorities to an fcfs engine is a treatment arm that is not one.
+priorities=""
 for entry in "${TENANTS[@]}"; do
   tenant="${entry%%:*}"; rest="${entry#*:}"; key="${rest%%:*}"; tier="${rest#*:}"
   secret_args+=("--from-literal=$key=$tenant")
   api_keys="${api_keys:+$api_keys,}$tenant=$key"
   if [ "$tier" = "premium" ]; then
     premium_tenants="${premium_tenants:+$premium_tenants,}$tenant"
+    priorities="${priorities:+$priorities,}$tenant=0"
+  else
+    priorities="${priorities:+$priorities,}$tenant=5"
   fi
   annotations=""
   if [ -n "$tier" ]; then
@@ -454,6 +468,31 @@ say "            engine  $ENGINE_IMAGE"
     || echo "(no matching startup lines; the pod may have been restarted since)"
 } > "$OUT/engine-config.txt" 2>&1 || true
 say "engine configuration recorded to engine-config.txt"
+
+# A priority arm against an fcfs engine is a treatment arm that is not one.
+#
+# vLLM silently accepts and ignores the per-request priority field under its default fcfs policy: every
+# request is served, every row looks healthy, and the arm reproduces the control exactly. That failure is
+# invisible in the evidence and would only surface as "the treatment had no effect" -- the most expensive
+# wrong conclusion this study could reach. So the claim is checked against the engine's own startup log
+# rather than against what we believe we launched it with.
+#
+# The pattern is written against what vLLM ACTUALLY prints, which is neither of the two forms an earlier
+# version of it assumed. The engine writes its resolved settings as a Python dict:
+#
+#   non-default args: {... 'max_num_batched_tokens': 512, 'max_num_seqs': 64, 'scheduling_policy': 'priority'}
+#
+# with a colon and a quote, not an equals sign. The old pattern required `scheduling_policy=` and so
+# matched nothing the engine emits -- it survived only because engine-config.txt also carries the
+# deployment argv, and it would have refused a correctly configured engine the moment the argv was not
+# available, which is exactly the case for a runner that reads docker logs. The separator is therefore
+# matched as "one to four non-alphanumeric characters", which covers the dict form, the equals form and
+# both flag forms without depending on which one a given vLLM version chooses.
+if [ "${PRIORITIES:-0}" = "1" ]; then
+  grep -qiE "scheduling[-_]policy[^a-z0-9]{1,4}priority" "$OUT/engine-config.txt" \
+    || fail "PRIORITIES=1 but the engine did not report the priority scheduling policy in its startup configuration; every request would carry a priority field the scheduler ignores, and the arm would silently replay the control"
+  say "priority scheduling confirmed in the engine's own startup configuration"
+fi
 
 say "generate the shared trace once"
 "$WORK/benchharness" gen-trace --seed 7 --duration-ms "$DURATION_MS" --rate "$RATE" \
@@ -585,10 +624,15 @@ for rep in $(seq 1 "$REPS"); do
       --gateway-sha "$GW_SHA" --gateway-image "$GW_IMAGE" --engine-image "$ENGINE_IMAGE" \
       --trace-out "$OUT/trace-$arm-$rep.jsonl" --manifest-out "$OUT/manifest-$arm-$rep.yaml" \
       || fail "gen-trace $arm"
+    prio_args=()
+    if [ "${PRIORITIES:-0}" = "1" ]; then
+      prio_args=(--priorities "$priorities")
+    fi
     "$WORK/benchharness" replay --manifest "$OUT/manifest-$arm-$rep.yaml" \
       --require-provenance \
       --target "http://127.0.0.1:18080" \
       --api-keys "$api_keys" \
+      "${prio_args[@]}" \
       --raw-out "$OUT/raw-$arm-$rep.jsonl" || fail "replay $arm"
     [ -s "$OUT/raw-$arm-$rep.jsonl" ] || fail "no raw evidence for $arm rep $rep"
     say "  $(wc -l < "$OUT/raw-$arm-$rep.jsonl") rows recorded"

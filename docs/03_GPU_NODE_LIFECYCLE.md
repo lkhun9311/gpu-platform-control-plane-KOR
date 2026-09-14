@@ -1,7 +1,11 @@
 # GPU Node Lifecycle
 
 > **Status (2026-08-07): built** — but the CR is hand-created (no automated intake pipeline creates it),
-> and there is **no GPU-specific fault detection**: no DCGM, Xid, or ECC anywhere in the Go tree (verified:
+> and there is **no GPU-specific fault detection in the health path**: nothing DCGM, Xid or ECC reports
+> reaches `NodeHealth`. Xid and ECC have no code at all. DCGM does — a utilisation reader and an exporter
+> deployment the queuelab uses to tell a reserved GPU-second from an observed one — but it is a measurement
+> input, not a health signal, and it has never been pointed at a real card. The line below was written when
+> the first half of that was true of DCGM as well (verified:
 > zero occurrences). The reconciler observes the Kubernetes Node `Ready` condition and applies/removes a
 > taint on degradation, with finalizer cleanup. The richer intake pipeline, conditions, and metrics
 > described below (DCGM, fio, iperf3, NCCL) are target design only — not implemented. No GPU in this project

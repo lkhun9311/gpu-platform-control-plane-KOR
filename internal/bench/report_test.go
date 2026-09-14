@@ -408,13 +408,40 @@ var _ = Describe("a threshold probe the gateway never evaluated", func() {
 	})
 
 	It("voids the section rather than reporting a threshold result", func() {
-		out := FormatReport([]ArmSummary{probe(403)}, Checks{}, 0.05)
+		out := FormatReport([]ArmSummary{probe(403)}, &Checks{}, 0.05)
 		Expect(out).To(ContainSubstring("VOID"))
 	})
 
 	It("leaves the section standing when the probes were actually evaluated", func() {
-		out := FormatReport([]ArmSummary{probe(200)}, Checks{}, 0.05)
+		out := FormatReport([]ArmSummary{probe(200)}, &Checks{}, 0.05)
 		Expect(out).NotTo(ContainSubstring("VOID"))
+	})
+})
+
+// A report for a study whose readings are not implemented must not read as a study that failed them.
+//
+// The price-of-protection pilot produced exactly this page: three lines of `0.000 FAIL` under
+// "Pre-registered checks", then "VERDICT: not all checks passed", for a study whose criteria the binary had
+// never evaluated. The caller was doing the right thing -- it passed an empty Checks and warned on stderr --
+// and an empty Checks is indistinguishable from a run that failed everything. Hence the pointer.
+//
+// Mutation that turns this red: make FormatReport treat a nil checks as Checks{} and render it.
+var _ = Describe("a report with no criteria to evaluate", func() {
+	It("prints no verdict and no check table", func() {
+		out := FormatReport([]ArmSummary{{Arm: "default-fcfs", TailSampleSize: 500}}, nil, 0.05)
+		Expect(out).NotTo(ContainSubstring("VERDICT"))
+		Expect(out).NotTo(ContainSubstring("absolute protection"))
+		Expect(out).NotTo(ContainSubstring("FAIL"))
+	})
+
+	It("says the checks do not apply, rather than staying silent about them", func() {
+		out := FormatReport([]ArmSummary{{Arm: "default-fcfs", TailSampleSize: 500}}, nil, 0.05)
+		Expect(out).To(ContainSubstring("NOT APPLICABLE"))
+	})
+
+	It("still prints the measurements, which are what the run bought", func() {
+		out := FormatReport([]ArmSummary{{Arm: "default-fcfs", TailSampleSize: 500}}, nil, 0.05)
+		Expect(out).To(ContainSubstring("default-fcfs"))
 	})
 })
 
@@ -592,5 +619,70 @@ var _ = Describe("the admitted-work fraction over exact tokens", func() {
 		// disagreement means the trace was stamped against a different tokenizer, or a different prompt ran.
 		s := Summarize("static-cap", []RawRow{row(1, 10000, 7695, 6000, 200)})
 		Expect(s.ExactTokensContradicted).To(Equal(1))
+	})
+})
+
+var _ = Describe("what protection costs", func() {
+	// The report answered one question -- did the premium tail survive -- and every check was a TTFT ratio.
+	// Re-reading the paid run's raw rows showed what that misses: static-cap held the tail at the isolated
+	// arm's latency AND at the isolated arm's throughput, 46.3 output tokens per second against 46.4. It did
+	// not make the engine efficient; it threw the long tenant's work away. The unprotected arm was 24 percent
+	// faster in aggregate.
+	//
+	// A protection result without that number is half an answer, and the raw rows have carried it all along.
+	row := func(i int, tenant string, noisy bool, outTokens int, ttftMs, e2eMs float64) RawRow {
+		base := int64(1_000_000_000 + i*10_000_000)
+		return RawRow{
+			Index: i, Tenant: tenant, IsNoisy: noisy, SendUnixNanos: base,
+			FirstTokenUnixNanos: base + int64(ttftMs*1e6),
+			EndUnixNanos:        base + int64(e2eMs*1e6),
+			EstInputTokens:      50, OutputTokens: outTokens, HTTPStatus: 200, LongThreshold: 4096,
+		}
+	}
+
+	It("reports aggregate output throughput over the wall clock the run occupied", func() {
+		// Two requests a second apart, 10 output tokens each: 20 tokens over a 1.01 s span.
+		s := Summarize("off", []RawRow{
+			row(1, "premium-1", false, 10, 10, 20),
+			row(101, "premium-1", false, 10, 10, 20),
+		})
+		Expect(s.OutputTokens).To(Equal(int64(20)))
+		Expect(s.OutputTokensPerSecond).To(BeNumerically("~", 20/1.01, 0.5))
+	})
+
+	It("reports the time between tokens, which a TTFT ratio cannot see", func() {
+		// 11 output tokens, first at 10 ms, last at 110 ms: 100 ms spread over 10 gaps.
+		s := Summarize("off", []RawRow{row(1, "premium-1", false, 11, 10, 110)})
+		Expect(s.TPOTMsP50).To(BeNumerically("~", 10, 0.01))
+	})
+
+	It("reports each tenant's share of the tokens actually served", func() {
+		// The fairness question the arms never asked: protection that works by discarding one tenant's work
+		// looks identical to protection that works, until the shares are printed.
+		s := Summarize("off", []RawRow{
+			row(1, "premium-1", false, 30, 10, 20),
+			row(2, "standard-noisy", true, 10, 10, 20),
+		})
+		Expect(s.OutputTokensByTenant["premium-1"]).To(Equal(int64(30)))
+		Expect(s.OutputTokensByTenant["standard-noisy"]).To(Equal(int64(10)))
+	})
+
+	// The row that carries tokens AND a failing status is the one that matters here.
+	//
+	// A shed request carries zero tokens, so asserting on it proves nothing -- the tally is unchanged whether
+	// the status is checked or not. A stream that emitted tokens and then timed out is the real case: the
+	// engine did produce that work, but the client never received a usable answer, and counting it would
+	// credit an arm for output that was thrown away.
+	It("counts no tokens for a request that produced some and then failed", func() {
+		s := Summarize("off", []RawRow{
+			row(1, "premium-1", false, 10, 10, 20),
+			{
+				Index: 2, Tenant: "premium-1", SendUnixNanos: 1_010_000_000,
+				FirstTokenUnixNanos: 1_020_000_000, EndUnixNanos: 1_120_000_000,
+				HTTPStatus: 504, ErrorKind: "timeout", OutputTokens: 40,
+			},
+		})
+		Expect(s.OutputTokens).To(Equal(int64(10)))
+		Expect(s.OutputTokensByTenant["premium-1"]).To(Equal(int64(10)))
 	})
 })

@@ -348,3 +348,21 @@ run on it. Its record can never be admissible.
 
 Each record carries the verdict, the claims that produced it, the ownership window, the qualification and the
 full ledger, so the figures above can be re-derived from the file rather than taken from this page.
+
+## The banner came off later, on hardware
+
+This page reports kind-cluster runs, and the `device: NOT OBSERVED` line above is true of them: every
+GPU-second here is a second of reservation, and nothing on this page changes.
+
+Session `qlgpu-20260906-032038` later ran the same protocol on four A10Gs. Eight runs, all accepted by
+`-require-device`, and the comparison prints without that line. The numbers held:
+
+| | this page, kind | on four A10Gs |
+| --------------------- | --------------: | ------------: |
+| owner wait difference | 29.0 s | 28.8 s |
+| GPU-second difference | 30.0 | 30.0 |
+| resolution floor | 5.906 s | 6.546 s |
+
+So the separation here was not an artifact of the fake device plugin's scheduling, which is the question an
+unobserved device leaves open. The full report is in
+[the pre-registration's Results section](../docs/superpowers/specs/2026-09-05-the-device-was-never-observed.md).

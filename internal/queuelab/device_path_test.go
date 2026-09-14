@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -37,6 +39,16 @@ func buildFakeCUDA(t *testing.T) string {
 
 // runWorkload executes the SHIPPED command with the fake driver on the library path.
 func runWorkload(t *testing.T, libDir string, env []string, seconds, arm string) (string, int) {
+	return runWorkloadAtDuty(t, libDir, env, seconds, arm, "1")
+}
+
+// runWorkloadAtDuty is the same, with the workload's third argument spelled out.
+//
+// The trailing arguments are replaced by POSITION FROM THE END, and there are three of them now. The
+// two-argument version of this helper overwrote the last two and, when duty was added, silently handed the
+// arm string to float() -- so every device-path test failed with a ValueError rather than with anything about
+// the device. Naming all three keeps the helper honest about what the command's shape is.
+func runWorkloadAtDuty(t *testing.T, libDir string, env []string, seconds, arm, duty string) (string, int) {
 	t.Helper()
 	python, err := exec.LookPath("python3")
 	if err != nil {
@@ -49,7 +61,10 @@ func runWorkload(t *testing.T, libDir string, env []string, seconds, arm string)
 		t.Fatalf("render: %v", err)
 	}
 	args := append([]string{}, job.Spec.Command[1:]...)
-	args[len(args)-2], args[len(args)-1] = seconds, arm
+	if len(args) < 5 {
+		t.Fatalf("the rendered command has %d arguments after python3; this helper replaces three", len(args))
+	}
+	args[len(args)-3], args[len(args)-2], args[len(args)-1] = seconds, arm, duty
 	cmd := exec.Command(python, args...)
 	cmd.Env = append(append(os.Environ(), "LD_LIBRARY_PATH="+libDir), env...)
 	out, err := cmd.CombinedOutput()
@@ -95,7 +110,7 @@ func TestTheWorkloadsDevicePathRunsAgainstAFakeDriver(t *testing.T) {
 		t.Fatalf("the device path exited %d:\n%s", code, out)
 	}
 	final := lastLine(out)
-	iters, kind, device := ReportFromMessage(strings.TrimSpace(strings.TrimPrefix(final, "finished ")))
+	iters, kind, device, _ := ReportFromMessage(strings.TrimSpace(strings.TrimPrefix(final, "finished ")))
 	if iters == nil {
 		t.Fatalf("the device path left no readable report: %q\n%s", final, out)
 	}
@@ -124,7 +139,7 @@ func TestEachDriverRefusalProducesItsOwnToken(t *testing.T) {
 		t.Run(tc.symbol, func(t *testing.T) {
 			out, _ := runWorkload(t, lib, []string{"SHIM_FAIL_AT=" + tc.symbol}, "1", "ignore")
 			final := strings.TrimSpace(strings.TrimPrefix(lastLine(out), "finished "))
-			_, kind, device := ReportFromMessage(final)
+			_, kind, device, _ := ReportFromMessage(final)
 			if device != tc.token {
 				t.Fatalf("a driver refusing %s reported dev=%q, want %q\n%s", tc.symbol, device, tc.token, out)
 			}
@@ -141,7 +156,7 @@ func TestEachDriverRefusalProducesItsOwnToken(t *testing.T) {
 	// path to a non-zero exit from the loop rather than from the handler.
 	out, code := runWorkload(t, lib, []string{"SHIM_FAIL_LAUNCH_AFTER=3"}, "5", "ignore")
 	final := strings.TrimSpace(strings.TrimPrefix(lastLine(out), "aborted "))
-	_, kind, device := ReportFromMessage(final)
+	_, kind, device, _ := ReportFromMessage(final)
 	if kind != KindCUDAFMA || device != "launch-failed-midrun" {
 		t.Fatalf("a mid-run launch failure reported kind=%q dev=%q\n%s", kind, device, out)
 	}
@@ -238,4 +253,117 @@ func TestTheEmbeddedPTXWasCompiled(t *testing.T) {
 		t.Fatal("the verification names no ptxas, so nobody can say which assembler accepted this kernel")
 	}
 	t.Logf("PTX %s... compiled for %v by %s", sum[:16], att.Targets, att.PTXASVersion)
+}
+
+// TestDutyReachesTheDevicePathAndNotJustTheFallback measures the knob where it has to work.
+//
+// The duty cycle exists so a run can hold a card and idle, which is the only way to tell a reserved
+// GPU-second from an observed device-second. A CPU-path check cannot show that: the fallback loop is Python
+// arithmetic and touches no driver. This runs the DEVICE branch against the shim, where every iteration is a
+// real cuLaunchKernel followed by cuCtxSynchronize, and checks that halving the declared duty roughly halves
+// the launches while the context and the allocation stay open throughout -- which is what "holding the card"
+// means.
+//
+// The tolerance is wide because the idle phase is a whole second and a launch is microseconds against this
+// shim, so the boundary quantises. What is under test is that the duty decides, not that it is exact.
+func TestDutyReachesTheDevicePathAndNotJustTheFallback(t *testing.T) {
+	lib := buildFakeCUDA(t)
+
+	// The window is a whole number of the workload's OWN periods, read from the script rather than assumed.
+	//
+	// It used to be a flat four seconds, which was fine while the period was one second and wrong the moment
+	// it became 2.6: four seconds holds one and a half periods, the last one is truncated mid-work, and half
+	// duty measured 0.81 of full on CI instead of 0.5. The threshold was not too tight -- the window was not
+	// a multiple of the thing being measured. Two whole periods contribute exactly duty*PERIOD of work each,
+	// so there is no boundary left to be wrong about.
+	//
+	// Passed as a DECIMAL, not rounded up to a whole second. Rounding 5.2 to 6 put a third of a period on the
+	// end and half duty measured 0.58 instead of 0.5 -- a smaller version of the same defect, in the line
+	// written to fix it. The workload parses its duration as a float.
+	seconds := strconv.FormatFloat(2*workloadPeriod(t), 'f', -1, 64)
+
+	launches := func(duty string) int {
+		t.Helper()
+		out, code := runWorkloadAtDuty(t, lib, nil, seconds, "ignore", duty)
+		if code != 0 {
+			t.Fatalf("duty %s: the device path exited %d:\n%s", duty, code, out)
+		}
+		final := lastLine(out)
+		iters, kind, device, _ := ReportFromMessage(strings.TrimSpace(strings.TrimPrefix(final, "finished ")))
+		if iters == nil {
+			t.Fatalf("duty %s: no readable report: %q", duty, final)
+		}
+		if kind != KindCUDAFMA || device != DeviceOK {
+			t.Fatalf("duty %s: ran kind=%q device=%q, so this measured the fallback rather than the device",
+				duty, kind, device)
+		}
+		return *iters
+	}
+
+	// Judged by ORDER rather than by a ratio against a target.
+	//
+	// The first version required half duty to land within [0.35, 0.65] of full, from one local measurement.
+	// CI returned 0.68 and the run went red. The tolerance was not merely too tight: iterations per second is
+	// not constant between the two runs. Full duty hammers a shared runner for the whole interval and gets
+	// throttled and descheduled; half duty rests for half of it and goes faster while it is awake, so the
+	// ratio drifts upward for a reason that has nothing to do with the knob.
+	//
+	// What the knob has to do is order the three, and by a margin an ignored argument could not produce: a
+	// workload that read the duty and discarded it returns three roughly equal counts.
+	full := launches("1")
+	half := launches("0.5")
+	quarter := launches("0.25")
+	if full == 0 {
+		t.Fatal("the device path launched nothing at full duty")
+	}
+	if half >= full*4/5 {
+		t.Errorf("half duty launched %d kernels against %d at full duty; that is not a workload that idled "+
+			"for half its service", half, full)
+	}
+	if quarter >= half {
+		t.Errorf("quarter duty launched %d kernels and half duty %d; the declared duty does not order them",
+			quarter, half)
+	}
+}
+
+// TestTheWorkloadWritesTheDutyThisPackageParses closes the language boundary for the fourth field.
+//
+// The parser above is only as good as the sentence it is fed. This runs the embedded script against the fake
+// CUDA shim at a declared duty and parses its real termination message with the real parser, so a workload
+// that stopped reporting the field -- or reported it in another spelling -- fails here rather than at the
+// point where a session is being paid for.
+func TestTheWorkloadWritesTheDutyThisPackageParses(t *testing.T) {
+	lib := buildFakeCUDA(t)
+	out, code := runWorkloadAtDuty(t, lib, nil, "3", "ignore", "0.5")
+	if code != 0 {
+		t.Fatalf("the device path exited %d:\n%s", code, out)
+	}
+	final := strings.TrimSpace(strings.TrimPrefix(lastLine(out), "finished "))
+	iters, kind, device, duty := ReportFromMessage(final)
+	if iters == nil {
+		t.Fatalf("this package cannot parse the message its own workload wrote: %q", final)
+	}
+	if kind != KindCUDAFMA || device != DeviceOK {
+		t.Fatalf("kind=%q device=%q, so this measured the fallback rather than the device", kind, device)
+	}
+	if duty != 0.5 {
+		t.Errorf("the workload ran at a declared 0.5 and reported %v", duty)
+	}
+}
+
+// workloadPeriod reads the duty cycle's period out of the workload the tests actually run.
+//
+// Tests that depend on it derive it rather than restating it, because a period changed in one place and
+// restated in another is a test measuring a window that no longer contains what it thinks it does.
+func workloadPeriod(t *testing.T) float64 {
+	t.Helper()
+	m := regexp.MustCompile(`(?m)^PERIOD=([0-9.]+)$`).FindStringSubmatch(workloadScript)
+	if m == nil {
+		t.Fatal("the workload declares no PERIOD, so a test window cannot be sized from it")
+	}
+	v, err := strconv.ParseFloat(m[1], 64)
+	if err != nil || v <= 0 {
+		t.Fatalf("PERIOD=%q is not a usable period", m[1])
+	}
+	return v
 }

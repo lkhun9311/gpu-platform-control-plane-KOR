@@ -4,7 +4,7 @@
 > renumbered from M6 when training admission was promoted to M6, 2026-07-04). No ledger table, schema, or
 > projector for the tables below exists in this repository today. (A separate, unrelated event ledger lives
 > inside the queuelab measurement lab — `internal/queuelab/ledger.go` — but it is not this ledger and does
-> not implement any of the tables below.) No GPU in this project is real.
+> not implement any of the tables below.) Every GPU in the kind clusters is simulated by a fake device plugin. The GPUs in the two paid EC2 sessions were real.
 
 A small operations ledger records what the platform did, as durable evidence. It is deliberately **not** a full MLOps store — GPU-infra operations tracking only.
 

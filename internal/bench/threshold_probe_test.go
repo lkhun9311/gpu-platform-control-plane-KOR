@@ -118,7 +118,7 @@ func TestSummarizeFillsTheProbeTallyFromTheRows(t *testing.T) {
 
 // A report built from traffic that never approaches the threshold must SAY so rather than look complete.
 func TestAReportWithoutProbesSaysTheThresholdWasNotTested(t *testing.T) {
-	out := FormatReport([]ArmSummary{{Arm: "kv-aware", TailSampleSize: 500}}, Checks{}, 0.05)
+	out := FormatReport([]ArmSummary{{Arm: "kv-aware", TailSampleSize: 500}}, &Checks{}, 0.05)
 	if !strings.Contains(out, "NOT TESTED") {
 		t.Error("a report with no probe tenants does not say the threshold was untested; a reader would take " +
 			"the configured value as evidenced when any value in a wide range would have produced this run")
@@ -134,7 +134,7 @@ func TestAReportWithProbesShowsBothSidesOfTheBoundary(t *testing.T) {
 			ProbeUnderTenant: {Total: 50, Rejected: 0, EstInputTokens: 4095},
 			ProbeOverTenant:  {Total: 50, Rejected: 47, EstInputTokens: 4096},
 		},
-	}}, Checks{}, 0.05)
+	}}, &Checks{}, 0.05)
 
 	if strings.Contains(out, "NOT TESTED") {
 		t.Error("the report claims the threshold was untested while carrying probe outcomes")

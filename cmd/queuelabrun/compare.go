@@ -84,10 +84,18 @@ type armSummary struct {
 	// OwnerWaitRuns is how many of them restored their owner at all. The count is carried rather than implied
 	// because a mean over a subset of the arm is a different statistic from a mean over the arm, and the run
 	// where the owner never came back is the one a reader most needs to know about.
-	OwnerWaitSecondsMean float64 `json:"ownerWaitSecondsMean,omitempty"`
-	OwnerWaitSecondsMin  float64 `json:"ownerWaitSecondsMin,omitempty"`
-	OwnerWaitSecondsMax  float64 `json:"ownerWaitSecondsMax,omitempty"`
-	OwnerWaitRuns        int     `json:"ownerWaitRuns"`
+	// DutyCycle is the fraction of its service this arm's workload reported computing for, and is absent when
+	// its records carry none. Every record in an arm agrees on it -- compareRecords refuses an arm whose runs
+	// do not -- so one value describes the arm.
+	//
+	// It is published because two arms that idled differently are not two readings of one experiment. A
+	// GPU-second means something different in each, and a reader comparing their waste has to be able to see
+	// that before believing the difference is about the thing the arms are named for.
+	DutyCycle            *float64 `json:"dutyCycle,omitempty"`
+	OwnerWaitSecondsMean float64  `json:"ownerWaitSecondsMean,omitempty"`
+	OwnerWaitSecondsMin  float64  `json:"ownerWaitSecondsMin,omitempty"`
+	OwnerWaitSecondsMax  float64  `json:"ownerWaitSecondsMax,omitempty"`
+	OwnerWaitRuns        int      `json:"ownerWaitRuns"`
 	// FloorSeconds is the coarsest resolution among THIS arm's runs. It is per-arm because a difference
 	// between two arms carries both of their errors, and they can be opposite-signed: the resolution of the
 	// difference is the SUM of the two, never the larger. Taking the larger bounds one side and forgets the
@@ -151,6 +159,23 @@ func compareRecords(recs []runRecord) (comparison, error) {
 	if len(byArm) < 2 {
 		return comparison{}, fmt.Errorf("every record is arm %q: there is nothing to compare", recs[0].Arm)
 	}
+	// An arm is one experiment, and the duty cycle is part of what that experiment is.
+	//
+	// Averaging a run that computed throughout with one that idled for three quarters of its service produces
+	// a mean that describes neither, and the arm's waste figure is what every finding below is built on. This
+	// is the same refusal the dose guard above makes and for the same reason: mixing two regimes gives a
+	// number that answers no single question. A duty difference BETWEEN arms is legitimate -- it is the axis
+	// the reading exists for -- so it is reported rather than refused.
+	for _, a := range byArm {
+		first := a[0]
+		for _, r := range a[1:] {
+			if !sameDuty(dutyOf(first), dutyOf(r)) {
+				return comparison{}, fmt.Errorf("runs %q and %q are both arm %q and report duty cycles %s and "+
+					"%s: a GPU-second means something different in each, so their mean describes neither",
+					first.RunID, r.RunID, first.Arm, dutyText(dutyOf(first)), dutyText(dutyOf(r)))
+			}
+		}
+	}
 
 	floorNs, bounded := pooledFloorNs(recs)
 	c := comparison{
@@ -182,6 +207,46 @@ func compareRecords(recs []runRecord) (comparison, error) {
 		}
 	}
 	return c, nil
+}
+
+// armDuties reports how each arm idled and whether they differ.
+func armDuties(arms []armSummary) (string, bool) {
+	parts := make([]string, 0, len(arms))
+	mixed := false
+	for i, a := range arms {
+		parts = append(parts, fmt.Sprintf("%s=%s", a.Arm, dutyText(a.DutyCycle)))
+		if i > 0 && !sameDuty(a.DutyCycle, arms[0].DutyCycle) {
+			mixed = true
+		}
+	}
+	return strings.Join(parts, ", "), mixed
+}
+
+// dutyOf is the duty this record's workload reported, or nil when it reported none.
+func dutyOf(r runRecord) *float64 {
+	if r.Measurement == nil {
+		return nil
+	}
+	return r.Measurement.Workload.DutyCycle
+}
+
+// sameDuty treats two absences as equal and an absence as different from any value.
+//
+// An absent duty is a record from a build whose workload could only compute continuously. That is not the
+// same fact as a record that measured and reported 1.0, and the difference is worth keeping: one is a run
+// this build can vouch for, the other is a run predating the axis.
+func sameDuty(a, b *float64) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func dutyText(d *float64) string {
+	if d == nil {
+		return "none (a record from before the axis existed)"
+	}
+	return fmt.Sprintf("%g", *d)
 }
 
 // pooledDeviceEvidence is the weakest axis among the contributors, for the same reason the floor is the
@@ -263,9 +328,11 @@ func armsInterleaveBy(recs []runRecord, key func(runRecord) string) bool {
 
 // summariseArm reduces one arm's runs to what a comparison may say about them.
 func summariseArm(arm string, recs []runRecord) armSummary {
+	// Every record here agrees on the duty, because compareRecords refused the set otherwise.
 	sort.Slice(recs, func(i, j int) bool { return recs[i].StartedAt < recs[j].StartedAt })
 	s := armSummary{
 		Arm:                 arm,
+		DutyCycle:           dutyOf(recs[0]),
 		N:                   len(recs),
 		WastedGPUSecondsMin: recs[0].Measurement.WastedGPUSeconds,
 		WastedGPUSecondsMax: recs[0].Measurement.WastedGPUSeconds,
@@ -458,6 +525,16 @@ func renderComparison(c comparison) string {
 		b.WriteString("device: NOT OBSERVED -- every GPU-second below is a second of RESERVATION. No run " +
 			"behind this comparison established that a device did work, so nothing here is a statement " +
 			"about GPU computation\n")
+	}
+	// Said once, above the arms, when they did not idle the same amount.
+	//
+	// A reader scanning two waste figures will attribute their difference to the thing the arms are named
+	// for. If one arm held its card idle for three quarters of its service and the other did not, that is
+	// where the difference comes from and the names are a distraction. It is not a refusal -- varying the
+	// duty is a legitimate experiment, and the one reading 2 exists for -- but it cannot be silent.
+	if d, mixed := armDuties(c.Arms); mixed {
+		fmt.Fprintf(&b, "DUTY DIFFERS ACROSS ARMS (%s): the arms did not hold their cards idle for the same "+
+			"share of their service, so a GPU-second is not the same quantity in each\n", d)
 	}
 	for _, a := range c.Arms {
 		fmt.Fprintf(&b, "  %-9s n=%d waste mean=%.3f min=%.3f max=%.3f runs=%s\n    %s .. %s\n",

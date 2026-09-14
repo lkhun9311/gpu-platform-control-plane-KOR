@@ -27,11 +27,35 @@ MAX_SPOT_PRICE="${MAX_SPOT_PRICE:-0.80}"
 BACKSTOP_SECONDS="${BACKSTOP_SECONDS:-5400}"
 OUT="${OUT:-hack/microtest-$(date -u +%Y%m%d-%H%M%S)}"
 STACK="m5b-microtest"
+# Every object this run writes lives under its own prefix, and the completion marker is one of them.
+#
+# The keys used to be fixed at the bucket root -- results.json, DONE -- against a bucket that keeps
+# objects for 30 days. So the second run of this script found the FIRST run's DONE on its opening
+# poll, downloaded the first run's results, printed them as its own readings and exited 0, having
+# launched and paid for a GPU instance that it then terminated seconds later without waiting for it.
+# A stale marker is indistinguishable from a fast one, and the recorded transcript for that case is
+# hack/test/spot-lifecycle/golden/stale-done.txt.
+#
+# Derived from the run directory rather than generated, so the local evidence and the S3 objects carry
+# the same name and either can be found from the other.
+RUN_ID="$(basename "$OUT")"
 
 say()  { printf '== %s\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
-ACCOUNT=$(aws sts get-caller-identity --query Account --output text) || fail "not authenticated"
+# The EC2 lifecycle is shared with the price-of-protection runner and lives in its own file.
+#
+# Defined BEFORE sourcing, because the library only supplies defaults for names the caller has not
+# provided. Without this its diagnostics would go to stderr while this script's go to stdout, and the two
+# would interleave differently in a captured log.
+spot_say()  { say "$@"; }
+spot_fail() { fail "$@"; }
+# BASH_SOURCE, not $0: inside a sourced file $0 is still this script, so locating the library by $0 would
+# work here and break the moment anything else sourced it.
+# shellcheck source=hack/lib/spot-run.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/spot-run.sh"
+
+ACCOUNT=$(spot_account) || fail "not authenticated"
 BUCKET="${BUCKET:-$STACK-$ACCOUNT}"
 
 # The engine image, read from the manifest rather than typed here, so the microtest measures the same engine
@@ -58,37 +82,19 @@ say "model  $MODEL"
 say "output $OUT"
 
 # ---------------------------------------------------------------- results path
-if ! aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
-  say "creating results bucket $BUCKET"
-  aws s3api create-bucket --bucket "$BUCKET" --region "$REGION" \
-    --create-bucket-configuration LocationConstraint="$REGION" >/dev/null
-  aws s3api put-public-access-block --bucket "$BUCKET" \
-    --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-  # The results are a few kilobytes and interesting for about a week; nothing here is worth paying storage
-  # for indefinitely, and an expiring bucket cannot become the next thing nobody remembers deleting.
-  aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --lifecycle-configuration \
-    '{"Rules":[{"ID":"expire","Status":"Enabled","Filter":{"Prefix":""},"Expiration":{"Days":30}}]}'
-fi
+spot_ensure_bucket "$BUCKET" "$REGION" 30 || fail "could not prepare the results bucket $BUCKET"
 
 # ---------------------------------------------------------------- instance role
-if ! aws iam get-instance-profile --instance-profile-name "$STACK" >/dev/null 2>&1; then
-  say "creating instance role $STACK"
-  aws iam create-role --role-name "$STACK" --assume-role-policy-document \
-    '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}' >/dev/null
-  aws iam put-role-policy --role-name "$STACK" --policy-name write-results --policy-document \
-    "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"s3:PutObject\"],\"Resource\":\"arn:aws:s3:::$BUCKET/*\"}]}"
-  aws iam create-instance-profile --instance-profile-name "$STACK" >/dev/null
-  aws iam add-role-to-instance-profile --instance-profile-name "$STACK" --role-name "$STACK"
-  # An instance profile is not usable the moment it is created, and a launch that races it fails with an
-  # error that names neither the profile nor the delay.
-  say "waiting for the instance profile to propagate"
-  sleep 20
-fi
+# This measurement only ever writes. A runner that also ships a binary to the instance needs GetObject, and
+# passing the policy in is what lets the two differ without the library knowing about either.
+spot_ensure_profile "$STACK" \
+  "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"s3:PutObject\"],\"Resource\":\"arn:aws:s3:::$BUCKET/*\"}]}" \
+  20 || fail "could not prepare the instance profile $STACK"
 
 # ---------------------------------------------------------------- placement
-AMI=$(aws ssm get-parameter --region "$REGION" \
-  --name /aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-ubuntu-22.04/latest/ami-id \
-  --query Parameter.Value --output text) || fail "could not resolve a GPU AMI"
+AMI=$(spot_resolve_ami "$REGION" \
+  /aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-ubuntu-22.04/latest/ami-id) \
+  || fail "could not resolve a GPU AMI"
 
 # A default subnet, because default subnets assign public IPs and therefore reach the internet through an
 # internet gateway rather than a NAT gateway. That is the whole cost argument: inbound is free there.
@@ -96,20 +102,16 @@ AMI=$(aws ssm get-parameter --region "$REGION" \
 # The zone has to be one that actually offers this instance type, which is not every zone in the region: the
 # first attempt took Subnets[0], landed in ap-northeast-2b, and was refused because g5 is not offered there.
 # AWS will say which zones do, so it is asked rather than assumed.
-ZONES=$(aws ec2 describe-instance-type-offerings --region "$REGION" \
-  --location-type availability-zone \
-  --filters "Name=instance-type,Values=$INSTANCE_TYPE" \
-  --query 'InstanceTypeOfferings[].Location' --output text)
+ZONES=$(spot_zones_offering "$REGION" "$INSTANCE_TYPE")
 [ -n "$ZONES" ] || fail "$INSTANCE_TYPE is offered in no availability zone of $REGION"
 say "$INSTANCE_TYPE is offered in: $ZONES"
 
 SUBNET=""
 for z in $ZONES; do
-  SUBNET=$(aws ec2 describe-subnets --region "$REGION" \
-    --filters Name=default-for-az,Values=true Name=map-public-ip-on-launch,Values=true \
-      "Name=availability-zone,Values=$z" \
-    --query 'Subnets[0].SubnetId' --output text)
-  [ -n "$SUBNET" ] && [ "$SUBNET" != "None" ] && { say "using $SUBNET in $z"; break; }
+  if SUBNET=$(spot_subnet_in_zone "$REGION" "$z"); then
+    say "using $SUBNET in $z"
+    break
+  fi
   SUBNET=""
 done
 [ -n "$SUBNET" ] || fail "no default public subnet in any zone offering $INSTANCE_TYPE; this test relies on one for free ingress"
@@ -127,16 +129,34 @@ IMAGE="ENGINE_IMAGE_PLACEHOLDER"
 MODEL="MODEL_PLACEHOLDER"
 BUCKET="BUCKET_PLACEHOLDER"
 
-upload() { aws s3 cp "$1" "s3://$BUCKET/$2" || true; }
+PREFIX="RUN_ID_PLACEHOLDER"
+
+# Keys are relative to this run's prefix, so no call site can write to the bucket root by forgetting.
+upload() { aws s3 cp "$1" "s3://$BUCKET/$PREFIX/$2" || true; }
 trap 'upload /var/log/microtest.log log.txt; shutdown -h now' EXIT
 
 docker pull "$IMAGE"
 mkdir -p /hf
 
-python3 /usr/local/bin/microtest.py > /tmp/results.json 2>/tmp/microtest.err
+rc=0
+python3 /usr/local/bin/microtest.py > /tmp/results.json 2>/tmp/microtest.err || rc=$?
 upload /tmp/results.json results.json
 upload /tmp/microtest.err stderr.txt
-touch /tmp/DONE && upload /tmp/DONE DONE
+
+# DONE is written only if the measurement actually produced parseable results.
+#
+# This script runs under set -x and NOT set -e, deliberately: a failed measurement still has to upload
+# its log and its stderr, which is exactly what an early exit would prevent. The cost of that choice
+# was that the next line ran unconditionally, so a Python process that died on its first cell still
+# announced success, and the host saw a completed run. The exit status is captured instead, and the
+# marker is gated on it together with results that parse -- an empty or truncated file is a failure
+# that looks like a success at every layer above it.
+if [ "$rc" -eq 0 ] && [ -s /tmp/results.json ] \
+   && python3 -c 'import json,sys; json.load(open("/tmp/results.json"))' 2>/dev/null; then
+  touch /tmp/DONE && upload /tmp/DONE DONE
+else
+  echo "measurement did not produce usable results (exit $rc); DONE withheld"
+fi
 USERDATA
 
 # The measurement itself, kept as its own file so the shell wrapper stays about lifecycle and this stays
@@ -246,64 +266,83 @@ UD=$(mktemp)
   echo "MEASUREEOF"
   echo "export IMAGE='$ENGINE_IMAGE' MODEL='$MODEL'"
   sed -e "s|BACKSTOP_SECONDS_PLACEHOLDER|$BACKSTOP_SECONDS|" \
+      -e "s|RUN_ID_PLACEHOLDER|$RUN_ID|" \
       -e "s|ENGINE_IMAGE_PLACEHOLDER|$ENGINE_IMAGE|" \
       -e "s|MODEL_PLACEHOLDER|$MODEL|" \
       -e "s|BUCKET_PLACEHOLDER|$BUCKET|" "$RUNSCRIPT" | tail -n +2
 } > "$UD"
+
+# The FIRST thing checked about the payload, because it is the one `bash -n` cannot see.
+#
+# The stripping above begins with `tail -n +2`, which drops the heredoc's `#!/bin/bash`, and the line that
+# re-emits it is one line in a block nobody reads twice. cloud-init executes user-data as a script ONLY when
+# it begins with `#!`. A payload without one parses perfectly and does nothing: the instance boots, cloud-init
+# declines to run it, and the machine bills until its backstop with no log at all, because the trap that
+# uploads one lives inside the script that never ran.
+#
+# hack/m5c-gpu-session.sh was written from the shape of this file and dropped that line. Its first paid run
+# on 2026-09-11 held a g5.2xlarge for 145 minutes, about $1.64, and produced nothing. This guard is here so
+# the next omission costs a refusal instead.
+head -1 "$UD" | grep -q '^#!' \
+  || fail "the generated user-data does not begin with a shebang, so cloud-init would not execute it and the instance would boot, do nothing, and bill until its backstop. See $OUT/user-data.sh"
 cp "$UD" "$OUT/user-data.sh"
 cp "$MEASURE" "$OUT/microtest.py"
 
 say "launching $INSTANCE_TYPE spot (max \$$MAX_SPOT_PRICE/h)"
 # Retried across zones, because "no capacity right now" is a normal Spot answer rather than a fault, and a
 # single-zone attempt turns it into an aborted run.
-launch_in() {
-  aws ec2 run-instances --region "$REGION" \
-    --image-id "$AMI" --instance-type "$INSTANCE_TYPE" --subnet-id "$SUBNET" \
-    --iam-instance-profile "Name=$STACK" \
-    --instance-initiated-shutdown-behavior terminate \
-    --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":150,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
-    --instance-market-options "{\"MarketType\":\"spot\",\"SpotOptions\":{\"MaxPrice\":\"$MAX_SPOT_PRICE\",\"SpotInstanceType\":\"one-time\"}}" \
-    --user-data "file://$UD" \
-    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$STACK},{Key=purpose,Value=m5b-scheduler-microtest}]" \
-    --query 'Instances[0].InstanceId' --output text
-}
+TAGS="ResourceType=instance,Tags=[{Key=Name,Value=$STACK},{Key=purpose,Value=m5b-scheduler-microtest}]"
+# The trap is armed BEFORE the launch loop, not after it.
+#
+# It used to sit below `say "instance $IID"`, which left a window: run-instances had returned an id and
+# nothing would terminate it yet. Under `set -euo pipefail` a failed write of the instance-id file, a
+# SIGPIPE on stdout because this script was piped to something that had exited, or a Ctrl-C in that window
+# all exit with a GPU instance running and no terminator. spot_terminate returns 0 on an empty id, so
+# arming it early costs nothing and closes the window.
+cleanup() { spot_terminate "$REGION" "$IID"; }
 IID=""
+trap cleanup EXIT INT TERM
 for z in $ZONES; do
-  SUBNET=$(aws ec2 describe-subnets --region "$REGION" \
-    --filters Name=default-for-az,Values=true Name=map-public-ip-on-launch,Values=true \
-      "Name=availability-zone,Values=$z" --query 'Subnets[0].SubnetId' --output text)
-  [ -n "$SUBNET" ] && [ "$SUBNET" != "None" ] || continue
+  SUBNET=$(spot_subnet_in_zone "$REGION" "$z") || continue
   say "trying $z ($SUBNET)"
-  IID=$(launch_in 2>>"$OUT/launch-errors.txt") && [ -n "$IID" ] && [ "$IID" != "None" ] && break
+  IID=$(spot_launch "$REGION" "$AMI" "$INSTANCE_TYPE" "$SUBNET" "$STACK" \
+        "$MAX_SPOT_PRICE" 150 "$UD" "$TAGS" 2>>"$OUT/launch-errors.txt") \
+    && [ -n "$IID" ] && [ "$IID" != "None" ] && break
   IID=""
 done
 [ -n "$IID" ] || fail "no zone would launch $INSTANCE_TYPE; see $OUT/launch-errors.txt"
 echo "$IID" > "$OUT/instance-id"
 say "instance $IID"
 
-cleanup() {
-  say "terminating $IID"
-  aws ec2 terminate-instances --region "$REGION" --instance-ids "$IID" >/dev/null 2>&1 || true
-}
-trap cleanup EXIT INT TERM
+# The trap stays here rather than in the library. Traps do not stack -- the last one for a signal replaces
+# the earlier one -- so a library that armed its own would silently discard whatever the caller installed,
+# and the thing being discarded is what stops an idle GPU instance from billing all night.
 
 say "waiting for results (the engine has an image and weights to pull first)"
-for _ in $(seq 1 120); do
-  if aws s3api head-object --bucket "$BUCKET" --key DONE >/dev/null 2>&1; then
-    say "results are up"
-    break
-  fi
-  state=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$IID" \
-    --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo unknown)
-  case "$state" in
-    terminated|shutting-down) say "instance ended before writing DONE"; break ;;
-  esac
-  sleep 30
-done
+# The three endings are distinguished by exit status, because "the loop ended" has three causes and only
+# one of them is a result. The library echoes the instance's terminal state on the second.
+done_seen=0
+ended_early=""
+marker_rc=0
+ended_early=$(spot_wait_for_marker "$REGION" "$BUCKET" "$RUN_ID/DONE" "$IID" 120 30) || marker_rc=$?
+case "$marker_rc" in
+  0) say "results are up"; done_seen=1 ;;
+  2) say "instance ended before writing DONE" ;;
+esac
 
 for k in results.json log.txt stderr.txt; do
-  aws s3 cp "s3://$BUCKET/$k" "$OUT/$k" >/dev/null 2>&1 || true
+  aws s3 cp "s3://$BUCKET/$RUN_ID/$k" "$OUT/$k" >/dev/null 2>&1 || true
 done
+
+# Said before the results are read, and separately from them, because the two failures need different
+# answers: an instance that died has a log worth reading, and a run that timed out is probably still
+# alive and worth watching. Both used to arrive as the same "no results were written".
+if [ "$done_seen" -eq 0 ]; then
+  if [ -n "$ended_early" ]; then
+    fail "the instance was $ended_early before it wrote its completion marker; $OUT/log.txt is whatever it managed to upload"
+  fi
+  fail "no completion marker after 120 polls; the run either is still going or hung, and $IID has been terminated"
+fi
 
 if [ -s "$OUT/results.json" ]; then
   say "readings"

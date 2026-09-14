@@ -91,6 +91,15 @@ bin/
 dist/
 build/
 
+# The characterization harness's stubs are source, not generated binaries.
+#
+# They live in a directory called bin/ because that is what goes on PATH, and the rule above swallowed
+# them: `git add hack/test` staged the driver and every golden file and silently left out the two files
+# that make the harness a harness. A fresh checkout would then prepend a directory containing nothing to
+# PATH and run the REAL aws and the REAL sleep against a real account.
+!/hack/test/spot-lifecycle/bin/
+!/hack/test/spot-lifecycle/bin/*
+
 # OS files
 .DS_Store
 Thumbs.db
@@ -135,8 +144,36 @@ ex/*
 # does not belong here is a growing pile of one-off measurements that no code reads.
 hack/m5b-run-*/
 hack/m5c-run-*/
+# The M5-c SESSION's own directory, which is not the matrix's.
+#
+# hack/m5c-matrix.sh writes hack/m5c-run-<stamp> and is covered by the line above. hack/m5c-gpu-session.sh
+# writes hack/m5c-<stamp>, one level out, and holds about 100 MB: the source archive plus the gateway and
+# harness binaries it ships to the instance. The pattern above does not match it, so the first failed run
+# left all of that untracked in the tree -- one `git add -A` from the mistake this block was written about.
+hack/m5c-2*/
+# The capacity ladder's session directory, which is the same script under a different OUT.
+#
+# hack/m5c-gpu-session.sh writes wherever OUT points, and the ladder runs use hack/ladder-<stamp> so that a
+# ladder's evidence is not filed among the sharing matrix's. Ignored for the reason above and for the one
+# below: this runner REFUSES TO START when the tree is dirty, so a run's own output directory makes the
+# next run impossible. That is exactly what happened -- a killed ladder session left hack/ladder-<stamp>
+# untracked and the relaunch refused, with the card already released.
+hack/ladder-*/
 # Microtest output: instance ids, user-data, and the raw results, which are copied into
 # docs/evidence when a run produces something worth keeping.
 hack/microtest-*/
+# The device-observation session writes a run directory per invocation. Ignored for the same reason as the
+# others, and for one more: this runner refuses to start when the tree is dirty, so its own output would
+# otherwise stop the next run.
+hack/qlgpu-*/
+hack/pop-*/
 hack/m5b-gpu-session-evidence.log
 .m5b-rate
+
+# Captures written by hack/capture-evidence.sh, and tracked on purpose.
+#
+# The run directories these come from are ignored and do not survive, so a number nobody can read later was
+# not worth measuring. Placed LAST because git applies the final matching rule: earlier in this file `docs/*`
+# hides the directory and `*.md` hides the index, and a negation above either of them does nothing.
+!docs/captures/
+!docs/captures/**

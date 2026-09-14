@@ -61,6 +61,24 @@ type RawRow struct {
 	//
 	// It is a small closed vocabulary ("timeout", "transport", "rejected", "stream") so a report can bucket failures without parsing free text.
 	ErrorKind string `json:"errorKind,omitempty"`
+	// Study is the pre-registered experiment this row belongs to, copied from the manifest.
+	//
+	// It is on the ROW and not only on the manifest because the report reads rows, not manifests. A
+	// study recorded only in a manifest would be a label nothing downstream can see, and the mixing it
+	// is meant to prevent happens at exactly the point the manifests are already gone.
+	//
+	// Empty means the row predates studies and is read as StudyM5BGateway.
+	Study string `json:"study,omitempty"`
+	// Priority is the scheduling priority this request carried, or nil if it carried none.
+	//
+	// It is recorded because otherwise the treatment is invisible in the evidence. Two replays of one
+	// manifest, one with priorities and one without, produced rows identical in study, arm, checksum and
+	// tolerance -- so the report pooled them as repetitions of the same condition, which is precisely the
+	// comparison the priority arm exists to avoid making.
+	//
+	// A pointer for the same reason the request body uses one: 0 is vLLM's most urgent value, so a plain
+	// int cannot distinguish "most urgent" from "not set".
+	Priority *int `json:"priority,omitempty"`
 	// TraceChecksum is the sha256 of the trace this row replayed, copied from the frozen manifest.
 	//
 	// The report asserts the contended arms all carry one checksum, so it can prove they replayed identical traffic rather than trusting operator discipline.
@@ -72,6 +90,13 @@ type RawRow struct {
 	// ExactInputTokens is the trace's measured count for this prompt, carried through so a refused request
 	// still contributes to the offered side of the admitted-work fraction.
 	ExactInputTokens int `json:"exactInputTokens,omitempty"`
+	// EngineOutputTokens is the engine's own count of what it generated, zero when it reported none.
+	//
+	// OutputTokens beside it counts SSE frames that carried content. The two agree only while the server
+	// emits one token per frame, and a server that batches would halve every throughput number and tenant
+	// share this harness reports while the GPU did exactly the same work. Both are recorded so the
+	// disagreement is visible in the evidence rather than absent from it.
+	EngineOutputTokens int `json:"engineOutputTokens,omitempty"`
 	// EngineInputTokens is what the engine itself reported for this request, when it answered one.
 	//
 	// It exists to check ExactInputTokens rather than to replace it: the trace's value is measured once per
@@ -133,6 +158,8 @@ type SendResult struct {
 	OutputTokens int
 	// PromptTokens is the engine's own count of the prompt, zero when it reported none.
 	PromptTokens int
+	// EngineOutputTokens is the engine's own count of what it generated, zero when it reported none.
+	EngineOutputTokens int
 	// BackendState is the gateway's report of the pressure its decision used, empty when it reported none.
 	BackendState string
 	// HTTPStatus is the response status; 0 for a transport error or timeout.
@@ -159,8 +186,12 @@ type Sender interface {
 
 // ReplayOptions configure a replay run.
 type ReplayOptions struct {
-	// Arm is copied into every RawRow.
-	Arm string
+	// Study and Arm are copied into every RawRow.
+	Study string
+	Arm   string
+	// Priorities is the tenant-to-priority map the sender was given, stamped per row so the treatment is
+	// part of the evidence rather than only of the run log.
+	Priorities map[string]int
 	// TraceChecksum, LongThreshold, and MatchTolerance are the frozen manifest provenance stamped into every RawRow, so the report can enforce trace identity and read the pre-registered knobs from the evidence itself.
 	TraceChecksum  string
 	LongThreshold  int
@@ -210,7 +241,9 @@ func Replay(ctx context.Context, sender Sender, trace []TraceRow, opts ReplayOpt
 			res := sender.Send(ctx, tr, sendNanos)
 			rows[i] = RawRow{
 				Index:               tr.Index,
+				Study:               opts.Study,
 				Arm:                 opts.Arm,
+				Priority:            priorityFor(opts.Priorities, tr.Tenant),
 				Tenant:              tr.Tenant,
 				IsNoisy:             tr.IsNoisy,
 				ScheduledOffsetMs:   tr.OffsetMs,
@@ -220,6 +253,7 @@ func Replay(ctx context.Context, sender Sender, trace []TraceRow, opts ReplayOpt
 				EstInputTokens:      estInput(tr.PromptLenChars),
 				ExactInputTokens:    tr.ExactInputTokens,
 				EngineInputTokens:   res.PromptTokens,
+				EngineOutputTokens:  res.EngineOutputTokens,
 				BackendState:        res.BackendState,
 				OutputTokens:        res.OutputTokens,
 				HTTPStatus:          res.HTTPStatus,
@@ -313,4 +347,19 @@ func ReadRawRows(r io.Reader) ([]RawRow, error) {
 	}
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Index < rows[j].Index })
 	return rows, nil
+}
+
+// priorityFor returns a copy of the priority this tenant's requests carried, or nil when none was sent.
+//
+// A copy, because the value is stored on every row and a shared pointer would make one edit rewrite the
+// whole run's evidence.
+func priorityFor(priorities map[string]int, tenant string) *int {
+	if priorities == nil {
+		return nil
+	}
+	v, ok := priorities[tenant]
+	if !ok {
+		return nil
+	}
+	return &v
 }

@@ -2,6 +2,10 @@
 # they select the same node and would both register nvidia.com/gpu against one kubelet socket.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+# See config/nvidia-device-plugin-timeslicing/kustomization.yaml: `system` is kubebuilder's placeholder and
+# no namespace by that name exists, so without this rewrite every apply of this overlay was refused and the
+# MPS arm could never have deployed.
+namespace: gpu-platform-control-plane-system
 resources:
   - configmap.yaml
   - daemonset.yaml

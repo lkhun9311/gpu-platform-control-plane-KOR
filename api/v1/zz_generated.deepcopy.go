@@ -378,6 +378,14 @@ func (in *MLTrainingJobStatus) DeepCopyInto(out *MLTrainingJobStatus) {
 		in, out := &in.LastTransitionTime, &out.LastTransitionTime
 		*out = (*in).DeepCopy()
 	}
+	if in.AdmittedAt != nil {
+		in, out := &in.AdmittedAt, &out.AdmittedAt
+		*out = (*in).DeepCopy()
+	}
+	if in.RunningObservedAt != nil {
+		in, out := &in.RunningObservedAt, &out.RunningObservedAt
+		*out = (*in).DeepCopy()
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]metav1.Condition, len(*in))

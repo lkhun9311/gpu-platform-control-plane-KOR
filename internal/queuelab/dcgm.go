@@ -44,13 +44,14 @@ type PodResolver func(namespace, name string) string
 // Unattributable samples are also RETURNED rather than merely counted. They cannot credit work to anyone,
 // and they are what the exclusivity clause needs: a device carrying two Pods' labels has utilisation that
 // belongs to neither, and a parser that dropped the second label would hide that.
-func ParseDCGMUtilisation(body []byte, atNs int64, resolve PodResolver) ([]DeviceSample, int, int, error) {
+func ParseDCGMUtilisation(body []byte, atNs int64, resolve PodResolver) ([]DeviceSample, int, int, int, error) {
 	if resolve == nil {
-		return nil, 0, 0, fmt.Errorf("no Pod resolver: the observer labels by name and something else has to say " +
+		return nil, 0, 0, 0, fmt.Errorf("no Pod resolver: the observer labels by name and something else has to say " +
 			"which object that name referred to")
 	}
 	var out []DeviceSample
 	unattributed := 0
+	unavailable := 0
 	unlabelledBusy := 0
 	sc := bufio.NewScanner(bytes.NewReader(body))
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -62,9 +63,12 @@ func ParseDCGMUtilisation(body []byte, atNs int64, resolve PodResolver) ([]Devic
 		labels, value, err := splitMetricLine(line)
 		switch {
 		case errors.Is(err, errUnreadableValue):
+			// Counted, not merely skipped. A scrape that is entirely "N/A" and a scrape that found nothing
+			// are the same empty observation otherwise, and they send an operator to different places.
+			unavailable++
 			continue
 		case err != nil:
-			return nil, 0, 0, fmt.Errorf("scrape at %d ns: %w", atNs, err)
+			return nil, 0, 0, 0, fmt.Errorf("scrape at %d ns: %w", atNs, err)
 		}
 		// A card with no Pod label is EITHER idle and unowned OR busy and unattributed, and those are not the
 		// same fact. The second is what a kubelet mapping that is off or broken produces: full utilisation
@@ -81,7 +85,7 @@ func ParseDCGMUtilisation(body []byte, atNs int64, resolve PodResolver) ([]Devic
 			continue
 		}
 		if labels["UUID"] == "" {
-			return nil, 0, 0, fmt.Errorf("scrape at %d ns: a sample for pod %s/%s names no device UUID",
+			return nil, 0, 0, 0, fmt.Errorf("scrape at %d ns: a sample for pod %s/%s names no device UUID",
 				atNs, labels["namespace"], labels["pod"])
 		}
 		uid := resolve(labels["namespace"], labels["pod"])
@@ -102,9 +106,9 @@ func ParseDCGMUtilisation(body []byte, atNs int64, resolve PodResolver) ([]Devic
 		})
 	}
 	if err := sc.Err(); err != nil {
-		return nil, 0, 0, fmt.Errorf("read scrape at %d ns: %w", atNs, err)
+		return nil, 0, 0, 0, fmt.Errorf("read scrape at %d ns: %w", atNs, err)
 	}
-	return out, unattributed, unlabelledBusy, nil
+	return out, unattributed, unlabelledBusy, unavailable, nil
 }
 
 // splitMetricLine pulls the labels and the value out of one Prometheus exposition line.
@@ -128,24 +132,28 @@ func splitMetricLine(line string) (map[string]string, int, error) {
 	}
 	raw := strings.TrimSpace(line[closeAt+1:])
 	// Utilisation is an integer percent. A float would parse and then round somewhere invisible, so it is
-	// refused here where the reason can be given.
+	// skipped rather than refused, and counted so the skip is visible. This comment used to say it was
+	// "refused here where the reason can be given", which the code below has never done.
 	if raw == "" {
 		// STRUCTURAL, not transient: a line with a label set and nothing after it is not a sample whose value
 		// this build cannot read, it is not a sample. Skipping it would let an exposition format that stopped
 		// carrying values at all be read as a card nobody was using.
 		return nil, 0, fmt.Errorf("no value in %q", line)
 	}
+	// An UNREADABLE ROW rather than a broken scrape, and the difference decides whether one bad line ends
+	// the run's observation. DCGM renders unsupported or transiently unavailable field values as "N/A" --
+	// around driver initialisation, a GPU reset, an XID event. Treating that as a fatal parse error ends the
+	// scrape loop, truncates the observation at that instant, and the run then fails COVERAGE twenty seconds
+	// later with a message about an interval that was never watched.
+	//
+	// So it is skipped and COUNTED, and the count reaches the refusal. Counted is the half that was missing:
+	// the caller discarded this and nothing carried it, so an exporter build emitting `91.0`, or a value with
+	// a trailing Prometheus timestamp, produced an observation with no samples at all and the gate refused
+	// with "no sample for Pod X ... a reservation" -- a diagnosis pointing at the workload for a fault in
+	// this parser. The skip stays broad on purpose, because one odd line should not truncate an interval;
+	// what it must not be is silent.
 	v, err := strconv.Atoi(raw)
 	if err != nil {
-		// An UNREADABLE ROW rather than a broken scrape, and the difference decides whether one bad line
-		// ends the run's observation. DCGM renders unsupported or transiently unavailable field values as
-		// the string "N/A" -- around driver initialisation, a GPU reset, an XID event. Treating that as a
-		// fatal parse error ends the scrape loop, truncates the observation at that instant, and the run
-		// then fails COVERAGE twenty seconds later with a message about an interval that was never watched.
-		// The actual cause reaches nobody: it is one stderr line, and it is not in the record.
-		//
-		// So it is skipped and counted, exactly as an unattributable sample is, and the caller decides what
-		// a scrape full of them means.
 		return nil, 0, errUnreadableValue
 	}
 	if v < 0 || v > 100 {

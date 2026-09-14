@@ -59,9 +59,13 @@ type LifecycleEvent struct {
 	// lives only in the writer is a claim the artifact cannot be audited for. Carrying the tokens here means a
 	// reader holding nothing but the JSON can re-derive the provenance from the same evidence the writer had.
 	//
-	// Absent together with Iterations, for the same reason: they are three readings of one message.
+	// Absent together with Iterations, for the same reason: they are readings of ONE message.
 	WorkloadKind string `json:"workloadKind,omitempty"`
 	DeviceStatus string `json:"deviceStatus,omitempty"`
+	// DutyCycle is the fraction of its service the workload reported computing for, absent when the message
+	// carried none -- which is every record written before the axis existed, and those ran at full duty
+	// because full duty was all the workload could do.
+	DutyCycle *float64 `json:"dutyCycle,omitempty"`
 	// Job is the trace job name this event belongs to, resolved by the collector through the UID chain.
 	Job string `json:"job"`
 	// ComponentStampUnixNanos is the cluster component's own wall clock for the state this event describes:

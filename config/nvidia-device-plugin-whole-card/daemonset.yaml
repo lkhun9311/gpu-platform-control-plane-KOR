@@ -1,0 +1,84 @@
+# The device plugin for the matrix's `shared` arm: one device, on the sharing node.
+#
+# WHY THIS FILE HAS TO EXIST, which is not obvious and cost nothing only because it was found before a card
+# was rented.
+#
+# The `shared` arm puts BOTH tenants on ONE engine with the whole card -- the price-of-protection control's
+# topology, and the arm the pre-registration says everything else on the page is measured against. That
+# engine asks for `nvidia.com/gpu: 1`, so something has to advertise a device on the node it lands on.
+#
+# Nothing did. config/nvidia-device-plugin selects `platform.lkhun9311.github.io/gpu`, and the sharing node
+# group deliberately does not carry that label -- infra/aws/cluster/eks.tf says so in as many words, because
+# giving it both labels would put two plugins on one kubelet socket. The two sharing overlays select
+# `gpu-sharing` and advertise TWO devices, which is the wrong arm. So the `shared` arm had a plugin for
+# neither the node nor the topology: on a fresh node its engine would sit Pending until the 900-second
+# rollout timeout, and after a sharing arm it would schedule onto one of the previous arm's two replicas --
+# a control silently running on half a card under the mechanism it was supposed to be the baseline for.
+# The second is the dangerous one, because it produces numbers.
+#
+# This is that missing plugin. It is the exclusive configuration -- no CONFIG_FILE, so one device per card,
+# which is the plugin's own default -- pointed at the sharing node.
+#
+# WHY IT IS A SEPARATE FILE RATHER THAN A KUSTOMIZE PATCH OVER config/nvidia-device-plugin
+#
+# A patched copy would inherit that DaemonSet's pod selector, and two DaemonSets with one selector adopt
+# each other's Pods regardless of which nodes they select. The sharing overlays are standalone for the same
+# reason and this follows them. What must not drift -- the pinned digest, and that only this one omits
+# CONFIG_FILE -- is held by a test rather than by this comment.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin-whole-card
+  namespace: system
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: nvidia-device-plugin-whole-card
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gpu-platform-control-plane
+      app.kubernetes.io/component: nvidia-device-plugin-whole-card
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gpu-platform-control-plane
+        app.kubernetes.io/component: nvidia-device-plugin-whole-card
+    spec:
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      # The SHARING node, which is the whole point of this file. Everything else here is the exclusive
+      # plugin's configuration unchanged.
+      nodeSelector:
+        platform.lkhun9311.github.io/gpu-sharing: "true"
+      priorityClassName: system-node-critical
+      containers:
+        - name: plugin
+          # The same digest as the other three overlays. Sharing is a configuration of one binary, and an
+          # arm running a different plugin build would carry that difference into the comparison.
+          image: nvcr.io/nvidia/k8s-device-plugin:v0.16.2@sha256:ed39e22c8b71343fb996737741a99da88ce6c75dd83b5c520e0b3d8e8a884c47
+          env:
+            # Refuse to start rather than register a node whose driver is missing; see the exclusive overlay.
+            - name: FAIL_ON_INIT_ERROR
+              value: "true"
+            # No CONFIG_FILE, and that omission IS this overlay.
+            #
+            # Without one the plugin advertises one device per physical card, which is exactly what the
+            # `shared` arm needs. The two sharing overlays set it and are checked for setting it, because
+            # there a missing CONFIG_FILE would make the arm exclusive under a sharing name. Here the
+            # reverse is the hazard, so the test asserts this file has none.
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
