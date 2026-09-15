@@ -278,6 +278,12 @@ mkdir -p "$OUT" || fail "cannot create $OUT"
 : > "$LOG"
 
 WORK="$(mktemp -d)"
+# Removed on every exit from here until the full cleanup trap below replaces this one.
+#
+# That trap is armed only after the functions it calls exist, and PLAN_ONLY exits long before then, as does
+# every fail in between. So each plan check left this directory behind with a 34 MB benchharness in it, in
+# /tmp, which is tmpfs here -- and 18 GB of them had accumulated by 2026-09-15.
+trap 'rm -rf "$WORK"' EXIT
 PF_PID=""
 NODEGROUP=""
 

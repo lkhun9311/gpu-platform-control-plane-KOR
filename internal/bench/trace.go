@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"math"
 	"math/rand/v2"
@@ -79,6 +80,22 @@ type TenantSpec struct {
 	MaxOutputTokens int
 	// IsNoisy marks this tenant as the long-context contender.
 	IsNoisy bool
+	// RatePerSec is this tenant's own mean arrival rate, and setting it selects the independent-arrivals model.
+	//
+	// Under Weight, a tenant's arrival TIMES are a function of every other tenant in the trace: the gaps are
+	// drawn at the total rate and the tenant of each arrival is drawn from the same stream, so changing one
+	// tenant's share moves all of them. That is what the M5-c ladder ran into. It held the contender at 139
+	// requests give or take two by solving a weight for every rung, and the count came out right while the
+	// SCHEDULE came out different at each rung, so a rung-to-rung comparison moved two things at once.
+	//
+	// Under RatePerSec each tenant is its own Poisson process on its own stream, keyed by the tenant's name
+	// rather than its position, so its schedule depends on nothing but its own rate, the seed and the
+	// duration. Holding a contender fixed while a premium rate climbs then produces a byte-identical
+	// contender schedule, which trace_test.go pins under "GenerateTrace under the independent-arrivals model".
+	//
+	// The two models are exclusive and mixing them is refused, because a trace generated half one way has no
+	// stated arrival process at all.
+	RatePerSec float64
 }
 
 // TraceParams are the inputs GenerateTrace turns into a deterministic open-loop trace.
@@ -87,10 +104,24 @@ type TraceParams struct {
 	Seed int64
 	// DurationMs is the wall-clock span of arrivals the trace covers.
 	DurationMs int64
-	// RatePerSec is the mean total arrival rate across all tenants, realized as a Poisson process.
+	// RatePerSec is the mean total arrival rate across all tenants under the weighted model, and must be zero when tenants carry their own rates.
 	RatePerSec float64
 	// Tenants describes each tenant's share and request shape; at least one is required.
 	Tenants []TenantSpec
+}
+
+// maxTraceRows bounds how many arrivals one trace may hold.
+//
+// The guards in GenerateTrace refuse the rates they can name, and this is what holds when a rate gets past
+// them. On 2026-09-15 a tenant with no rate reached the loop half-written, the offset never reached the
+// duration, and the test binary grew to 45 GB before the kernel's OOM killer took it and other processes on
+// the machine with it. Here the same mistake fails as an error instead. A million rows is far above anything
+// replayed so far -- the frozen weighted trace holds 1,199 -- and a replay could never offer that load anyway.
+const maxTraceRows = 1_000_000
+
+// tooManyRows is the refusal both arrival models return when a trace reaches maxTraceRows.
+func tooManyRows(durationMs int64) error {
+	return fmt.Errorf("trace reached %d rows before reaching durationMs %d; no replay offers that load, so the rate is refused rather than generated until memory runs out", maxTraceRows, durationMs)
 }
 
 // GenerateTrace produces a deterministic open-loop trace from params.
@@ -104,11 +135,41 @@ func GenerateTrace(params TraceParams) ([]TraceRow, error) {
 	if params.DurationMs <= 0 {
 		return nil, fmt.Errorf("durationMs must be positive, got %d", params.DurationMs)
 	}
-	if params.RatePerSec <= 0 {
-		return nil, fmt.Errorf("ratePerSec must be positive, got %f", params.RatePerSec)
-	}
 	if len(params.Tenants) == 0 {
 		return nil, fmt.Errorf("at least one tenant is required")
+	}
+
+	// Which arrival model this trace uses is decided by the tenants, and a trace may not be half of each.
+	//
+	// The refusal is deliberate rather than a fallback to one of them. A caller that sets both has two
+	// different intentions on the page, and picking either silently produces a trace whose arrival process
+	// cannot be stated -- which is the one thing a replayed measurement cannot afford to leave open.
+	var rated, weighted []string
+	for _, t := range params.Tenants {
+		if t.RatePerSec > 0 {
+			rated = append(rated, t.Tenant)
+		}
+		if t.Weight > 0 {
+			weighted = append(weighted, t.Tenant)
+		}
+	}
+	if len(rated) > 0 && len(weighted) > 0 {
+		return nil, fmt.Errorf("tenants mix arrival models: %v carry ratePerSec and %v carry weight; a trace uses one model or the other", rated, weighted)
+	}
+	if len(rated) > 0 {
+		if params.RatePerSec != 0 {
+			return nil, fmt.Errorf("ratePerSec is %g and tenants carry their own rates; the total rate is meaningless under independent arrivals, so pass one or the other", params.RatePerSec)
+		}
+		// A tenant without a rate has an infinite mean gap, so it would silently get no arrivals at all.
+		if len(rated) != len(params.Tenants) {
+			return nil, fmt.Errorf("%d of %d tenants carry ratePerSec; under independent arrivals every tenant needs its own rate", len(rated), len(params.Tenants))
+		}
+		return generateIndependent(params)
+	}
+
+	// An infinite rate is a zero gap, so the offset never advances and the loop below never ends.
+	if params.RatePerSec <= 0 || math.IsInf(params.RatePerSec, 0) {
+		return nil, fmt.Errorf("ratePerSec must be positive and finite, got %f", params.RatePerSec)
 	}
 
 	var totalWeight float64
@@ -138,8 +199,11 @@ func GenerateTrace(params TraceParams) ([]TraceRow, error) {
 			u = math.SmallestNonzeroFloat64
 		}
 		offset += -meanGapMs * math.Log(u)
-		if int64(offset) >= params.DurationMs {
+		if offset >= float64(params.DurationMs) {
 			break
+		}
+		if len(rows) == maxTraceRows {
+			return nil, tooManyRows(params.DurationMs)
 		}
 
 		t := pickTenant(params.Tenants, totalWeight, rng.Float64())
@@ -155,6 +219,85 @@ func GenerateTrace(params TraceParams) ([]TraceRow, error) {
 	}
 
 	return rows, nil
+}
+
+// generateIndependent gives every tenant its own Poisson process on its own stream, then merges them.
+//
+// The point of the separation is stated on TenantSpec.RatePerSec: a tenant's arrival times must be a
+// function of that tenant alone, so that an experiment which varies one tenant's rate varies exactly one
+// thing. Under the weighted model it varied two, and the M5-c ladder paid for four rungs before the second
+// one was visible.
+func generateIndependent(params TraceParams) ([]TraceRow, error) {
+	seen := map[string]bool{}
+	var rows []TraceRow
+	for _, t := range params.Tenants {
+		// Streams are keyed by name, so a duplicate name would silently replay one schedule twice.
+		if seen[t.Tenant] {
+			return nil, fmt.Errorf("tenant %q appears twice; under independent arrivals a name IS the stream key, so two rows of the same name would share a schedule", t.Tenant)
+		}
+		seen[t.Tenant] = true
+
+		// An infinite rate is a zero gap, so this tenant's offset would never advance.
+		if math.IsInf(t.RatePerSec, 0) {
+			return nil, fmt.Errorf("tenant %q ratePerSec must be finite, got %f", t.Tenant, t.RatePerSec)
+		}
+
+		rng := tenantStream(params.Seed, t.Tenant)
+		meanGapMs := 1000.0 / t.RatePerSec
+		var offset float64
+		for {
+			u := rng.Float64()
+			if u <= 0 {
+				// Float64 can return 0 but never 1, so guard the log against -Inf.
+				u = math.SmallestNonzeroFloat64
+			}
+			offset += -meanGapMs * math.Log(u)
+			if offset >= float64(params.DurationMs) {
+				break
+			}
+			// Counted across tenants, since the merged trace is what a replay has to hold.
+			if len(rows) == maxTraceRows {
+				return nil, tooManyRows(params.DurationMs)
+			}
+			rows = append(rows, TraceRow{
+				OffsetMs:        int64(offset),
+				Tenant:          t.Tenant,
+				PromptLenChars:  t.PromptLenChars,
+				MaxOutputTokens: t.MaxOutputTokens,
+				IsNoisy:         t.IsNoisy,
+			})
+		}
+	}
+
+	// Merge into one non-decreasing schedule.
+	//
+	// The tie-break is on the tenant name rather than on the order the specs were passed in, for the same
+	// reason the stream key is: reordering the slice must not reorder the trace, or the caller's argument
+	// order becomes an unrecorded input to a checksummed artefact.
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].OffsetMs != rows[j].OffsetMs {
+			return rows[i].OffsetMs < rows[j].OffsetMs
+		}
+		return rows[i].Tenant < rows[j].Tenant
+	})
+	for i := range rows {
+		rows[i].Index = i
+	}
+	return rows, nil
+}
+
+// tenantStream derives one tenant's generator stream from the seed and the tenant's NAME.
+//
+// Keying on the name rather than the position is what lets a tenant be added to or removed from a trace
+// without moving anybody else's arrivals -- the property that makes the isolated baseline and the contended
+// arms comparable, and the one a position-keyed stream would quietly break the first time a probe tenant
+// was added.
+func tenantStream(seed int64, tenant string) *rand.Rand {
+	h := fnv.New64a()
+	// Hash.Write never returns an error; the signature carries one only to satisfy io.Writer.
+	_, _ = h.Write([]byte(tenant))
+	n := h.Sum64()
+	return rand.New(rand.NewPCG(uint64(seed)^n, uint64(seed)^(n*0x9e3779b97f4a7c15)))
 }
 
 // pickTenant maps a uniform draw in [0,1) to a tenant by normalized weight.

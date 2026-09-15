@@ -104,6 +104,66 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "usage: benchharness <gen-trace|replay|report|ladder-verdict|ladder-plan-check|print-prompt|check-replay|stamp-exact-tokens|sim-cap|power|stub-serve> [flags]")
 }
 
+// arrivalFlags are gen-trace's load flags, gathered so the choice between the two arrival models lives in one place.
+type arrivalFlags struct {
+	rate, premiumWeight, noisyWeight, probeWeight             float64
+	premiumRate, noisyRate, probeRate                         float64
+	premiumChars, noisyChars, probeUnderChars, probeOverChars int
+	// passed names the flags the caller set, since an explicit value can equal its default.
+	passed map[string]bool
+}
+
+// traceTenants builds the tenants and the total rate GenerateTrace is given, under whichever arrival model the flags select.
+//
+// Passing any per-tenant rate selects the independent-arrivals model. --rate and every weight are then refused
+// rather than ignored, because a caller who passed both has two loads on the page and obeying one silently is
+// how a trace ends up with an arrival process nobody stated.
+//
+// All three rates are required once one is passed. Defaulting --probe-rate to zero would silently drop the
+// probes that make the guard threshold load-bearing, and defaulting it to anything else would offer a load
+// nobody derived.
+func traceTenants(f arrivalFlags) ([]bench.TenantSpec, float64, error) {
+	rated := f.passed["premium-rate"] || f.passed["noisy-rate"] || f.passed["probe-rate"]
+	if rated {
+		for _, name := range []string{"rate", "premium-weight", "noisy-weight", "probe-weight"} {
+			if f.passed[name] {
+				return nil, 0, fmt.Errorf("--%s was passed alongside per-tenant rates; a trace uses one arrival model, so pass the rates or the total rate and weights", name)
+			}
+		}
+		for _, name := range []string{"premium-rate", "noisy-rate", "probe-rate"} {
+			if !f.passed[name] {
+				return nil, 0, fmt.Errorf("--%s is required once any per-tenant rate is passed (--probe-rate 0 disables the probes)", name)
+			}
+		}
+		if f.probeRate < 0 {
+			return nil, 0, fmt.Errorf("--probe-rate must be zero or positive, got %g", f.probeRate)
+		}
+	}
+
+	premium := bench.TenantSpec{Tenant: "premium-1", PromptLenChars: f.premiumChars, MaxOutputTokens: 64, IsNoisy: false}
+	noisy := bench.TenantSpec{Tenant: bench.NoisyTenant, PromptLenChars: f.noisyChars, MaxOutputTokens: 16, IsNoisy: true}
+	under := bench.TenantSpec{Tenant: bench.ProbeUnderTenant, PromptLenChars: f.probeUnderChars, MaxOutputTokens: 8, IsNoisy: true}
+	over := bench.TenantSpec{Tenant: bench.ProbeOverTenant, PromptLenChars: f.probeOverChars, MaxOutputTokens: 8, IsNoisy: true}
+
+	if rated {
+		premium.RatePerSec, noisy.RatePerSec = f.premiumRate, f.noisyRate
+		under.RatePerSec, over.RatePerSec = f.probeRate, f.probeRate
+		tenants := []bench.TenantSpec{premium, noisy}
+		if f.probeRate > 0 {
+			tenants = append(tenants, under, over)
+		}
+		return tenants, 0, nil
+	}
+
+	premium.Weight, noisy.Weight = f.premiumWeight, f.noisyWeight
+	under.Weight, over.Weight = f.probeWeight, f.probeWeight
+	tenants := []bench.TenantSpec{premium, noisy}
+	if f.probeWeight > 0 {
+		tenants = append(tenants, under, over)
+	}
+	return tenants, f.rate, nil
+}
+
 // genTrace generates an immutable trace file and a frozen manifest that pins its checksum.
 func genTrace(args []string) error {
 	fs := flag.NewFlagSet("gen-trace", flag.ExitOnError)
@@ -135,6 +195,14 @@ func genTrace(args []string) error {
 	probeWeight := fs.Float64("probe-weight", 0.1, "arrival share of EACH threshold-probe tenant; 0 disables them (see the comment: 0.1 is not a small load)")
 	probeUnderChars := fs.Int("probe-under-chars", bench.ProbeUnderChars, "probe prompt scoring just BELOW the guard threshold")
 	probeOverChars := fs.Int("probe-over-chars", bench.ProbeOverChars, "probe prompt scoring exactly AT the guard threshold")
+	// Per-tenant rates select the independent-arrivals model, where a tenant's schedule depends on its own rate alone.
+	//
+	// Under the weights above, raising the premium share redraws every gap, so the M5-c ladder held the
+	// contender's COUNT fixed and still handed each rung a different contender schedule. See
+	// bench.TenantSpec.RatePerSec, and traceTenants for why these refuse to be mixed with the weights.
+	premiumRate := fs.Float64("premium-rate", 0, "premium tenant's own arrival rate per second; passing any rate replaces --rate and the weights")
+	noisyRate := fs.Float64("noisy-rate", 0, "noisy tenant's own arrival rate per second")
+	probeRate := fs.Float64("probe-rate", 0, "arrival rate per second of EACH threshold-probe tenant; required with the other rates, 0 disables them")
 	// Defaulted rather than required, because every existing caller is the M5-b gateway experiment and
 	// making them all pass a flag to keep working would be a migration with no reader.
 	study := fs.String("study", bench.StudyM5BGateway,
@@ -179,19 +247,20 @@ func genTrace(args []string) error {
 	// meaning is "not the victim whose tail is the primary endpoint" -- it gates exactly two things, the
 	// tail's population and R1's filter, and a probe tenant belongs in neither. Marking them false would put
 	// borderline traffic inside the p99 the whole experiment is judged on.
-	tenants := []bench.TenantSpec{
-		{Tenant: "premium-1", Weight: *premiumWeight, PromptLenChars: *premiumChars, MaxOutputTokens: 64, IsNoisy: false},
-		{Tenant: bench.NoisyTenant, Weight: *noisyWeight, PromptLenChars: *noisyChars, MaxOutputTokens: 16, IsNoisy: true},
-	}
-	if *probeWeight > 0 {
-		tenants = append(tenants,
-			bench.TenantSpec{Tenant: bench.ProbeUnderTenant, Weight: *probeWeight, PromptLenChars: *probeUnderChars, MaxOutputTokens: 8, IsNoisy: true},
-			bench.TenantSpec{Tenant: bench.ProbeOverTenant, Weight: *probeWeight, PromptLenChars: *probeOverChars, MaxOutputTokens: 8, IsNoisy: true},
-		)
+	passed := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { passed[f.Name] = true })
+	tenants, totalRate, err := traceTenants(arrivalFlags{
+		rate: *rate, premiumWeight: *premiumWeight, noisyWeight: *noisyWeight, probeWeight: *probeWeight,
+		premiumRate: *premiumRate, noisyRate: *noisyRate, probeRate: *probeRate,
+		premiumChars: *premiumChars, noisyChars: *noisyChars, probeUnderChars: *probeUnderChars, probeOverChars: *probeOverChars,
+		passed: passed,
+	})
+	if err != nil {
+		return err
 	}
 
 	rows, err := bench.GenerateTrace(bench.TraceParams{
-		Seed: *seed, DurationMs: *durationMs, RatePerSec: *rate, Tenants: tenants,
+		Seed: *seed, DurationMs: *durationMs, RatePerSec: totalRate, Tenants: tenants,
 	})
 	if err != nil {
 		return fmt.Errorf("generate trace: %w", err)
