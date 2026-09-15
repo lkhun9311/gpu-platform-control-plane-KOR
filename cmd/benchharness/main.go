@@ -86,6 +86,8 @@ func main() {
 		err = ladderVerdict(os.Args[2:])
 	case "ladder-plan-check":
 		err = ladderPlanCheck(os.Args[2:])
+	case "study-arrivals":
+		err = studyArrivals(os.Args[2:])
 	case "sim-cap":
 		err = simCap(os.Args[2:])
 	case "stub-serve":
@@ -101,7 +103,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: benchharness <gen-trace|replay|report|ladder-verdict|ladder-plan-check|print-prompt|check-replay|stamp-exact-tokens|sim-cap|power|stub-serve> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: benchharness <gen-trace|replay|report|ladder-verdict|ladder-plan-check|study-arrivals|print-prompt|check-replay|stamp-exact-tokens|sim-cap|power|stub-serve> [flags]")
 }
 
 // arrivalFlags are gen-trace's load flags, gathered so the choice between the two arrival models lives in one place.
@@ -162,6 +164,33 @@ func traceTenants(f arrivalFlags) ([]bench.TenantSpec, float64, error) {
 		tenants = append(tenants, under, over)
 	}
 	return tenants, f.rate, nil
+}
+
+// arrivalsOf returns the arrival model a study registered, refusing a study that registered none.
+func arrivalsOf(study string) (bench.ArrivalModel, error) {
+	st, ok := bench.LookupStudy(study)
+	if !ok {
+		return "", fmt.Errorf("study %q is not registered; known: %s", study, strings.Join(bench.KnownStudyIDs(), ", "))
+	}
+	if st.Arrivals == "" {
+		return "", fmt.Errorf("study %s registered no arrival model", st.ID)
+	}
+	return st.Arrivals, nil
+}
+
+// studyArrivals prints a study's arrival model, so a script chooses gen-trace's flags from the registry rather than from a copy of it.
+func studyArrivals(args []string) error {
+	fs := flag.NewFlagSet("study-arrivals", flag.ExitOnError)
+	study := fs.String("study", "", "registered study id")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	model, err := arrivalsOf(*study)
+	if err != nil {
+		return err
+	}
+	fmt.Println(model)
+	return nil
 }
 
 // genTrace generates an immutable trace file and a frozen manifest that pins its checksum.
@@ -257,6 +286,20 @@ func genTrace(args []string) error {
 	})
 	if err != nil {
 		return err
+	}
+	// A study that registered its arrival model is generated under that model only.
+	//
+	// Nothing in a trace file records which model produced it, so a ladder generated with the other model's
+	// flags would carry the right arm names and the right contender count under a different arrival process,
+	// and every check downstream would pass it.
+	if st, ok := bench.LookupStudy(*study); ok && st.Arrivals != "" {
+		used := bench.ArrivalsWeighted
+		if passed["premium-rate"] || passed["noisy-rate"] || passed["probe-rate"] {
+			used = bench.ArrivalsIndependent
+		}
+		if used != st.Arrivals {
+			return fmt.Errorf("study %s registered %s arrivals and these flags describe %s arrivals; its traces have to be generated the way its pre-registration says", st.ID, st.Arrivals, used)
+		}
 	}
 
 	rows, err := bench.GenerateTrace(bench.TraceParams{
@@ -1382,7 +1425,7 @@ func evaluateRegisteredReadings(e *armEvidence, summ map[string]bench.ArmSummary
 		return nil, evaluatePoP(summ, summaries), nil, nil
 	case bench.StudySharingMatrix:
 		return nil, nil, evaluateSharingMatrix(summ, summaries, refusalsBeside(rawFiles)), nil
-	case bench.StudyThroughputLadder, bench.StudyThroughputLadderDown:
+	case bench.StudyThroughputLadder, bench.StudyThroughputLadderDown, bench.StudyThroughputLadderIndependent:
 		// The ladder takes the summaries rather than the arm map, because its cells are identified by rung
 		// and topology parsed out of the arm name and it has to see every one of them -- including arms this
 		// study does not name, which it ignores.

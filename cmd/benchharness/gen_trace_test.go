@@ -135,3 +135,51 @@ func TestGenTraceRefusesAnUnstatedArrivalProcess(t *testing.T) {
 		})
 	}
 }
+
+// A trace file does not say which model produced it, so the study has to be the thing that refuses.
+func TestGenTraceRefusesTheOtherArrivalModelForARegisteredStudy(t *testing.T) {
+	weighted := []string{"--rate", "1.431979", "--premium-weight", "1", "--noisy-weight", "0.23386882", "--probe-weight", "0"}
+	rated := []string{"--premium-rate", "1.16", "--noisy-rate", "0.289", "--probe-rate", "0"}
+	common := []string{"--seed", "11", "--duration-ms", "505000", "--arm", "rung01-shared"}
+
+	withStudy := func(study string, load []string) []string {
+		return append(append(append([]string{}, common...), "--study", study), load...)
+	}
+
+	if _, err := runGenTrace(t, withStudy(bench.StudyThroughputLadderIndependent, weighted)...); err == nil ||
+		!strings.Contains(err.Error(), "registered independent arrivals and these flags describe weighted") {
+		t.Fatalf("weighted flags for the independent ladder: got %v", err)
+	}
+	if _, err := runGenTrace(t, withStudy(bench.StudyThroughputLadderDown, rated)...); err == nil ||
+		!strings.Contains(err.Error(), "registered weighted arrivals and these flags describe independent") {
+		t.Fatalf("per-tenant rates for the weighted down ladder: got %v", err)
+	}
+
+	rows, err := runGenTrace(t, withStudy(bench.StudyThroughputLadderIndependent, rated)...)
+	if err != nil {
+		t.Fatalf("per-tenant rates for the independent ladder were refused: %v", err)
+	}
+	// The rung the pre-registration draft cites, so a change to the generator that moves it fails here first.
+	if got := len(scheduleOf(rows, bench.NoisyTenant)); got != 139 {
+		t.Fatalf("contender offers at 0.289/s over 505 s with seed 11: got %d, want 139", got)
+	}
+}
+
+func TestArrivalsOfReadsTheRegistry(t *testing.T) {
+	for study, want := range map[string]bench.ArrivalModel{
+		bench.StudyThroughputLadder:            bench.ArrivalsWeighted,
+		bench.StudyThroughputLadderDown:        bench.ArrivalsWeighted,
+		bench.StudyThroughputLadderIndependent: bench.ArrivalsIndependent,
+	} {
+		if got, err := arrivalsOf(study); err != nil || got != want {
+			t.Errorf("arrivalsOf(%s) = %q, %v; want %q", study, got, err, want)
+		}
+	}
+	// A study that registered no model must not be answered with a guess, or a script would pick flags for it.
+	if _, err := arrivalsOf(bench.StudySharingMatrix); err == nil || !strings.Contains(err.Error(), "registered no arrival model") {
+		t.Errorf("arrivalsOf(sharing matrix) = %v, want a refusal", err)
+	}
+	if _, err := arrivalsOf("no-such-study"); err == nil || !strings.Contains(err.Error(), "not registered") {
+		t.Errorf("arrivalsOf(unknown) = %v, want a refusal", err)
+	}
+}

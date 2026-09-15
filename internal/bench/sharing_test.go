@@ -633,17 +633,36 @@ func TestTheMatrixPassesTheWholeLoadAndTheModelToGenTrace(t *testing.T) {
 	}
 	stripped := code.String()
 
-	gen := regexp.MustCompile(`(?s)benchharness" gen-trace.*?manifest-out[^\n]*\n`).FindString(stripped)
-	if gen == "" {
+	// Every gen-trace call rather than the first: the plan check and the paid cell each have their own.
+	gens := regexp.MustCompile(`(?s)benchharness" gen-trace.*?manifest-out[^\n]*\n`).FindAllString(stripped, -1)
+	if len(gens) == 0 {
 		t.Fatal("hack/m5c-matrix.sh has no gen-trace invocation to check")
 	}
-	for _, flag := range []string{
-		"--rate", "--duration-ms", "--model",
-		"--premium-weight", "--noisy-weight", "--probe-weight",
+	for _, gen := range gens {
+		for _, flag := range []string{"--duration-ms", "--model", `"${LOAD_FLAGS[@]}"`} {
+			if !strings.Contains(gen, flag) {
+				t.Errorf("a gen-trace call in the matrix does not pass %s, so it takes the harness's "+
+					"stub-calibrated default for it:\n%s", flag, gen)
+			}
+		}
+	}
+
+	// The load itself is built by set_load_flags under the arrival model the study registered, and each
+	// model's branch has to carry its whole load, or gen-trace fills the gap with a default.
+	loads := regexp.MustCompile(`(?s)set_load_flags\(\) \{.*?\n\}`).FindString(stripped)
+	for model, flags := range map[string][]string{
+		"weighted":    {"--rate", "--premium-weight", "--noisy-weight", "--probe-weight"},
+		"independent": {"--premium-rate", "--noisy-rate", "--probe-rate"},
 	} {
-		if !strings.Contains(gen, flag) {
-			t.Errorf("the matrix's gen-trace call does not pass %s, so it takes the harness's "+
-				"stub-calibrated default for it", flag)
+		branch := regexp.MustCompile(`(?m)^\s*` + model + `\).*$`).FindString(loads)
+		if branch == "" {
+			t.Errorf("set_load_flags has no %s branch", model)
+			continue
+		}
+		for _, flag := range flags {
+			if !strings.Contains(branch, flag+" ") {
+				t.Errorf("set_load_flags' %s branch does not pass %s, so gen-trace takes its default for it", model, flag)
+			}
 		}
 	}
 
