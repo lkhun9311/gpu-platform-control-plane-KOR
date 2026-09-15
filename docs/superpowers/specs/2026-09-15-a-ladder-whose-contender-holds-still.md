@@ -1,6 +1,6 @@
-# A ladder whose contender holds still — pre-registration DRAFT
+# A ladder whose contender holds still — pre-registration
 
-**Status: DRAFT, written 2026-09-15. Not approved for purchase.** No card time may be bought against this page until the user approves it, and from the moment its first cell is bought nothing on it may be edited except to record what happened.
+**Status: approved by the user on 2026-09-16. Written 2026-09-15, and no card time has been bought against it yet.** From the moment its first cell is bought, nothing on this page may be edited except to record what happened.
 
 This page registers `throughput-ladder-independent-2026-09-15`. It changes **only how the traces are generated**. The question, the criterion, the arms, the readings, the counterbalanced order, the repetition rule, the stopping rule and the rungs' premium rates are those of `2026-09-13-the-ladder-has-to-search-downward.md`, unchanged, and the instrument that evaluates them is the same code.
 

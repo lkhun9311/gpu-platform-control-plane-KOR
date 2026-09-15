@@ -12,9 +12,9 @@
 # nothing said the three environments differed -- so the operator ran green in every test and
 # CrashLoopBackOff'd the first time it met a real cluster.
 #
-# The path is test/crd/kueue rather than a copy under config/. Copying four CRDs to make the directory name
-# tidier would put the same definitions in two places with nothing failing when they drift, which is the
-# defect this repository has spent a week removing.
+# The path is config/kueue-crds, the one copy test/e2e and the admission suite also read. A second copy would
+# put the same definitions in two places with nothing failing when they drift, which is the defect this
+# repository has spent a week removing.
 #
 # What this does NOT install: the Kueue controller itself. These are the definitions the index needs, not a
 # working scheduler, so MLTrainingJob admission does not function from this alone. go.mod pins
