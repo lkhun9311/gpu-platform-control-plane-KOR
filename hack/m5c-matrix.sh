@@ -107,7 +107,9 @@ esac
 # is used, the per-cell handover, the deadline projection -- is the same instrument, and a copy of it would
 # be a copy that drifts. What differs is only which loads are offered and in which order.
 #
-# The format is one rung per whitespace-separated entry, "RATE:NOISY_WEIGHT", in climbing order. The values
+# The format is one rung per whitespace-separated entry, two numbers joined by a colon, in climbing order.
+# What the numbers mean is the STUDY's arrival model, read from internal/bench's registry: "RATE:NOISY_WEIGHT"
+# for a weighted ladder, "PREMIUM_RATE:NOISY_RATE" for one registered with independent arrivals. The values
 # are the pre-registration's, solved offline against the real gen-trace so that every rung offers the
 # contender 139 requests give or take two while the premium rate climbs. They are passed rather than
 # defaulted for the reason RATE is: a load this script chose for itself is a load nobody derived.
@@ -146,12 +148,12 @@ fi
 # DURATION_MS is here for the same reason. It used to be derived as 500/(RATE/2), an arithmetic that assumes
 # the two tenants split arrivals evenly -- true of the defaults above and false of any calibrated mix, so it
 # would have sized the trace from a premise the run had just abandoned.
-# In ladder mode the contender's weight is a property of the RUNG, because that weight is what holds the
-# contender at a fixed absolute count while the premium rate climbs. A single NOISY_WEIGHT beside a ladder
-# would be silently ignored, so it is refused.
+# In ladder mode the contender's load is a property of the RUNG, because that is what holds the contender at a
+# fixed absolute count while the premium rate climbs. A single NOISY_WEIGHT beside a ladder would be silently
+# ignored, so it is refused.
 REQUIRED_LOAD_VARS="PREMIUM_WEIGHT NOISY_WEIGHT PROBE_WEIGHT DURATION_MS"
 if [ -n "$LADDER" ]; then
-  [ -z "${NOISY_WEIGHT:-}" ] || fail "NOISY_WEIGHT and LADDER are both set. The ladder carries a contender weight per rung -- that is how it holds the contender fixed in absolute terms while the premium rate climbs -- so a single weight here would be ignored."
+  [ -z "${NOISY_WEIGHT:-}" ] || fail "NOISY_WEIGHT and LADDER are both set. The ladder carries the contender's load per rung -- a weight, or a rate under a study registered with independent arrivals -- and that is how it holds the contender fixed in absolute terms while the premium rate climbs, so a single weight here would be ignored."
   REQUIRED_LOAD_VARS="PREMIUM_WEIGHT PROBE_WEIGHT DURATION_MS"
 fi
 for v in $REQUIRED_LOAD_VARS; do
@@ -210,15 +212,42 @@ fi
 # with something that looks like a digest and is not one.
 SOURCE_COMMIT="${SOURCE_COMMIT:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}"
 
+# The arrival model this run's study registered, and the gen-trace load flags for one cell under it.
+#
+# A rung entry is two numbers whose meaning the STUDY decides, so the model comes from internal/bench's
+# registry through `benchharness study-arrivals` rather than from a variable here that could disagree with
+# it. gen-trace refuses the other model's flags for any study that registered one, so a mismatch stops at
+# generation instead of reaching a replay. Resolved once the binary exists, which is later on each path.
+ARRIVALS=""
+resolve_arrivals() {
+  # The frozen sharing matrix registered no arrival model. It has only ever been generated weighted, and this
+  # keeps it so rather than asking a registry that has no answer for it.
+  if [ -z "$LADDER" ]; then ARRIVALS=weighted; return; fi
+  ARRIVALS=$("$WORK/benchharness" study-arrivals --study "$STUDY") \
+    || fail "could not read study $STUDY's arrival model from the registry"
+  # Independent arrivals have no mix to weight and this ladder has no probes, so the two weights the load
+  # still requires must say exactly that rather than describe a mix that would be ignored.
+  if [ "$ARRIVALS" = independent ] && { [ "$PREMIUM_WEIGHT" != 1 ] || [ "$PROBE_WEIGHT" != 0 ]; }; then
+    fail "study $STUDY registered independent arrivals, where each rung carries the premium and contender RATES and the probes are off; PREMIUM_WEIGHT=$PREMIUM_WEIGHT PROBE_WEIGHT=$PROBE_WEIGHT describe a weighted mix that would be ignored, so pass 1 and 0"
+  fi
+}
+set_load_flags() {
+  case "$ARRIVALS" in
+    weighted)    LOAD_FLAGS=(--rate "$1" --premium-weight "$PREMIUM_WEIGHT" --noisy-weight "$2" --probe-weight "$PROBE_WEIGHT") ;;
+    independent) LOAD_FLAGS=(--premium-rate "$1" --noisy-rate "$2" --probe-rate 0) ;;
+    *) fail "no arrival model was resolved for study $STUDY before generating a trace" ;;
+  esac
+}
+
 CELLS=()
 if [ -n "$LADDER" ]; then
-  # Which ladder this is. The two carry the same arm names and the same criterion and differ only in where
-  # their rungs sit, so the study id is what tells a reader -- and a report -- which experiment a row belongs
-  # to. Defaulted to the first so an existing caller keeps working.
+  # Which ladder this is. They carry the same arm names and the same criterion and differ in where their rungs
+  # sit or in how their traces are generated, so the study id is what tells a reader -- and a report -- which
+  # experiment a row belongs to. Defaulted to the first so an existing caller keeps working.
   STUDY="${LADDER_STUDY:-throughput-ladder-2026-09-13}"
   case "$STUDY" in
-    throughput-ladder-2026-09-13|throughput-ladder-down-2026-09-13) ;;
-    *) fail "LADDER_STUDY is ${STUDY@Q}; internal/bench registers throughput-ladder-2026-09-13 and throughput-ladder-down-2026-09-13. This refusal is the one that stops it: gen-trace does NOT check the arm against the study -- it writes a manifest for any string -- and the check that does is in replay's manifest validation, which fires on the rented card after the engines are up" ;;
+    throughput-ladder-2026-09-13|throughput-ladder-down-2026-09-13|throughput-ladder-independent-2026-09-15) ;;
+    *) fail "LADDER_STUDY is ${STUDY@Q}; internal/bench registers throughput-ladder-2026-09-13, throughput-ladder-down-2026-09-13 and throughput-ladder-independent-2026-09-15. This refusal is the one that stops it: gen-trace does NOT check the arm against the study -- it writes a manifest for any string -- and the check that does is in replay's manifest validation, which fires on the rented card after the engines are up" ;;
   esac
   ladder_rung=0
   for entry in $LADDER; do
@@ -232,10 +261,10 @@ if [ -n "$LADDER" ]; then
     case "$entry" in
       skip) continue ;;
       *:*) ;;
-      *) fail "LADDER entry ${entry@Q} is not RATE:NOISY_WEIGHT or the word skip" ;;
+      *) fail "LADDER entry ${entry@Q} is not two numbers joined by a colon (RATE:NOISY_WEIGHT, or PREMIUM_RATE:NOISY_RATE under independent arrivals) or the word skip" ;;
     esac
     rung_rate="${entry%%:*}"; rung_weight="${entry##*:}"
-    [ -n "$rung_rate" ] && [ -n "$rung_weight" ] || fail "LADDER entry ${entry@Q} is missing a rate or a weight"
+    [ -n "$rung_rate" ] && [ -n "$rung_weight" ] || fail "LADDER entry ${entry@Q} is missing one of its two numbers"
     # Odd rungs run the control first, even rungs run the split first.
     #
     # This is the counterbalance, and it is the whole reason the ladder can say anything about the topology
@@ -278,6 +307,12 @@ mkdir -p "$OUT" || fail "cannot create $OUT"
 : > "$LOG"
 
 WORK="$(mktemp -d)"
+# Removed on every exit from here until the full cleanup trap below replaces this one.
+#
+# That trap is armed only after the functions it calls exist, and PLAN_ONLY exits long before then, as does
+# every fail in between. So each plan check left this directory behind with a 34 MB benchharness in it, in
+# /tmp, which is tmpfs here -- and 18 GB of them had accumulated by 2026-09-15.
+trap 'rm -rf "$WORK"' EXIT
 PF_PID=""
 NODEGROUP=""
 
@@ -301,6 +336,7 @@ if [ -n "${PLAN_ONLY:-}" ]; then
     command -v go >/dev/null || fail "PLAN_ONLY needs either a Go toolchain or BENCHHARNESS_BIN"
     go build -o "$WORK/benchharness" ./cmd/benchharness || fail "build benchharness"
   fi
+  resolve_arrivals
   plan_top=0
   for spec in "${CELLS[@]}"; do
     IFS='|' read -r _ _ _ _ _ cell_rung <<<"$spec"
@@ -320,9 +356,9 @@ if [ -n "${PLAN_ONLY:-}" ]; then
     else
       IFS='|' read -r cell_topology cell_label _ cell_rate cell_weight cell_rung <<<"$spec"
     fi
-    "$WORK/benchharness" gen-trace --seed 11 --duration-ms "$DURATION_MS" --rate "$cell_rate" \
+    set_load_flags "$cell_rate" "$cell_weight"
+    "$WORK/benchharness" gen-trace --seed 11 --duration-ms "$DURATION_MS" "${LOAD_FLAGS[@]}" \
       --study "$STUDY" --arm "$cell_label" --model "$MODEL" --gateway-url "http://127.0.0.1:18080" \
-      --premium-weight "$PREMIUM_WEIGHT" --noisy-weight "$cell_weight" --probe-weight "$PROBE_WEIGHT" \
       --trace-out "$WORK/plan-$cell_label.jsonl" --manifest-out "$WORK/plan-$cell_label.yaml" >/dev/null \
       || { echo "PLAN REFUSED: gen-trace could not build $cell_label's trace" >&2; plan_failures=$(( plan_failures + 1 )); continue; }
     if ! out=$("$WORK/benchharness" ladder-plan-check --trace "$WORK/plan-$cell_label.jsonl" --study "$STUDY" --arm "$cell_label" 2>&1); then
@@ -811,6 +847,7 @@ if [ -n "${BENCHHARNESS_BIN:-}" ]; then
 else
   go build -o "$WORK/benchharness" ./cmd/benchharness || fail "build benchharness"
 fi
+resolve_arrivals
 printf 'FROM gcr.io/distroless/static:nonroot\nCOPY gateway /gateway\nUSER 65532:65532\nENTRYPOINT ["/gateway"]\n' > "$WORK/Dockerfile"
 # The image ID is CAPTURED, because it is the only thing that can name the gateway build in the record.
 #
@@ -1186,7 +1223,7 @@ if [ -n "$LADDER" ]; then
   # nobody passed one. Under `set -u` naming them here is not a cosmetic difference: the first ladder
   # rehearsal died on this line with "RATE: unbound variable", after building the cluster and both images.
   say "load: a ladder of $(printf '%s\n' $LADDER | wc -l | tr -d ' ') rungs, ${DURATION_MS}ms per cell, weights premium=$PREMIUM_WEIGHT probe=$PROBE_WEIGHT"
-  say "      rungs (rate:contender-weight): $LADDER"
+  say "      rungs: $LADDER (read under study $STUDY's registered arrival model)"
   say "run:  the two contended topologies at every rung, counterbalanced, plus one isolated baseline cell, on $PLATFORM, output $OUT"
 else
   say "load: rate ${RATE}/s, ${DURATION_MS}ms per arm, weights premium=$PREMIUM_WEIGHT noisy=$NOISY_WEIGHT probe=$PROBE_WEIGHT"
@@ -1253,7 +1290,7 @@ run_cell() {
   cell_n=$(( cell_n + 1 ))
   cell_deadline_check || exit 1
   CELL_T0=$(date +%s)
-  say "cell $cell_n/$cells_total: $label (rep $rep) at rate $RATE_CELL, contender weight $NOISY_CELL"
+  say "cell $cell_n/$cells_total: $label (rep $rep) at load $RATE_CELL:$NOISY_CELL under $ARRIVALS arrivals"
   if ! deploy_arm "$arm" "$label"; then
     say "skipping the rest of cell $cell_n: $label was refused as a registered outcome, and the arms beside it stand"
     # The time it TOOK to be refused counts too.
@@ -1350,10 +1387,10 @@ run_cell() {
   # model; internal/gateway resolves a backend by matching that name against the InferenceDeployment index
   # in the tenant's target namespace. The routing records this script writes serve Qwen2.5-3B, so every
   # request of every arm would have come back ErrNoRoute -- after both engines had loaded.
-  "$WORK/benchharness" gen-trace --seed 11 --duration-ms "$DURATION_MS" --rate "$RATE_CELL" \
+  set_load_flags "$RATE_CELL" "$NOISY_CELL"
+  "$WORK/benchharness" gen-trace --seed 11 --duration-ms "$DURATION_MS" "${LOAD_FLAGS[@]}" \
     --study "$STUDY" --arm "$label" --model "$MODEL" --gateway-url "http://127.0.0.1:18080" \
     --engine-image "$ENGINE_IMAGE" --gateway-image "$GATEWAY_IMAGE_REF" --gateway-sha "$SOURCE_COMMIT" \
-    --premium-weight "$PREMIUM_WEIGHT" --noisy-weight "$NOISY_CELL" --probe-weight "$PROBE_WEIGHT" \
     --trace-out "$OUT/trace-$label-$rep.jsonl" --manifest-out "$OUT/manifest-$label-$rep.yaml" || fail "gen-trace $label"
   # --require-provenance, now that there is provenance to require.
   #

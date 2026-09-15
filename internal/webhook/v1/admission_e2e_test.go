@@ -43,22 +43,38 @@ func startAdmissionEnv(t *testing.T) (context.Context, client.Client) {
 	env := &envtest.Environment{
 		CRDDirectoryPaths: []string{
 			filepath.Join("..", "..", "..", "config", "crd", "bases"),
-			filepath.Join("..", "..", "..", "test", "crd", "kueue"),
+			filepath.Join("..", "..", "..", "config", "kueue-crds"),
 		},
 		ErrorIfCRDPathMissing: true,
 		WebhookInstallOptions: envtest.WebhookInstallOptions{
 			Paths: []string{filepath.Join("..", "..", "..", "config", "webhook", "manifests.yaml")},
 		},
 	}
-	if dir := firstEnvtestBinaryDir(); dir != "" {
+	dir := firstEnvtestBinaryDir()
+	if dir != "" {
 		env.BinaryAssetsDirectory = dir
 	}
 
+	// Skip only when there is nothing to run the apiserver with.
+	//
+	// Every Start error used to skip, and when the Kueue CRDs moved out of test/crd/kueue this suite read a path
+	// that no longer existed, skipped on every run locally and in CI, and reported ok for two weeks.
+	if dir == "" && os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		t.Skip("no envtest binaries under bin/k8s and KUBEBUILDER_ASSETS is unset; run make setup-envtest")
+	}
 	cfg, err := env.Start()
 	if err != nil {
-		t.Skipf("envtest unavailable, skipping admission end-to-end: %v", err)
+		// Start fails after etcd and kube-apiserver are already up when a CRD or webhook install fails, and
+		// nothing else stops them: each such run left both processes and their /tmp data dirs behind.
+		stopErr := env.Stop()
+		t.Fatalf("start envtest: %v (stopping the partial control plane: %v)", err, stopErr)
 	}
-	t.Cleanup(func() { _ = env.Stop() })
+	// A failed Stop leaves etcd and kube-apiserver orphaned with their data dirs in /tmp, which is tmpfs here.
+	t.Cleanup(func() {
+		if err := env.Stop(); err != nil {
+			t.Errorf("stop envtest: %v", err)
+		}
+	})
 
 	if err := platformv1.AddToScheme(scheme.Scheme); err != nil {
 		t.Fatalf("add scheme: %v", err)

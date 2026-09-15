@@ -180,12 +180,20 @@ say "8. does the local plan check refuse, before launch, what used to be refused
 # Each of these already had a guard. Each guard fired on the rented instance: replay validates the arm after
 # the engines are up, and the cell floors are applied after the replay finishes. The point of the plan check
 # is not new refusals, it is the same ones at $0.
+#
+# TMPDIR is pointed at a directory of its own so the leftover check after the cases can see what the matrix
+# left behind, and so a leak lands in this script's WORK rather than in /tmp.
+mkdir -p "$WORK/plan-tmp"
+#
+# plan_case <what> <want> <ladder> <duration-ms> [study] [VAR=value ...]. The study defaults to the down
+# ladder, and trailing assignments override the load the case passes to the matrix.
 plan_case() {
-  local what="$1" want="$2" ladder="$3" dur="$4"
+  local what="$1" want="$2" ladder="$3" dur="$4" study="${5:-throughput-ladder-down-2026-09-13}"
+  shift $(( $# < 5 ? $# : 5 ))
   set +e
-  out=$(PLAN_ONLY=1 PLATFORM=kind KCTX=none BENCHHARNESS_BIN="$WORK/benchharness" \
-        LADDER="$ladder" LADDER_STUDY=throughput-ladder-down-2026-09-13 \
-        PREMIUM_WEIGHT=1 PROBE_WEIGHT=0 DURATION_MS="$dur" OUT="$WORK/plan-$RANDOM" \
+  out=$(env TMPDIR="$WORK/plan-tmp" PLAN_ONLY=1 PLATFORM=kind KCTX=none BENCHHARNESS_BIN="$WORK/benchharness" \
+        LADDER="$ladder" LADDER_STUDY="$study" \
+        PREMIUM_WEIGHT=1 PROBE_WEIGHT=0 DURATION_MS="$dur" OUT="$WORK/plan-$RANDOM" "$@" \
         bash hack/m5c-matrix.sh 2>&1)
   local code=$?
   set -e
@@ -200,6 +208,20 @@ plan_case "the registered downward ladder" ok "1.431979:0.23386882 2.564749:0.11
 plan_case "a trace too short for the sample floor" "below 500 completed" "1.431979:0.23386882" 420000
 plan_case "a rung the registry does not admit"     "is not one of study"  "skip skip skip skip 4.847585:0.05746316" 505000
 plan_case "a contender the rungs do not hold fixed" "varied two things at once" "2.564749:0.5" 505000
+# The independent-arrivals ladder: the same premium rungs, and ONE contender rate that holds 139 offers at every
+# rung, because the contender's schedule no longer depends on the premium rate at all.
+IND=throughput-ladder-independent-2026-09-15
+plan_case "the independent-arrivals ladder" ok "1.16:0.289 2.31:0.289 4.61:0.289" 505000 "$IND"
+# The numbers alone cannot say which model they were solved for, so the contender count is what catches this.
+plan_case "a weighted ladder's entries read as rates" "varied two things at once" "1.431979:0.23386882" 505000 "$IND"
+plan_case "a probe weight under independent arrivals" "registered independent arrivals" "1.16:0.289" 505000 "$IND" PROBE_WEIGHT=0.1
+# Every case above leaves the matrix from inside PLAN_ONLY, which exits before the full cleanup trap is armed.
+#
+# Each work directory holds a copy of the 34 MB benchharness, and /tmp is tmpfs here, so an unremoved one is
+# memory. 18 GB of them had accumulated by 2026-09-15.
+leftover=$(find "$WORK/plan-tmp" -mindepth 1 -maxdepth 1 | wc -l)
+[ "$leftover" = 0 ] && ok "the plan checks left no work directory behind" \
+  || bad "the plan checks left $leftover work director(ies) behind; each holds a benchharness copy, and /tmp is tmpfs"
 
 say "9. does the manifest the matrix now writes satisfy --require-provenance, and one without it fail?"
 # THE ARTEFACT, not the wiring.

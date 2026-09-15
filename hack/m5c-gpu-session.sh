@@ -86,7 +86,7 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 if [ -n "$LADDER" ]; then
   [ -z "${RATE:-}" ]         || fail "RATE and LADDER are both set. The ladder carries a rate per rung, so a single RATE is either ignored or overrides them -- refusing rather than picking."
-  [ -z "${NOISY_WEIGHT:-}" ] || fail "NOISY_WEIGHT and LADDER are both set. The ladder carries a contender weight per rung -- that is how it holds the contender fixed in absolute terms while the premium rate climbs."
+  [ -z "${NOISY_WEIGHT:-}" ] || fail "NOISY_WEIGHT and LADDER are both set. The ladder carries the contender's load per rung -- a weight, or a rate under a study registered with independent arrivals -- and that is how it holds the contender fixed in absolute terms while the premium rate climbs."
   [ -z "$ARMS_FROM_CALLER" ] || fail "ARMS and LADDER are both set. The ladder's arms are its two topologies plus one isolated baseline cell at the rung it stops on, which is not known until it stops."
   [ -z "$REPS_FROM_CALLER" ] || fail "REPS and LADDER are both set. Ladder rungs are different loads rather than repetitions of one, and pooling two of them would report a p99 for a load that was never offered."
 fi
@@ -179,7 +179,7 @@ PROBE_WEIGHT="${PROBE_WEIGHT:-0}"
 DURATION_MS="${DURATION_MS:-420000}"
 if [ -n "$LADDER" ]; then
   say "load   a ladder, ${DURATION_MS}ms per cell, weights premium=$PREMIUM_WEIGHT probe=$PROBE_WEIGHT"
-  say "       rungs (rate:contender-weight): $LADDER"
+  say "       rungs: $LADDER (RATE:NOISY_WEIGHT, or PREMIUM_RATE:NOISY_RATE for a study registered with independent arrivals)"
   say "       solved offline against the real gen-trace; every rung holds the contender at 139 offers +/- 2"
 else
   say "load   rate ${RATE}/s, ${DURATION_MS}ms, weights premium=$PREMIUM_WEIGHT noisy=$NOISY_WEIGHT probe=$PROBE_WEIGHT"

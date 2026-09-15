@@ -28,7 +28,24 @@ type Study struct {
 	// its isolated ceiling and its control first and its eight cells after, which no sort of those
 	// strings produces.
 	Arms []string
+	// Arrivals is the arrival model the study's pre-registration fixed, or empty where none was registered.
+	//
+	// Two ladders can carry the same arm names, criterion and rungs and differ only in how their traces were
+	// generated, and nothing in a trace file says which. So the model is recorded here, gen-trace refuses
+	// flags of the other model for a study that declares one, and hack/m5c-matrix.sh asks this registry
+	// rather than keeping a second copy of the answer in a shell variable.
+	Arrivals ArrivalModel
 }
+
+// ArrivalModel names how a study's traces assign arrival times, which decides the gen-trace flags that may build them.
+type ArrivalModel string
+
+const (
+	// ArrivalsWeighted draws every gap at one total rate and picks each arrival's tenant by weight.
+	ArrivalsWeighted ArrivalModel = "weighted"
+	// ArrivalsIndependent gives each tenant its own Poisson process keyed by its name; see TenantSpec.RatePerSec.
+	ArrivalsIndependent ArrivalModel = "independent"
+)
 
 const (
 	// StudyM5BGateway is the four-condition gateway experiment M5-b measured: an isolated baseline, the
@@ -73,6 +90,14 @@ const (
 	// p99 for a load nobody offered. The trace-identity refusal would also catch it, but a refusal is not the
 	// same as a reader being able to tell two experiments apart.
 	StudyThroughputLadderDown = "throughput-ladder-down-2026-09-13"
+	// StudyThroughputLadderIndependent is the downward ladder's rungs re-registered under independent
+	// arrivals, in docs/superpowers/specs/2026-09-15-a-ladder-whose-contender-holds-still.md.
+	//
+	// The down ladder solved a contender weight for every rung to hold 139 offers, and the count held while the
+	// contender's SCHEDULE changed at every rung, so a rung-to-rung comparison moved two things at once. Here
+	// the contender's rows are byte-identical at every rung. It is a separate study because its rung01 trace is
+	// not the down ladder's rung01 trace, and pooling the two would report a p99 over two contender schedules.
+	StudyThroughputLadderIndependent = "throughput-ladder-independent-2026-09-15"
 )
 
 // The factors the price-of-protection sweep crosses.
@@ -236,12 +261,19 @@ var studies = map[string]Study{
 		Arms: []string{ArmR1, ArmShared, ArmTimeSlicing, ArmMPS},
 	},
 	StudyThroughputLadder: {
-		ID:   StudyThroughputLadder,
-		Arms: throughputLadderArms(),
+		ID:       StudyThroughputLadder,
+		Arms:     throughputLadderArms(),
+		Arrivals: ArrivalsWeighted,
 	},
 	StudyThroughputLadderDown: {
-		ID:   StudyThroughputLadderDown,
-		Arms: throughputLadderArms(),
+		ID:       StudyThroughputLadderDown,
+		Arms:     throughputLadderArms(),
+		Arrivals: ArrivalsWeighted,
+	},
+	StudyThroughputLadderIndependent: {
+		ID:       StudyThroughputLadderIndependent,
+		Arms:     throughputLadderArms(),
+		Arrivals: ArrivalsIndependent,
 	},
 }
 
