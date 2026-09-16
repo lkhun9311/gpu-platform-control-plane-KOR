@@ -625,6 +625,14 @@ sed -i "s|__BUCKET__|$BUCKET|; s|__PREFIX__|$PREFIX|" /usr/local/bin/m5c-cell-do
 chmod +x /usr/local/bin/m5c-cell-done
 export CELL_DONE_HOOK=/usr/local/bin/m5c-cell-done
 
+# The commit this session shipped, which the matrix cannot work out for itself here.
+#
+# hack/m5c-matrix.sh derives SOURCE_COMMIT with `git rev-parse` when it is unset, and the instance unpacks a
+# source TARBALL with no .git -- so it fell back to the literal string "unknown" and wrote that into every
+# manifest as gatewaySHA. The 2026-09-16 ladder was bought that way: seven paid manifests naming no build,
+# past a --require-provenance that only refused an EMPTY value. The commit was known here all along.
+export SOURCE_COMMIT="$COMMIT"
+
 bash hack/m5c-matrix.sh; matrix_rc=$?
 echo "matrix exited $matrix_rc"
 

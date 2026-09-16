@@ -687,6 +687,47 @@ func TestTheMatrixPassesTheWholeLoadAndTheModelToGenTrace(t *testing.T) {
 	}
 }
 
+// The instance has the commit and has to hand it to the matrix, which cannot work it out for itself there.
+//
+// hack/m5c-matrix.sh falls back to `git rev-parse ... || echo unknown` when SOURCE_COMMIT is unset, and the
+// instance unpacks a source tarball with no .git. The 2026-09-16 paid ladder recorded "unknown" as the
+// gatewaySHA of all seven manifests because of it. The wrapper knew the commit the whole time: it substitutes
+// it into the payload and uploads it as commit.txt.
+func TestTheInstanceHandsTheCommitToTheMatrix(t *testing.T) {
+	src, err := os.ReadFile("../../hack/m5c-gpu-session.sh")
+	if err != nil {
+		t.Fatalf("read the session wrapper: %v", err)
+	}
+
+	// Comments stripped first, for the reason the gen-trace contract test above strips them: the rationale
+	// beside this export names the variable, so prose alone would satisfy the check.
+	var code strings.Builder
+	for line := range strings.SplitSeq(string(src), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		code.WriteString(line)
+		code.WriteString("\n")
+	}
+	stripped := code.String()
+
+	const (
+		export = `export SOURCE_COMMIT="$COMMIT"`
+		invoke = "bash hack/m5c-matrix.sh; matrix_rc=$?"
+	)
+	at := strings.Index(stripped, export)
+	run := strings.Index(stripped, invoke)
+	if at < 0 {
+		t.Fatalf("the instance script never exports SOURCE_COMMIT, so every paid manifest records the commit as %q", "unknown")
+	}
+	if run < 0 {
+		t.Fatal("the instance script no longer invokes the matrix the way this test expects; re-point it rather than deleting it")
+	}
+	if at > run {
+		t.Error("SOURCE_COMMIT is exported after the matrix runs, so the matrix still derives it from a tree with no .git")
+	}
+}
+
 // sessionRunners are the scripts that build an EC2 user-data payload and launch an instance with it.
 var sessionRunners = []string{
 	"hack/m5b-scheduler-microtest.sh",
