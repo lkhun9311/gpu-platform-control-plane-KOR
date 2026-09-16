@@ -42,6 +42,7 @@ import (
 	// 일반 코드에서는 이름 출처가 흐려져 권장되지 않지만, 테스트에서는 명세를 문장처럼 읽히게 하려고 관례적으로 허용한다.
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // TestGateway: gateway package의 Ginkgo suite를 표준 go test에 등록하는 진입점이다.
@@ -119,5 +120,23 @@ var _ = Describe("readiness", func() {
 		rr2 := httptest.NewRecorder()
 		s.readyz(rr2, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 		Expect(rr2.Code).To(Equal(http.StatusOK)) // markReady 이후 200
+	})
+})
+
+// The point of admission_mode_active is that it is present when nothing else about admission is, so the two
+// things worth asserting are that it appears for a mode which publishes no other series at all ("off"), and
+// that switching modes leaves exactly one series behind rather than accumulating one per mode ever set — a
+// reader seeing two modes at 1 has no way to tell which one is running.
+var _ = Describe("admission mode series", func() {
+	It("reports the installed mode and never leaves a stale one behind", func() {
+		s := &Server{}
+
+		s.SetAdmitter(AdmissionOff, nil)
+		Expect(testutil.ToFloat64(admissionModeActive.WithLabelValues(string(AdmissionOff)))).To(Equal(1.0))
+		Expect(testutil.CollectAndCount(admissionModeActive)).To(Equal(1))
+
+		s.SetAdmitter(AdmissionKVAware, nil)
+		Expect(testutil.ToFloat64(admissionModeActive.WithLabelValues(string(AdmissionKVAware)))).To(Equal(1.0))
+		Expect(testutil.CollectAndCount(admissionModeActive)).To(Equal(1))
 	})
 })

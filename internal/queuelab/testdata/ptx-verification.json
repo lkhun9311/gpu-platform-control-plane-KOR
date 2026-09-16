@@ -1,0 +1,11 @@
+{
+  "note": "Written by hack/verify-ptx.sh. It attests that the PTX whose sha256 is below compiled with the named ptxas for the named targets. It does not attest that ptxas ran on whatever machine reads this; the test that reads it requires the hash to match the PTX in the tree, so an edit to the kernel invalidates the attestation and the script must be run again.",
+  "ptxSHA256": "f7613bb4eef83253dd9030832078869cd3a9a330c4d1060277cbacac84d8e20b",
+  "ptxasVersion": "ptxas: NVIDIA (R) Ptx optimizing assembler Copyright (c) 2005-2025 NVIDIA Corporation Built on Tue_May_27_02:18:05_PDT_2025 Cuda compilation tools, release 12.9, V12.9.86 Build cuda_12.9.r12.9/compiler.36037853_0",
+  "targets": [
+    "sm_75",
+    "sm_86",
+    "sm_89",
+    "sm_90"
+  ]
+}

@@ -98,6 +98,11 @@ var (
 	//   - &scheme.Builder{...} 의 & 는 "구조체 값을 만든 뒤 그 주소(포인터)를 얻는다"는 뜻이다.
 	//     포인터여야 여러 파일이 같은 Builder 인스턴스 하나에 타입을 누적해 등록할 수 있다.
 	//     값으로 두면 각자 복사본에 등록하게 되어 등록이 사라진다.
+	//
+	// controller-runtime v0.24.0에서 이 헬퍼는 deprecated 되었고 apimachinery의 builder로 대체되었다.
+	//
+	// 이 패키지의 API 타입을 전부 옮기는 것은 이 변경의 범위를 넘으므로, 경고만 여기서 억제한다.
+	//nolint:staticcheck // SA1019: 이 변경과 별개로 추적한다. 위 주석 참고.
 	SchemeBuilder = &scheme.Builder{GroupVersion: SchemeGroupVersion}
 
 	// AddToScheme: 위 Builder에 모인 타입들을 실제 runtime.Scheme에 밀어 넣는 함수다.

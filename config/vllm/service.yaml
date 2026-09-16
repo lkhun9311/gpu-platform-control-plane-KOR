@@ -1,0 +1,20 @@
+# The one endpoint both the proxy and the KV scraper use.
+#
+# They must resolve to the same engine. If the gateway proxied here while scraping somewhere else, the
+# KV-aware arm would admit against a cache that is not the one filling up -- so the Service exists partly
+# to make that impossible to get wrong: one selector, one Pod behind it, one port for both paths.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-qwen25-3b
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: vllm
+spec:
+  selector:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: vllm
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

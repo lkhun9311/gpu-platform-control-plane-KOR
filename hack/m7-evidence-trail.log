@@ -1,0 +1,18 @@
+== adopt cluster context kind-platform
+== install the WorkloadRun CRD (and remove it afterwards)
+== create the target
+== build and load the stub
+== wait for the platform to report it Ready
+target phase: Ready
+== create the WorkloadRun
+== build and start the recorder
+== inject: delete the serving Pod
+deleting m7-target-764b4978b-m626q
+COMPLETE verdict=Recovered reason=observed Ready at 20s, within the declared 45s
+== the trail
+Complete verdict=Recovered recoveredAt=20s
+  0s Ready healthy=true
+  9s Pending healthy=false
+  20s Ready healthy=true
+== M7 OK: a real Pod deletion produced a real transition in a trail nobody wrote by hand.
+== remove what this run added to the adopted cluster

@@ -1,0 +1,24 @@
+# The GitOps operator WITH its admission guards.
+#
+# It exists as a layer above config/operator rather than as three lines inside it, and the reason is a
+# name-mangling trap this repository has now met twice.
+#
+# config/operator sets `namePrefix: gpu-platform-control-plane-`. The webhook manifests spell their Service
+# and configuration names out in full, deliberately, because config/webhook-enabled pulls them in as a
+# SIBLING of ../default where no transformer reaches them. Put the same files INSIDE config/operator and the
+# prefix does reach them, producing
+# `gpu-platform-control-plane-gpu-platform-control-plane-webhook-service` -- a Service the Certificate's
+# hardcoded dnsNames do not cover, so the apiserver's TLS handshake fails, and with failurePolicy: Fail every
+# governed write in the cluster is refused. That is an outage, not a typo, and it was caught only by diffing
+# this overlay's rendered ValidatingWebhookConfiguration against config/webhook-enabled's.
+#
+# So the guards go on top, where there is no prefix to apply, exactly as webhook-enabled layers them over
+# default. The two paths now include the same component and render the same webhook configuration.
+#
+# cert-manager is a hard dependency: without it the Certificate is never issued and every governed write is
+# refused for want of a serving certificate. Argo CD must sync cert-manager before this Application.
+resources:
+  - ../operator
+
+components:
+  - ../webhook-component

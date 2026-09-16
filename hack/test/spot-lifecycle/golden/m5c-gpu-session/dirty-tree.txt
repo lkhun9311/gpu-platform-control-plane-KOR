@@ -1,0 +1,12 @@
+aws sts get-caller-identity --query Account --output text
+aws sts get-caller-identity --query Arn --output text
+--- exit 1
+--- messages
+== study  M5-c sharing matrix -- does giving each tenant its own engine on a shared card protect the tail
+== arms   [R1 shared timeSlicing mps], 1 repetition(s) each
+== output <OUT>
+== load   rate 9.85/s, 420000ms, weights premium=1 noisy=0.054 probe=0
+==        (carried from the whole-card run; the pilot's job is to re-derive them for a half-card engine)
+== credentials expire in 719 min; this session needs about 74 plus 30 of headroom
+FAIL: the working tree is dirty. This session records a commit as the provenance of its numbers. Commit, or set REQUIRE_CLEAN_TREE=0 and accept that the archive will not match the tree you are looking at
+--- files

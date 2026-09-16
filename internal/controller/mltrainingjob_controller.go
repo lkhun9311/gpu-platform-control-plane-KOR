@@ -14,117 +14,468 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// package 선언: 이 파일이 속한 패키지 이름이다.
-// 같은 디렉터리(internal/controller)의 모든 .go 파일은 반드시 같은 package 이름(controller)을 가져야 한다.
-// 그래서 reconcile_helpers.go의 setPhase나 nodehealth_controller.go의 NodeHealthReconciler를 import 없이 바로 쓸 수 있다.
 package controller
 
-// import 블록: 이 파일이 사용하는 외부 패키지들을 선언한다.
-// 관례상 (1)표준 라이브러리, (2)서드파티, (3)이 프로젝트 내부 순으로 빈 줄로 그룹을 나눈다.
 import (
-	// context: 요청의 취소/타임아웃 신호를 함수 사이로 전달하는 표준 타입이다.
-	// 쿠버네티스 클라이언트 호출은 매니저가 종료될 때 진행 중인 작업을 끊을 수 있도록 전부 ctx를 첫 인자로 받는다.
 	"context"
+	"fmt"
+	"maps"
+	"time"
 
-	// runtime: 쿠버네티스 오브젝트의 직렬화/역직렬화 규칙을 담은 Scheme 타입이 들어 있다.
-	// Scheme는 "Go 타입 ↔ GroupVersionKind" 대응표라고 보면 된다.
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	// ctrl: sigs.k8s.io/controller-runtime의 별칭(alias)이다.
-	// 원래 패키지 이름은 controllerruntime이라 길어서 관례적으로 ctrl로 줄여 부른다.
-	// ctrl.Request, ctrl.Result, ctrl.Manager 등 컨트롤러 골격에 필요한 타입이 여기 있다.
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
-	// client: 쿠버네티스 API를 읽고 쓰는 클라이언트 인터페이스(client.Client)를 제공한다.
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	// logf: controller-runtime의 구조화 로깅 도우미이며, ctx에 실려 온 로거를 꺼내 쓴다.
-	// 별칭 logf를 쓰는 이유는 표준 라이브러리 log와 이름이 겹치지 않게 하기 위해서다.
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	kueuev1beta1 "sigs.k8s.io/kueue/apis/kueue/v1beta1"
 
-	// platformv1: 우리 프로젝트가 정의한 CRD 타입들(MLTrainingJob 등)이다.
-	// import 경로 앞의 platformv1은 별칭이다.
-	// 원래 패키지 이름은 v1이지만 다른 v1들(metav1, corev1 등)과 헷갈리지 않도록 platformv1이라는 이름으로 부른다.
 	platformv1 "github.com/lkhun9311/gpu-mlops-platform-control-plane/api/v1"
 )
 
-// MLTrainingJobReconciler: MLTrainingJob object를 reconcile하는 컨트롤러 본체다.
-// reconcile이란 "선언된 spec(원하는 상태)과 클러스터의 실제 상태를 비교해 실제를 원하는 쪽으로 밀어붙이는 것"이다.
-//
-// Go 문법 설명:
-//   - type 이름 struct { ... } 는 여러 필드를 묶는 사용자 정의 타입(구조체) 선언이다.
-//   - client.Client 처럼 필드 이름 없이 타입만 적은 것을 "임베딩(embedding)"이라고 부른다.
-//     임베딩하면 그 타입의 메서드가 바깥 타입의 메서드처럼 승격되어, r.Get(...)이나 r.Status()를 r.Client.Get(...) 없이 바로 쓸 수 있다.
-//   - Scheme *runtime.Scheme 처럼 별표(*)를 붙이면 "runtime.Scheme의 포인터"라는 뜻이다.
-//     Scheme는 매니저가 만든 인스턴스 하나를 공유해야 하므로 값 복사가 아닌 포인터로 들고 있는다.
-//   - 대문자로 시작하는 이름(MLTrainingJobReconciler, Scheme)은 패키지 밖에서도 보이는 "공개(export)"다.
-//     cmd/main.go에서 이 타입을 만들어 매니저에 등록해야 하므로 공개여야 한다.
+// MLTrainingJobReconciler reconciles a MLTrainingJob object
 type MLTrainingJobReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
 
-// 아래 세 줄은 주석처럼 보이지만 실제로는 코드 생성 지시자(kubebuilder 마커)다.
-// make manifests가 이 마커를 읽어 config/rbac 아래의 ClusterRole YAML을 생성하므로,
-// 문구를 번역하거나 수정하면 컨트롤러가 실제로 필요한 권한을 잃는다.
-// 각각 (1)MLTrainingJob 본체, (2)status 서브리소스, (3)finalizers 서브리소스에 대한 권한을 선언한다.
 // +kubebuilder:rbac:groups=platform.lkhun9311.github.io,resources=mltrainingjobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=platform.lkhun9311.github.io,resources=mltrainingjobs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=platform.lkhun9311.github.io,resources=mltrainingjobs/finalizers,verbs=update
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=workloads,verbs=get;list;watch
 
-// Reconcile: cluster의 현재 상태를 원하는 상태에 가깝게 옮기는 main Kubernetes reconciliation loop의 일부다.
-// controller-runtime이 MLTrainingJob에 변화가 생길 때마다 이 메서드를 대신 호출해 준다.
-// TODO(user): MLTrainingJob object가 지정한 상태와 실제 cluster 상태를 비교하고,
-// 사용자가 지정한 상태를 cluster가 반영하도록 동작을 수행하게끔 Reconcile 함수를 수정할 것
+// Reconcile syncs an owned, suspended batch/v1 Job from the MLTrainingJob spec.
 //
-// Go 문법 설명:
-//   - func (r *MLTrainingJobReconciler) 부분은 리시버(receiver)다.
-//     이 함수가 MLTrainingJobReconciler 타입에 붙는 "메서드"라는 뜻이고, 호출은 reconciler.Reconcile(...) 형태가 된다.
-//   - ctrl.Request는 "어떤 오브젝트를 재조정하라"는 요청이며, 안에는 NamespacedName(이름 + 네임스페이스)만 들어 있다.
-//     오브젝트 자체가 아니라 이름만 오는 이유는, 요청이 큐에 머무는 동안 오브젝트가 이미 바뀌었을 수 있어서다.
-//     그래서 컨트롤러는 항상 이름으로 최신 상태를 다시 읽어야 한다.
-//   - ctrl.Result는 "이 요청을 다시 큐에 넣을지"를 컨트롤러 런타임에 알리는 반환값이다.
-//     빈 ctrl.Result{}는 "재큐 없음"을, Requeue나 RequeueAfter를 채우면 "나중에 다시 불러 달라"를 뜻한다.
-//   - 반환 타입 (ctrl.Result, error)처럼 Go는 값을 여러 개 돌려줄 수 있고, 관례상 마지막을 error로 둔다.
-//     error를 nil이 아닌 값으로 돌려주면 컨트롤러 런타임이 지수 백오프로 자동 재시도한다.
+// Suspend is set true only when the Job is first created.
 //
-// Reconcile과 그 Result에 대한 자세한 내용은 아래 참고
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/reconcile
+// Kueue flips it to false to admit the workload, and this reconciler never touches it again on update, or the operator and Kueue would fight over the field forever.
 func (r *MLTrainingJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	// logf.FromContext(ctx)는 컨트롤러 런타임이 ctx에 미리 심어 둔 로거를 꺼낸다.
-	// 이 로거에는 재조정 대상 이름 같은 문맥이 이미 붙어 있어서, 로그를 나중에 요청 단위로 추적하기 좋다.
 	log := logf.FromContext(ctx)
-	// M1: 빈 reconciler, 요청만 log로 기록
-	// batch/v1 Job 생성과 Kueue admission은 M5에서 다룸
-	//
-	// 설계 근거: M1의 목표는 CRD 스키마와 컨트롤러 배선이 실제로 동작하는지 확인하는 것이다.
-	// 그래서 이 단계에서는 부수 효과 없이 요청을 관측만 하고, 실제 워크로드 생성은 뒤 마일스톤으로 미룬다.
-	// 이렇게 해 두면 CRD round-trip과 컨트롤러 등록만 독립적으로 검증할 수 있다.
-	//
-	// Go 문법 설명: log.Info의 두 번째 인자부터는 "키, 값, 키, 값..." 쌍으로 이어지는 구조화 로그 필드다.
-	log.Info("Reconciling MLTrainingJob", "name", req.Name, "namespace", req.Namespace)
 
-	// 빈 Result와 nil error를 돌려준다.
-	// "할 일을 다 했고 재큐도 필요 없다"는 뜻이며, 컨트롤러가 성공적으로 한 바퀴를 끝냈음을 알린다.
+	var mltj platformv1.MLTrainingJob
+	if err := r.Get(ctx, req.NamespacedName, &mltj); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// Handle deletion: the owned Job carries a controller owner reference, so garbage collection removes it.
+	//
+	// The reconciler only needs to drop the finalizer once that has had a chance to happen.
+	if !mltj.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(&mltj, mlTrainingJobFinalizer) {
+			controllerutil.RemoveFinalizer(&mltj, mlTrainingJobFinalizer)
+			if err := r.Update(ctx, &mltj); err != nil {
+				return ctrl.Result{}, fmt.Errorf("remove finalizer from mltrainingjob %s: %w", mltj.Name, err)
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Ensure the finalizer is present before doing any work.
+	if !controllerutil.ContainsFinalizer(&mltj, mlTrainingJobFinalizer) {
+		controllerutil.AddFinalizer(&mltj, mlTrainingJobFinalizer)
+		if err := r.Update(ctx, &mltj); err != nil {
+			return ctrl.Result{}, fmt.Errorf("add finalizer to mltrainingjob %s: %w", mltj.Name, err)
+		}
+		return ctrl.Result{}, nil
+	}
+
+	if conflict, err := r.ownedConflict(ctx, &mltj, &batchv1.Job{}); err != nil {
+		return ctrl.Result{}, fmt.Errorf("check job ownership %s/%s: %w", mltj.Namespace, mltj.Name, err)
+	} else if conflict {
+		log.Info("Job exists and is not owned by this MLTrainingJob; refusing to adopt", "name", mltj.Name)
+		return r.markFailed(ctx, &mltj, mltjReasonConflict, "a Job of the same name is not owned by this MLTrainingJob")
+	}
+
+	desired := BuildJob(&mltj)
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: mltj.Name, Namespace: mltj.Namespace}}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, job, func() error {
+		// Suspend and the pod template are set once, on create, and never touched again.
+		//
+		// Suspend must stay untouched after that so Kueue can unsuspend to admit the workload.
+		//
+		// The template is immutable once the Job exists (its labels must keep matching the server-assigned selector), so re-sending our locally built copy on every reconcile would fail validation.
+		if job.CreationTimestamp.IsZero() {
+			job.Spec.Suspend = new(true)
+			job.Spec.Template = desired.Spec.Template
+		}
+		// Merge the desired labels in rather than replacing the map, so any label Kueue or the apiserver adds to the Job is preserved across reconciles.
+		if job.Labels == nil {
+			job.Labels = map[string]string{}
+		}
+		maps.Copy(job.Labels, desired.Labels)
+		job.Spec.Parallelism = desired.Spec.Parallelism
+		job.Spec.Completions = desired.Spec.Completions
+		return controllerutil.SetControllerReference(&mltj, job, r.Scheme)
+	}); err != nil {
+		return ctrl.Result{}, fmt.Errorf("sync training job %s/%s: %w", mltj.Namespace, mltj.Name, err)
+	}
+
+	log.Info("Synced training job", "mlTrainingJob", req.String())
+
+	wl, err := r.getWorkloadForJob(ctx, job)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("get kueue workload for job %s/%s: %w", mltj.Namespace, mltj.Name, err)
+	}
+
+	phase, cond := computeMLTJPhase(job, wl)
+	// Kueue's own admission stamp, not this controller's clock, for the start of the wait it reports.
+	var admittedAt *metav1.Time
+	if wl != nil {
+		admittedAt = kueueAdmittedStamp(wl.Status.Conditions)
+	}
+	if err := r.setMLTJPhase(ctx, &mltj, phase, cond, admittedAt); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	return ctrl.Result{}, nil
 }
 
-// SetupWithManager: 이 controller를 Manager에 등록한다.
-// cmd/main.go가 프로세스 시작 시 한 번 호출하며, 이 호출이 있어야 Reconcile이 이벤트를 받기 시작한다.
+// BuildJob renders the desired batch/v1 Job for a training job.
 //
-// Go 문법 설명:
-//   - ctrl.Manager는 캐시, 클라이언트, 리더 선출 등 컨트롤러들이 공유하는 실행 환경이다.
-//   - 아래는 "빌더 체인(builder chain)"이라는 패턴이다.
-//     각 메서드가 빌더 자신을 다시 돌려주기 때문에 .For(...).Named(...).Complete(...)처럼 점으로 계속 이어 붙일 수 있다.
-//   - 줄 끝의 점(.)은 "다음 줄에 이어진다"는 표시이며, Go의 자동 세미콜론 삽입을 피하려면 점을 줄 끝에 두어야 한다.
+// Suspend is deliberately absent here: the caller decides whether to set it, since it only applies on the create path and must never be reconciled on update, as Kueue owns it after admission.
+//
+// It is exported, and takes no receiver, because the Pod template below is the one thing about this controller another binary has to be able to ask about without running it: cmd/queuelabrun keys its termination qualification on this template, so that adding a preStop hook or a grace period here invalidates a reading taken before the change instead of quietly changing what a run measures.
+//
+// That makes one property of this function load-bearing outside this package, and it was already true when the receiver was still here and unused: it must stay a pure function of its argument.
+//
+// A later version that read anything off the client, the manager or the cluster would still render a Job for the reconciler and would panic or lie for a caller that has none of those.
+func BuildJob(mltj *platformv1.MLTrainingJob) *batchv1.Job {
+	labels := map[string]string{kueueQueueLabel: mltj.Spec.Queue}
+	return &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: mltj.Name, Namespace: mltj.Namespace, Labels: labels},
+		Spec: batchv1.JobSpec{
+			Parallelism: new(defaultOne(mltj.Spec.Parallelism)),
+			Completions: new(defaultOne(mltj.Spec.Completions)),
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers: []corev1.Container{{
+						Name:    "trainer",
+						Image:   mltj.Spec.Image,
+						Command: mltj.Spec.Command,
+						Env:     driverCapabilities(mltj.Spec.GPUCount),
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{nvidiaGPUResource: *resource.NewQuantity(int64(mltj.Spec.GPUCount), resource.DecimalSI)},
+						},
+					}},
+				},
+			},
+		},
+	}
+}
+
+// driverCapabilities states which NVIDIA driver libraries this Pod needs mounted into it, for a Pod that asks for a device.
+//
+// nvidia-container-toolkit does not ship a CUDA runtime into a container: it bind-mounts the HOST's driver libraries, and which of them it mounts is decided by NVIDIA_DRIVER_CAPABILITIES at container CREATION. The workload cannot set it, because by the time any process in the container runs, the mounts have already been decided.
+//
+// Leaving it unset means taking whatever the toolkit on that node defaults to, and the default is the problem. Historically it was "utility", which mounts nvidia-smi and libnvidia-ml and NOT libcuda.so.1 -- "compute" is what mounts the one a CUDA program loads. Newer toolkit builds default to "utility,compute" and CDI-based setups are more permissive still, so whether a container gets libcuda depends on the AMI, the toolkit version and the runtime mode rather than on anything this repository states.
+//
+// The failure that produces is silent and expensive. A GPU is allocated, the Pod starts, the workload's ctypes.CDLL("libcuda.so.1") raises, it falls back to the CPU loop, and the run completes with plausible iteration counts and device-not-observed -- indistinguishable from a cluster with no cards at all. That is exactly the outcome the alpine-to-glibc image move was made to prevent; the move fixed the linkage half and left this half to a default.
+//
+// It is set only when a device is requested. A Pod asking for no GPU that declared driver capabilities anyway would be making a claim about hardware it has not been given.
+//
+// This changes the rendered Pod template, so it changes podTemplateHashOf and invalidates every termination canary taken before it -- by design, and the reason to do it before a GPU node exists rather than after: the re-take is free on a cluster whose workers are already there.
+func driverCapabilities(gpuCount int32) []corev1.EnvVar {
+	if gpuCount <= 0 {
+		return nil
+	}
+	return []corev1.EnvVar{{Name: "NVIDIA_DRIVER_CAPABILITIES", Value: "compute,utility"}}
+}
+
+// defaultOne returns v, or 1 when v is not positive.
+//
+// The CRD's kubebuilder default of 1 only applies when the field is omitted from a request payload.
+//
+// It does not backfill a zero-value struct built in Go, so BuildJob applies the same default explicitly.
+func defaultOne(v int32) int32 {
+	if v <= 0 {
+		return 1
+	}
+	return v
+}
+
+// markFailed reflects a deterministic failure into status as Failed with the JobSynced condition set to False.
+//
+// It returns a RequeueAfter so the job recovers automatically once the blocking condition clears, since a conflicting foreign Job is not owned and so does not trigger the owned-Job watch.
+func (r *MLTrainingJobReconciler) markFailed(ctx context.Context, mltj *platformv1.MLTrainingJob, reason, msg string) (ctrl.Result, error) {
+	desired := mltj.Status.DeepCopy()
+	phaseChanged := desired.Phase != mltjPhaseFailed
+	desired.Phase = mltjPhaseFailed
+	desired.ObservedGeneration = mltj.Generation
+	meta.SetStatusCondition(&desired.Conditions, metav1.Condition{
+		Type: mltjCondSynced, Status: metav1.ConditionFalse, Reason: reason, Message: msg, ObservedGeneration: mltj.Generation,
+	})
+	if !equality.Semantic.DeepEqual(mltj.Status, *desired) {
+		if phaseChanged {
+			now := metav1.Now()
+			desired.LastTransitionTime = &now
+		}
+		mltj.Status = *desired
+		if err := r.Status().Update(ctx, mltj); err != nil {
+			return ctrl.Result{}, fmt.Errorf("update mltrainingjob status %s/%s to Failed: %w", mltj.Namespace, mltj.Name, err)
+		}
+
+		// Count the transition only after the status write succeeds, so a reconcile that finds the object already Failed does not inflate the metric.
+		mlTrainingJobFailedTotal.WithLabelValues(reason).Inc()
+
+		// The phase counter tracks every entry into a phase, so a failure reached here counts the same as one reached through the normal phase translation.
+		if phaseChanged {
+			mlTrainingJobPhaseTotal.WithLabelValues(mltjPhaseFailed).Inc()
+		}
+	}
+	return ctrl.Result{RequeueAfter: time.Minute}, nil
+}
+
+// computeMLTJPhase derives the training phase from the Job and its Kueue Workload.
+//
+// Kueue admission is read from the Workload's Admitted condition, since the Job's suspend flag alone is ambiguous mid-transition.
+func computeMLTJPhase(job *batchv1.Job, wl *kueuev1beta1.Workload) (string, metav1.Condition) {
+	if isJobConditionTrue(job, batchv1.JobFailed) {
+		return mltjPhaseFailed, admittedCondition(metav1.ConditionFalse, "JobFailed")
+	}
+	if isJobConditionTrue(job, batchv1.JobComplete) {
+		return mltjPhaseSucceeded, admittedCondition(metav1.ConditionTrue, "JobComplete")
+	}
+	if job.Status.Active > 0 {
+		return mltjPhaseRunning, admittedCondition(metav1.ConditionTrue, "PodsRunning")
+	}
+	if wl != nil && meta.IsStatusConditionTrue(wl.Status.Conditions, kueuev1beta1.WorkloadAdmitted) {
+		return mltjPhaseAdmitted, admittedCondition(metav1.ConditionTrue, "QuotaReserved")
+	}
+	return mltjPhasePending, admittedCondition(metav1.ConditionFalse, "QueuedForAdmission")
+}
+
+// isJobConditionTrue reports whether the Job carries the given condition type with status True.
+func isJobConditionTrue(job *batchv1.Job, condType batchv1.JobConditionType) bool {
+	for i := range job.Status.Conditions {
+		if job.Status.Conditions[i].Type == condType {
+			return job.Status.Conditions[i].Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+// admittedCondition builds the MLTrainingJob Admitted condition for a phase transition.
+//
+// The message is left empty; the reason and the phase it is paired with already say what happened.
+func admittedCondition(status metav1.ConditionStatus, reason string) metav1.Condition {
+	return metav1.Condition{Type: mltjCondAdmitted, Status: status, Reason: reason}
+}
+
+// WorkloadJobRefIndex indexes a Kueue Workload by every Job UID that could claim it.
+//
+// A cached List narrows by FIELD indexes only. A label selector is applied by walking the whole store, so
+// the label lookup this replaced cost O(N) in the number of Workloads even when it matched immediately —
+// measured in BenchmarkGetWorkloadForJobHit, which never reaches the fallback and still grew linearly.
+const WorkloadJobRefIndex = ".metadata.jobRef"
+
+// indexWorkloadByJobRef emits both claims a Workload can carry: the job-uid label and its owner references.
+//
+// Both go into ONE index so the lookup is a single List. Indexing only the label would leave the owner-
+// reference fallback listing the entire namespace, which measured about 20x the label walk because it
+// deep-copies every Workload into the result rather than the one it matched.
+func indexWorkloadByJobRef(o client.Object) []string {
+	wl, ok := o.(*kueuev1beta1.Workload)
+	if !ok {
+		return nil
+	}
+	// A Workload can be claimed by at most one Job, but the two claims are indexed separately because a
+	// Workload missing the label is exactly the case the owner-reference path exists to catch.
+	refs := make([]string, 0, 1+len(wl.OwnerReferences))
+	if uid := wl.Labels[kueueJobUIDLabel]; uid != "" {
+		refs = append(refs, uid)
+	}
+	for _, ref := range wl.OwnerReferences {
+		if string(ref.UID) != "" {
+			refs = append(refs, string(ref.UID))
+		}
+	}
+	return refs
+}
+
+// getWorkloadForJob returns the Kueue Workload created for a Job, or nil if Kueue has not created one yet.
+//
+// Kueue stamps every Workload it creates with the kueue.x-k8s.io/job-uid label, so a labelled match is
+// preferred. A Workload whose owner reference points at the Job's UID is accepted as a fallback, in case a
+// Workload ever exists without the label.
+//
+// Both claims resolve through one indexed List. This lookup runs on the way in for EVERY MLTrainingJob —
+// before Kueue has created the Workload there is nothing to match, which is the path that used to pay for
+// both a full label walk and a full namespace list. With MaxConcurrentReconciles at its default of 1, a
+// per-item cost proportional to the namespace's size drains the queue in O(N^2).
+//
+// The index lives on the manager's cache, so a client that reads through to the apiserver cannot serve this
+// List: the apiserver rejects field selectors it does not define for the resource.
+func (r *MLTrainingJobReconciler) getWorkloadForJob(ctx context.Context, job *batchv1.Job) (*kueuev1beta1.Workload, error) {
+	var claimed kueuev1beta1.WorkloadList
+	if err := r.List(ctx, &claimed, client.InNamespace(job.Namespace),
+		client.MatchingFields{WorkloadJobRefIndex: string(job.UID)}); err != nil {
+		return nil, fmt.Errorf("list workloads claiming job %s/%s: %w", job.Namespace, job.Name, err)
+	}
+	if len(claimed.Items) == 0 {
+		return nil, nil
+	}
+
+	// The label is preferred over the owner reference, so the two are separated here rather than taking
+	// whichever the index happened to return first.
+	//
+	// Within each group the OLDEST wins, by creation time and then by name. List order is not a selection
+	// rule: the cache can return duplicates in either order, so "the first one" made the chosen Workload — and
+	// therefore the phase written to status — depend on which way a map happened to iterate. Status could
+	// oscillate between two Workloads with nothing having changed. Oldest-first is the same tie-break the
+	// gateway's backend ordering uses, and for the same reason: a deterministic answer that does not move.
+	var labelled, owned *kueuev1beta1.Workload
+	for i := range claimed.Items {
+		wl := &claimed.Items[i]
+		if wl.Labels[kueueJobUIDLabel] == string(job.UID) {
+			if labelled == nil || olderWorkload(wl, labelled) {
+				labelled = wl
+			}
+			continue
+		}
+		if owned == nil || olderWorkload(wl, owned) {
+			owned = wl
+		}
+	}
+
+	if labelled != nil {
+		// Kueue keeps one Workload per Job UID, so more than one match means that invariant was violated upstream.
+		//
+		// Surface it rather than silently picking one, then take the oldest so the reconcile still makes
+		// progress, and so a repeated reconcile keeps choosing the same object.
+		if n := countLabelled(claimed.Items, string(job.UID)); n > 1 {
+			logf.FromContext(ctx).Info("multiple Kueue Workloads share one job-uid label; using the oldest",
+				"job", job.Namespace+"/"+job.Name, "count", n)
+		}
+		return labelled, nil
+	}
+	return owned, nil
+}
+
+// olderWorkload orders two Workloads deterministically: by creation time, then by name.
+//
+// The name tie-break matters because two objects created in the same second are indistinguishable by
+// timestamp alone, and metav1.Time has one-second resolution.
+func olderWorkload(a, b *kueuev1beta1.Workload) bool {
+	if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
+		return a.CreationTimestamp.Before(&b.CreationTimestamp)
+	}
+	return a.Name < b.Name
+}
+
+// countLabelled reports how many Workloads carry the given Job UID in the job-uid label.
+func countLabelled(items []kueuev1beta1.Workload, uid string) int {
+	n := 0
+	for i := range items {
+		if items[i].Labels[kueueJobUIDLabel] == uid {
+			n++
+		}
+	}
+	return n
+}
+
+// setMLTJPhase writes the phase and the Admitted condition to status, but only when either actually changes.
+//
+// lastTransitionTime is stamped only on a phase transition, not on every reconcile that finds the same phase.
+func (r *MLTrainingJobReconciler) setMLTJPhase(
+	ctx context.Context,
+	mltj *platformv1.MLTrainingJob,
+	phase string,
+	cond metav1.Condition,
+	kueueAdmittedAt *metav1.Time,
+) error {
+	desired := mltj.Status.DeepCopy()
+	phaseChanged := desired.Phase != phase
+	previousPhase := mltj.Status.Phase
+	desired.Phase = phase
+	desired.ObservedGeneration = mltj.Generation
+
+	cond.ObservedGeneration = mltj.Generation
+	meta.SetStatusCondition(&desired.Conditions, cond)
+
+	// How long the tenant waited between having quota and using it, recorded on the reconciles that saw each
+	// end of that window and refused on the ones that did not.
+	outcome := recordAdmitToRunning(desired, previousPhase, phase, kueueAdmittedAt, metav1.Now())
+
+	if equality.Semantic.DeepEqual(mltj.Status, *desired) {
+		return nil
+	}
+
+	if phaseChanged {
+		now := metav1.Now()
+		desired.LastTransitionTime = &now
+	}
+
+	mltj.Status = *desired
+	if err := r.Status().Update(ctx, mltj); err != nil {
+		return fmt.Errorf("update mltrainingjob status %s/%s to phase %s: %w", mltj.Namespace, mltj.Name, phase, err)
+	}
+
+	// Increment the phase transition counter only when the phase actually changed.
+	if phaseChanged {
+		mlTrainingJobPhaseTotal.WithLabelValues(phase).Inc()
+	}
+
+	// Emitted after the status write succeeds, so a series and the record it describes cannot disagree: a
+	// counter incremented before a failed update would report a wait no object carries.
+	switch {
+	case outcome.Observed:
+		mlTrainingJobAdmitToRunningSeconds.Observe(outcome.Seconds)
+	case outcome.UnobservedReason != "":
+		mlTrainingJobAdmitToRunningUnobservedTotal.WithLabelValues(outcome.UnobservedReason).Inc()
+	}
+
+	return nil
+}
+
+// mapWorkloadToMLTrainingJob maps a Workload event to a reconcile request for the MLTrainingJob that owns its Job.
+//
+// A Kueue Workload's owner reference points at the batch/v1 Job it is admitting, and that Job always shares its name with the MLTrainingJob that created it, so no further lookup is needed.
+func mapWorkloadToMLTrainingJob(_ context.Context, obj client.Object) []reconcile.Request {
+	for _, ref := range obj.GetOwnerReferences() {
+		// Match the batch/v1 Job specifically, so a same-named owner from another API group cannot enqueue a spurious request.
+		if ref.Kind == "Job" && ref.APIVersion == "batch/v1" {
+			return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: ref.Name, Namespace: obj.GetNamespace()}}}
+		}
+	}
+	return nil
+}
+
+// ownedConflict reports whether an object of the given name exists but is not controlled by mltj.
+func (r *MLTrainingJobReconciler) ownedConflict(ctx context.Context, mltj *platformv1.MLTrainingJob, obj client.Object) (bool, error) {
+	err := r.Get(ctx, types.NamespacedName{Name: mltj.Name, Namespace: mltj.Namespace}, obj)
+	switch {
+	case apierrors.IsNotFound(err):
+		return false, nil
+	case err != nil:
+		return false, err
+	default:
+		return !metav1.IsControlledBy(obj, mltj), nil
+	}
+}
+
+// SetupWithManager sets up the controller with the Manager.
 func (r *MLTrainingJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	// ctrl.NewControllerManagedBy(mgr): 이 매니저가 수명을 관리하는 새 컨트롤러 빌더를 시작한다.
+	// context.Background() rather than a scoped context because IndexField only installs the extractor on the cache; it starts nothing that would need cancelling.
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(), &kueuev1beta1.Workload{}, WorkloadJobRefIndex, indexWorkloadByJobRef,
+	); err != nil {
+		return fmt.Errorf("index workloads by job ref: %w", err)
+	}
 	return ctrl.NewControllerManagedBy(mgr).
-		// For(...): 이 컨트롤러의 "주 대상(primary resource)"을 지정한다.
-		// MLTrainingJob이 생성/수정/삭제될 때마다 그 이름이 작업 큐에 들어가 Reconcile이 불린다.
-		// &platformv1.MLTrainingJob{}처럼 빈 값의 포인터를 넘기는 이유는 값이 아니라 "타입"을 알려주기 위해서다.
 		For(&platformv1.MLTrainingJob{}).
-		// Named(...): 컨트롤러 이름을 지정하며, 로그와 메트릭 레이블에 이 이름이 쓰인다.
-		// 이름은 매니저 안에서 유일해야 하므로 중복되면 등록이 실패한다.
+		Owns(&batchv1.Job{}).
+		Watches(&kueuev1beta1.Workload{}, handler.EnqueueRequestsFromMapFunc(mapWorkloadToMLTrainingJob)).
 		Named("mltrainingjob").
-		// Complete(r): 지금까지 설정한 내용으로 컨트롤러를 실제로 만들고, 리시버 r을 재조정기로 연결한다.
-		// 체인의 마지막이며 error를 돌려주므로 그대로 호출한 쪽(main)에 올려보낸다.
 		Complete(r)
 }

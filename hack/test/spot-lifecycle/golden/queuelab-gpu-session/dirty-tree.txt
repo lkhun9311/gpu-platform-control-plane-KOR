@@ -1,0 +1,8 @@
+aws sts get-caller-identity --query Account --output text
+--- exit 1
+--- messages
+== study  queuelab reclaim, with the device observed
+== doses  grace-bounded   reps 4   (both arms, interleaved by gpu-session.sh)
+== output <OUT>
+FAIL: the working tree is dirty. This session records a commit as the provenance of its numbers, and a build from uncommitted changes is provenance that names nothing. Commit, or set REQUIRE_CLEAN_TREE=0 and accept that the archive will not match the tree you are looking at
+--- files

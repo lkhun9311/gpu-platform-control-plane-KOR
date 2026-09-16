@@ -1,0 +1,5 @@
+
+--- exit 1
+--- messages
+FAIL: STUDY must be reclaim or idling; got 'sideways'. reclaim is the termination-contract study, idling is the duty one
+--- files

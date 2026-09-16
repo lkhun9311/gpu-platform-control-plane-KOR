@@ -1,0 +1,8 @@
+first request through gateway: HTTP 200
+data: {"id":"chatcmpl-997be0c295ebdaa4f98611c012e298eb","object":"chat.completion.chunk","created":1787531680,"model":"Qwen/Qwen2.5-0.5B-Instruct","choices":[{"index":0,"delta":{"role":"assistant","content":""},"logprobs":null,"finish_reason":null}],"prompt_token_ids":null,"prompt_text":null}
+
+standard long request rejected: HTTP 429
+{"error":{"code":"kv_cache_pressure","message":"Too Many Requests"}}
+
+premium, same prompt, while engaged: HTTP 200
+CHAIN OK: a real request crossed benchharness-shaped traffic -> gateway -> real vLLM, the guard engaged on the engine's own telemetry, rejected a long standard request with 429, and let premium through.

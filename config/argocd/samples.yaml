@@ -1,0 +1,22 @@
+# Samples are demo actions, not desired state, so this Application is never auto-synced.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gpu-platform-samples
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/lkhun9311/gpu-platform-control-plane.git
+    targetRevision: main
+    path: config/samples
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gpu-platform-control-plane-system
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true

@@ -1,0 +1,12 @@
+# The device-work observer, deployed only where there are GPUs to observe.
+#
+# Not composed by config/default or config/operator, and that is deliberate: a cluster with no card has
+# nothing for this to read, and a DaemonSet crash-looping on every node is a worse default than an absent
+# observer. A run without one records that nothing watched the card, which is true and is what every record
+# in ex/ says today.
+namespace: gpu-platform-control-plane-system
+
+resources:
+  - configmap.yaml
+  - daemonset.yaml
+  - service.yaml

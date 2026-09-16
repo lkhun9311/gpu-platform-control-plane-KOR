@@ -14,167 +14,396 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// 이 파일은 _test.go로 끝나므로 go test 실행 시에만 컴파일되며, 최종 바이너리에는 포함되지 않는다.
-// package 이름이 controller_test가 아니라 controller이므로 패키지 내부의 비공개 식별자도 그대로 쓸 수 있다.
 package controller
 
 import (
-	// context: 아래 클라이언트 호출에 넘길 취소 신호 타입이다.
 	"context"
+	"fmt"
+	"strings"
+	"testing"
 
-	// 앞의 점(.)은 "dot import"라는 문법이며, 해당 패키지의 공개 식별자를 접두사 없이 쓰게 해준다.
-	// 그래서 ginkgo.Describe가 아니라 Describe로, gomega.Expect가 아니라 Expect로 바로 쓸 수 있다.
-	// 보통 dot import는 이름 충돌 위험 때문에 피하지만, Ginkgo/Gomega는 테스트를 문장처럼 읽히게 하려고 관례적으로 이 방식을 쓴다.
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
-	// errors: 쿠버네티스 API 에러를 종류별로 판별하는 도우미이며, 여기서는 errors.IsNotFound를 쓴다.
-	"k8s.io/apimachinery/pkg/api/errors"
-	// types: 오브젝트를 지목하는 NamespacedName(이름 + 네임스페이스) 타입이 들어 있다.
-	"k8s.io/apimachinery/pkg/types"
-	// reconcile: Reconcile에 직접 넘길 reconcile.Request 타입이 들어 있다.
-	// 테스트는 컨트롤러 런타임을 거치지 않고 Reconcile을 손으로 호출하므로 요청을 직접 만들어야 한다.
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-	// metav1: 모든 쿠버네티스 오브젝트가 공통으로 갖는 메타데이터(ObjectMeta 등) 타입이다.
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/rand"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	kueuev1beta1 "sigs.k8s.io/kueue/apis/kueue/v1beta1"
 
-	// platformv1: 우리 프로젝트가 정의한 CRD 타입들(MLTrainingJob 등)이다.
 	platformv1 "github.com/lkhun9311/gpu-mlops-platform-control-plane/api/v1"
 )
 
-// 이 블록은 MLTrainingJob 컨트롤러의 envtest 기반 테스트 묶음이다.
-// envtest는 진짜 kube-apiserver와 etcd 바이너리를 띄우므로, CRD 검증과 status 서브리소스 같은 API 서버 동작까지 실제로 확인할 수 있다.
-// 여기서 쓰는 k8sClient와 CRD 설치는 suite_test.go가 미리 준비해 둔다.
-//
-// Go 문법 설명:
-//   - var _ = ... 에서 밑줄(_)은 "값을 버리는 빈 식별자"다.
-//     Describe(...)는 반환값이 있는 함수 호출이라 그냥 문장으로 둘 수 없기에, 전역 변수 초기화 식으로 감싸 패키지 로드 시점에 실행시킨다.
-//     이렇게 하면 go test가 시작되기 전에 Ginkgo가 이 명세들을 자기 트리에 등록한다.
-//   - func() { ... } 는 이름 없는 함수(익명 함수)이며, Ginkgo는 이 함수 안의 구조를 읽어 테스트 트리를 만든다.
-//
-// 주의: Describe/Context/It/By에 넘기는 설명 문자열은 주석이 아니라 실행되는 코드 리터럴이며, 테스트 리포트에 그대로 출력되므로 번역하지 않는다.
 var _ = Describe("MLTrainingJob Controller", func() {
 	Context("When reconciling a resource", func() {
-		// const: 컴파일 시점에 값이 고정되는 상수 선언이다.
-		// 테스트 전반에서 같은 이름을 재사용하므로 오타로 인한 미스매치를 막아 준다.
-		const resourceName = "test-training"
 		const resourceNamespace = "default"
 
-		// context.Background()는 아무 취소/기한도 없는 최상위 빈 컨텍스트이며, 테스트처럼 수명이 짧은 코드에서 흔히 쓰는 출발점이다.
 		ctx := context.Background()
+		var key types.NamespacedName
 
-		// typeNamespacedName: 테스트 대상 오브젝트를 지목하는 키다.
-		// MLTrainingJob은 네임스페이스 스코프 리소스라 이름과 네임스페이스가 모두 필요하다.
-		typeNamespacedName := types.NamespacedName{
-			Name:      resourceName,
-			Namespace: resourceNamespace,
+		reconciler := func() *MLTrainingJobReconciler {
+			return &MLTrainingJobReconciler{Client: cachedClient, Scheme: cachedClient.Scheme()}
 		}
-		// mltrainingjob: BeforeEach에서 "이미 존재하는지" 확인할 때 읽어 담을 빈 그릇이다.
-		// &platformv1.MLTrainingJob{}는 모든 필드가 제로값인 구조체를 만들고 그 주소를 얻는다.
-		mltrainingjob := &platformv1.MLTrainingJob{}
 
-		// BeforeEach: 아래 It 하나하나가 실행되기 직전마다 매번 호출되는 준비 훅이다.
-		// 각 테스트가 동일한 출발 상태에서 시작하도록 보장해 테스트 간 순서 의존을 없앤다.
+		// reconcileUntilSteady drives Reconcile a few times so the finalizer is added and the owned Job is created.
+		reconcileUntilSteady := func() {
+			for range 3 {
+				_, err := reconciler().Reconcile(ctx, reconcile.Request{NamespacedName: key})
+				Expect(err).NotTo(HaveOccurred())
+			}
+		}
+
 		BeforeEach(func() {
-			// By(...)는 테스트가 실패했을 때 어느 단계에서 깨졌는지 보여주는 진행 표시이며, 실행되는 코드다.
+			// Each spec gets its own resource name.
+			//
+			// envtest's apiserver adds the batch.kubernetes.io/job-tracking finalizer to every Job it admits, and only a running Job controller (absent here) ever retires it, so a Job this suite creates stays "Terminating" forever once deleted.
+			//
+			// A unique name per spec means that lingering Job never collides with the next spec's Job of the "same" logical name.
+			key = types.NamespacedName{Name: fmt.Sprintf("test-training-%s", rand.String(8)), Namespace: resourceNamespace}
+
 			By("creating the custom resource for the Kind MLTrainingJob")
-			// 먼저 읽어 보고, 없을 때만 만든다.
-			// envtest의 API 서버는 스펙 하나가 끝나도 초기화되지 않으므로, 무조건 Create하면 AlreadyExists로 실패할 수 있다.
-			err := k8sClient.Get(ctx, typeNamespacedName, mltrainingjob)
-			// errors.IsNotFound(err)는 "그냥 아직 없음"과 "진짜 API 오류"를 구분한다.
-			// 이 구분을 안 하면 API 서버 장애를 "없으니 만들자"로 오인하게 된다.
-			if err != nil && errors.IsNotFound(err) { // 아직 없을 때만 새로 생성
-				// 테스트 픽스처를 만든다.
-				// 아래 spec 값들은 이 CRD가 실제 GPU 학습 잡을 표현할 수 있는지(그리고 CRD 검증을 통과하는지) 보여주는 대표 예시다.
-				resource := &platformv1.MLTrainingJob{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: resourceNamespace,
-					},
-					Spec: platformv1.MLTrainingJobSpec{
-						Queue:       "team-vision-queue",
-						Image:       "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime",
-						Command:     []string{"python", "train.py"},
-						GPUClass:    "l40s",
-						GPUCount:    2,
-						Parallelism: 2,
-						Completions: 2,
-					},
-				}
-				// Expect(...).To(Succeed())는 "이 호출이 nil error를 돌려줘야 한다"는 Gomega 단언이다.
-				// Succeed()는 error를 반환하는 호출 전용 매처다.
-				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			mltj := &platformv1.MLTrainingJob{
+				ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+				Spec: platformv1.MLTrainingJobSpec{
+					Queue:       "team-a",
+					Image:       "busybox",
+					Command:     []string{"python", "train.py"},
+					GPUCount:    2,
+					Parallelism: 1,
+					Completions: 1,
+				},
 			}
+			Expect(k8sClient.Create(ctx, mltj)).To(Succeed())
 		})
 
-		// AfterEach: 각 It이 끝난 뒤 매번 호출되는 정리 훅이며, 성공/실패와 무관하게 실행된다.
-		// 여기서 지워 주지 않으면 남은 오브젝트가 다음 스펙의 BeforeEach에 영향을 준다.
 		AfterEach(func() {
-			resource := &platformv1.MLTrainingJob{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
-			// 정리 대상이 반드시 있어야 한다고 단언한다.
-			// 없다면 테스트가 픽스처를 예상치 못하게 지웠다는 뜻이므로, 조용히 넘어가지 않고 여기서 드러낸다.
-			Expect(err).NotTo(HaveOccurred())
-
-			By("Cleanup the specific resource instance MLTrainingJob")
-			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
-		})
-		// 이 테스트가 막는 회귀:
-		// (1) CRD 스키마가 spec 필드를 잃어버리거나 잘못된 타입으로 저장해 round-trip이 깨지는 경우,
-		// (2) M1의 빈 Reconcile이 에러를 뱉거나 패닉하는 경우다.
-		// 즉 "CRD가 쓴 대로 되읽히는가"와 "컨트롤러 배선이 살아 있는가"를 한 번에 확인하는 기본 검증이다.
-		It("should round-trip the spec and reconcile without error", func() {
-			By("reading the created resource back")
-			// API 서버에 저장된 것을 새 그릇에 다시 읽어 온다.
-			// 로컬 변수를 그대로 검사하면 "저장/역직렬화가 제대로 됐는지"를 전혀 확인하지 못하므로 반드시 되읽어야 한다.
-			fetched := &platformv1.MLTrainingJob{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, fetched)).To(Succeed())
-			// 필드별로 우리가 넣은 값이 그대로 살아 돌아왔는지 확인한다.
-			Expect(fetched.Spec.Queue).To(Equal("team-vision-queue"))
-			Expect(fetched.Spec.Image).To(Equal("pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime"))
-			// 슬라이스는 Equal로 요소별 비교가 되며, 순서까지 같아야 통과한다.
-			Expect(fetched.Spec.Command).To(Equal([]string{"python", "train.py"}))
-			// int32(2)처럼 타입을 명시하는 이유는 Gomega의 Equal이 타입까지 엄격하게 비교하기 때문이다.
-			// 그냥 2를 쓰면 int로 추론되어 int32와 다른 타입이라 실패한다.
-			Expect(fetched.Spec.GPUCount).To(Equal(int32(2)))
-			Expect(fetched.Spec.Parallelism).To(Equal(int32(2)))
-			Expect(fetched.Spec.Completions).To(Equal(int32(2)))
-
-			By("Reconciling the created resource")
-			// 컨트롤러 런타임을 띄우지 않고 재조정기를 직접 만들어 손으로 호출한다.
-			// 이러면 이벤트 전달 타이밍에 의존하지 않아 테스트가 결정론적으로 돈다.
-			controllerReconciler := &MLTrainingJobReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+			By("dropping the MLTrainingJob's finalizer since there is no running manager to do it")
+			mltj := &platformv1.MLTrainingJob{}
+			if err := k8sClient.Get(ctx, key, mltj); err == nil {
+				mltj.Finalizers = nil
+				Expect(k8sClient.Update(ctx, mltj)).To(Succeed())
+				Expect(k8sClient.Delete(ctx, mltj)).To(Succeed())
 			}
-			// _, err := ... 에서 첫 반환값(ctrl.Result)은 밑줄로 버린다.
-			// M1의 Reconcile은 재큐를 요청하지 않으므로 Result에 확인할 내용이 없다.
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
+
+			// Best-effort: ask the Job to delete too, but do not wait for it to actually disappear.
+			//
+			// Its job-tracking finalizer only clears once a real Job controller marks it complete, which never happens in envtest, so it would stay "Terminating" forever; the unique name per spec is what actually prevents cross-spec collisions.
+			job := &batchv1.Job{}
+			if err := k8sClient.Get(ctx, key, job); err == nil {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, job))).To(Succeed())
+			}
+
+			// Best-effort: any Workload a spec created has no controller running to finalize it, so just ask for deletion.
+			wl := &kueuev1beta1.Workload{}
+			if err := k8sClient.Get(ctx, key, wl); err == nil {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, wl))).To(Succeed())
+			}
 		})
 
-		// 이 테스트가 막는 회귀: CRD에서 status 서브리소스 설정이 빠지는 경우다.
-		// 서브리소스가 없으면 Status().Update가 조용히 실패하거나 spec까지 덮어쓰게 되고,
-		// 그러면 컨트롤러가 상태를 보고할 방법을 잃는다.
-		It("should persist a status phase via the status subresource", func() {
+		It("creates an owned, suspended, Kueue-labeled Job", func() {
+			reconcileUntilSteady()
+
+			got := &platformv1.MLTrainingJob{}
+			Expect(k8sClient.Get(ctx, key, got)).To(Succeed())
+			Expect(got.Finalizers).To(ContainElement(mlTrainingJobFinalizer))
+
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, key, job)).To(Succeed())
+			Expect(metav1.IsControlledBy(job, got)).To(BeTrue())
+			Expect(job.Labels).To(HaveKeyWithValue("kueue.x-k8s.io/queue-name", "team-a"))
+
+			Expect(job.Spec.Suspend).NotTo(BeNil())
+			Expect(*job.Spec.Suspend).To(BeTrue())
+
+			Expect(*job.Spec.Parallelism).To(Equal(int32(1)))
+			Expect(*job.Spec.Completions).To(Equal(int32(1)))
+
+			Expect(job.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
+			Expect(job.Spec.Template.Spec.Containers).To(HaveLen(1))
+			container := job.Spec.Template.Spec.Containers[0]
+			Expect(container.Name).To(Equal("trainer"))
+			Expect(container.Image).To(Equal("busybox"))
+			Expect(container.Command).To(Equal([]string{"python", "train.py"}))
+			gpu := container.Resources.Limits[corev1.ResourceName("nvidia.com/gpu")]
+			Expect(gpu.Value()).To(Equal(int64(2)))
+		})
+
+		It("is idempotent once steady", func() {
+			reconcileUntilSteady()
+
+			before := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, key, before)).To(Succeed())
+
+			_, err := reconciler().Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+
+			after := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, key, after)).To(Succeed())
+			Expect(after.ResourceVersion).To(Equal(before.ResourceVersion))
+		})
+
+		It("does not reconcile Suspend back to true once Kueue has admitted the Job", func() {
+			reconcileUntilSteady()
+
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, key, job)).To(Succeed())
+			job.Spec.Suspend = new(bool)
+			*job.Spec.Suspend = false
+			Expect(k8sClient.Update(ctx, job)).To(Succeed())
+
+			_, err := reconciler().Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+
+			after := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, key, after)).To(Succeed())
+			Expect(after.Spec.Suspend).NotTo(BeNil())
+			Expect(*after.Spec.Suspend).To(BeFalse())
+		})
+
+		It("refuses to adopt a Job of the same name it does not own", func() {
+			foreign := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+				Spec: batchv1.JobSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							RestartPolicy: corev1.RestartPolicyNever,
+							Containers:    []corev1.Container{{Name: "x", Image: "busybox"}},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+
+			before := testutil.ToFloat64(mlTrainingJobFailedTotal.WithLabelValues(mltjReasonConflict))
+
+			reconcileUntilSteady()
+
+			got := &platformv1.MLTrainingJob{}
+			Expect(k8sClient.Get(ctx, key, got)).To(Succeed())
+			Expect(got.Status.Phase).To(Equal(mltjPhaseFailed))
+
+			gotJob := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, key, gotJob)).To(Succeed())
+			Expect(gotJob.OwnerReferences).To(BeEmpty())
+
+			after := testutil.ToFloat64(mlTrainingJobFailedTotal.WithLabelValues(mltjReasonConflict))
+			Expect(after - before).To(Equal(1.0))
+		})
+
+		It("persists a status phase via the status subresource", func() {
 			const phasePending = "Pending"
 
 			fetched := &platformv1.MLTrainingJob{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, fetched)).To(Succeed())
+			Expect(k8sClient.Get(ctx, key, fetched)).To(Succeed())
 
 			fetched.Status.Phase = phasePending
-			// k8sClient.Status()는 본체가 아니라 status 서브리소스만 대상으로 하는 writer를 준다.
-			// 일반 Update와 분리되어 있어야 사용자의 spec 편집과 컨트롤러의 status 기록이 서로를 덮어쓰지 않는다.
-			Expect(k8sClient.Status().Update(ctx, fetched)).To(Succeed()) // status subresource로만 갱신
+			Expect(k8sClient.Status().Update(ctx, fetched)).To(Succeed())
 
-			// 다시 읽어 실제로 서버에 저장됐는지 확인한다.
-			// 로컬 구조체는 이미 값을 갖고 있으니, 되읽지 않으면 아무것도 증명하지 못한다.
 			updated := &platformv1.MLTrainingJob{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			Expect(k8sClient.Get(ctx, key, updated)).To(Succeed())
 			Expect(updated.Status.Phase).To(Equal(phasePending))
+		})
+
+		It("moves to Admitted once the Kueue Workload reports Admitted=True, then to Running once the Job has active pods", func() {
+			reconcileUntilSteady()
+
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, key, job)).To(Succeed())
+
+			By("creating the Kueue Workload Kueue would create for this Job, labeled with the Job's UID")
+			wl := &kueuev1beta1.Workload{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      key.Name,
+					Namespace: key.Namespace,
+					Labels:    map[string]string{"kueue.x-k8s.io/job-uid": string(job.UID)},
+				},
+				Spec: kueuev1beta1.WorkloadSpec{
+					PodSets: []kueuev1beta1.PodSet{{
+						Name:  "main",
+						Count: 1,
+						Template: corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								RestartPolicy: corev1.RestartPolicyNever,
+								Containers:    []corev1.Container{{Name: "trainer", Image: "busybox"}},
+							},
+						},
+					}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, wl)).To(Succeed())
+
+			wl.Status.Conditions = []metav1.Condition{{
+				Type:               "Admitted",
+				Status:             metav1.ConditionTrue,
+				Reason:             "QuotaReserved",
+				Message:            "",
+				LastTransitionTime: metav1.Now(),
+			}}
+			Expect(k8sClient.Status().Update(ctx, wl)).To(Succeed())
+
+			awaitCachedWorkload(wl.Name, wl.Namespace, hasAdmittedCondition)
+
+			By("reconciling so the MLTrainingJob picks up the Workload's Admitted condition")
+			_, err := reconciler().Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+
+			admitted := &platformv1.MLTrainingJob{}
+			Expect(k8sClient.Get(ctx, key, admitted)).To(Succeed())
+			Expect(admitted.Status.Phase).To(Equal("Admitted"))
+			Expect(admitted.Status.LastTransitionTime).NotTo(BeNil())
+
+			By("giving the Job an active pod, as Kueue's unsuspend would eventually lead to")
+			job.Status.Active = 1
+			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+
+			_, err = reconciler().Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+
+			running := &platformv1.MLTrainingJob{}
+			Expect(k8sClient.Get(ctx, key, running)).To(Succeed())
+			Expect(running.Status.Phase).To(Equal("Running"))
+		})
+
+		It("increments mlTrainingJobPhaseTotal counter when transitioning to Admitted phase", func() {
+			reconcileUntilSteady()
+
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, key, job)).To(Succeed())
+
+			By("reading the counter value before the Admitted phase transition")
+			before := testutil.ToFloat64(mlTrainingJobPhaseTotal.WithLabelValues(mltjPhaseAdmitted))
+
+			By("creating the Kueue Workload and admitting it")
+			wl := &kueuev1beta1.Workload{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      key.Name,
+					Namespace: key.Namespace,
+					Labels:    map[string]string{"kueue.x-k8s.io/job-uid": string(job.UID)},
+				},
+				Spec: kueuev1beta1.WorkloadSpec{
+					PodSets: []kueuev1beta1.PodSet{{
+						Name:  "main",
+						Count: 1,
+						Template: corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								RestartPolicy: corev1.RestartPolicyNever,
+								Containers:    []corev1.Container{{Name: "trainer", Image: "busybox"}},
+							},
+						},
+					}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, wl)).To(Succeed())
+
+			wl.Status.Conditions = []metav1.Condition{{
+				Type:               "Admitted",
+				Status:             metav1.ConditionTrue,
+				Reason:             "QuotaReserved",
+				Message:            "",
+				LastTransitionTime: metav1.Now(),
+			}}
+			Expect(k8sClient.Status().Update(ctx, wl)).To(Succeed())
+
+			awaitCachedWorkload(wl.Name, wl.Namespace, hasAdmittedCondition)
+
+			By("reconciling to trigger the phase transition to Admitted")
+			_, err := reconciler().Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the MLTrainingJob transitioned to Admitted")
+			admitted := &platformv1.MLTrainingJob{}
+			Expect(k8sClient.Get(ctx, key, admitted)).To(Succeed())
+			Expect(admitted.Status.Phase).To(Equal(mltjPhaseAdmitted))
+
+			By("reading the counter value after the phase transition")
+			after := testutil.ToFloat64(mlTrainingJobPhaseTotal.WithLabelValues(mltjPhaseAdmitted))
+
+			By("asserting the counter incremented by exactly 1")
+			Expect(after - before).To(Equal(1.0))
 		})
 	})
 })
+
+// Duplicate Workloads must resolve to the SAME one every time.
+//
+// Kueue keeps one Workload per Job UID, so more than one is an upstream invariant violation — but the
+// reconciler still has to make progress, and "the first the cache returned" is not a rule. List order can
+// differ between reconciles, so the phase written to status could oscillate between two Workloads with
+// nothing having changed.
+//
+// Mutation that turns this red: take the first match instead of the oldest.
+func TestOlderWorkloadIsADeterministicOrder(t *testing.T) {
+	older := &kueuev1beta1.Workload{ObjectMeta: metav1.ObjectMeta{
+		Name: "wl-b", CreationTimestamp: metav1.Unix(1000, 0),
+	}}
+	newer := &kueuev1beta1.Workload{ObjectMeta: metav1.ObjectMeta{
+		Name: "wl-a", CreationTimestamp: metav1.Unix(2000, 0),
+	}}
+
+	if !olderWorkload(older, newer) {
+		t.Fatal("the earlier creation timestamp must win regardless of name")
+	}
+	if olderWorkload(newer, older) {
+		t.Fatal("the ordering is not antisymmetric")
+	}
+
+	// Same second, which metav1.Time cannot separate: the name is the tie-break, and without one the answer
+	// would still depend on list order for the case duplicates are most likely to hit.
+	sameA := &kueuev1beta1.Workload{ObjectMeta: metav1.ObjectMeta{
+		Name: "wl-a", CreationTimestamp: metav1.Unix(1000, 0),
+	}}
+	sameB := &kueuev1beta1.Workload{ObjectMeta: metav1.ObjectMeta{
+		Name: "wl-b", CreationTimestamp: metav1.Unix(1000, 0),
+	}}
+	if !olderWorkload(sameA, sameB) || olderWorkload(sameB, sameA) {
+		t.Fatal("two Workloads created in the same second do not order deterministically")
+	}
+}
+
+// A Pod that asks for a device must say which driver libraries it needs, because it cannot say so later.
+//
+// nvidia-container-toolkit bind-mounts the host's driver libraries and decides WHICH at container creation,
+// from NVIDIA_DRIVER_CAPABILITIES. Nothing inside the container can influence that: by the time a process
+// runs, the mounts are made. Leaving it unset takes the toolkit's default, which was historically "utility"
+// -- nvidia-smi and libnvidia-ml, and not libcuda.so.1, which is the one a CUDA program loads.
+//
+// The failure is silent: a device is allocated, the Pod starts, loading libcuda raises, the workload falls
+// back to its CPU loop, and the run completes with plausible numbers and no device evidence -- exactly what
+// a cluster with no cards produces. That is the outcome the alpine-to-glibc image move was made to prevent,
+// and the move fixed the linkage half while leaving this half to a default that varies by AMI and toolkit
+// version.
+//
+// Mutations that turn this red: drop the Env, set only "utility", or set it for a Pod requesting no device.
+func TestAGPURequestingPodDeclaresTheDriverLibrariesItNeeds(t *testing.T) {
+	envOf := func(gpu int32) []corev1.EnvVar {
+		job := BuildJob(&platformv1.MLTrainingJob{
+			ObjectMeta: metav1.ObjectMeta{Name: "j", Namespace: "n"},
+			Spec:       platformv1.MLTrainingJobSpec{Image: "i", Queue: "q", GPUCount: gpu},
+		})
+		return job.Spec.Template.Spec.Containers[0].Env
+	}
+	var caps string
+	for _, e := range envOf(1) {
+		if e.Name == "NVIDIA_DRIVER_CAPABILITIES" {
+			caps = e.Value
+		}
+	}
+	if caps == "" {
+		t.Fatal("a Pod requesting a GPU declares no driver capabilities, so whether libcuda.so.1 is mounted " +
+			"into it is decided by whatever the toolkit on that node happens to default to")
+	}
+	if !strings.Contains(caps, "compute") {
+		t.Fatalf("the declared capabilities are %q and do not include compute, which is the one that mounts "+
+			"libcuda.so.1; utility alone mounts nvidia-smi and leaves a CUDA program unable to start", caps)
+	}
+
+	// And a Pod that asked for no device must not claim capabilities on hardware it was never given.
+	for _, e := range envOf(0) {
+		if e.Name == "NVIDIA_DRIVER_CAPABILITIES" {
+			t.Fatalf("a Pod requesting no GPU declares driver capabilities: %+v", e)
+		}
+	}
+}

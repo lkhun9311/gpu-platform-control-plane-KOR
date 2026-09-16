@@ -1,0 +1,21 @@
+# The gateway, pinned for a side-loaded kind image.
+#
+# config/gateway hardcodes gateway:latest, and the kubelet treats :latest as always-pull regardless of what
+# is already on the node — so a side-loaded :latest image sends it to a registry that does not have it. The
+# tag and the pull policy are both required; either alone still fails. hack/m5b-gateway-path.sh records the
+# same trap for the stub backend.
+resources:
+  - ../gateway
+
+images:
+  - name: gateway
+    newTag: fr002
+
+patches:
+  - target:
+      kind: Deployment
+      name: gateway
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: IfNotPresent

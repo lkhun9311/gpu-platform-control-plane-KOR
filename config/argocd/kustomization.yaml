@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - root.yaml
+  # Ahead of crds.yaml in this list and at sync-wave -2, because config/operator-webhook cannot render a
+  # working webhook until cert-manager has issued its serving certificate.
+  - cert-manager.yaml
+  # Also at sync-wave -2: the operator indexes Workloads at startup and cannot begin without the definition.
+  - kueue-crds.yaml
+  - crds.yaml
+  - operator.yaml
+  - gateway.yaml
+  - observability.yaml
+  - device-plugin.yaml
+  - samples.yaml

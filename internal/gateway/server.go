@@ -14,404 +14,548 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package gateway는 tenant를 인식하는 OpenAI 호환 서빙 gateway 구현이다.
-//
-// Go 문법 설명.
-//
-//   - package 선언 바로 위에 붙은 주석은 "패키지 주석"이라 부르며, 이 패키지 전체를 설명한다.
-//   - 관례상 "Package <이름>은 ..." 형태로 시작하고, go doc 문서에 그대로 노출된다.
-//   - 같은 디렉터리(internal/gateway)의 모든 .go 파일은 같은 package 이름(gateway)을 공유한다.
-//     그래서 이 파일의 Server 타입을 ratelimit.go나 tenant.go에서 import 없이 바로 쓸 수 있다.
-//   - 경로가 internal/ 아래에 있으면 Go 컴파일러가 외부 모듈의 import를 막는다.
-//     즉 이 패키지는 이 프로젝트 안에서만 쓰이는 비공개 구현이라는 뜻이다.
+// Package gateway implements the tenant-aware OpenAI-compatible serving gateway.
 package gateway
 
-// import 블록: 이 파일이 사용하는 외부 패키지들을 선언한다.
-//
-// 관례상 (1)표준 라이브러리, (2)서드파티/쿠버네티스, (3)이 프로젝트 내부 순으로 빈 줄로 그룹을 나눈다.
 import (
-	// context: 요청의 취소/타임아웃 신호를 함수 사이로 전달하는 표준 타입이다.
-	//
-	// 쿠버네티스 클라이언트 호출은 중단 가능해야 하므로 전부 ctx를 첫 인자로 받는다.
 	"context"
-	// errors: errors.Is로 ErrNoPolicy/ErrNoRoute 같은 특정 에러를 정확히 골라낼 때 쓴다.
 	"errors"
-	// fmt: 문자열 포맷팅 표준 패키지이며, 여기서는 fmt.Errorf로 에러에 맥락을 덧붙일 때 쓴다.
 	"fmt"
-	// net/http: Go의 표준 HTTP 서버/클라이언트 패키지다.
-	//
-	// Handler, ServeMux, ResponseWriter, 상태 코드 상수가 전부 여기서 온다.
 	"net/http"
-	// net/url: backend 주소를 담는 URL 타입이다.
 	"net/url"
-	// strconv: 상태 코드(int)를 metric 라벨(string)로 바꿀 때 쓴다.
 	"strconv"
-	// sync/atomic: 잠금 없이 안전하게 읽고 쓰는 원자적(atomic) 타입 모음이다.
-	//
-	// 여기서는 readiness 플래그를 담는 atomic.Bool을 쓴다.
+	"sync"
 	"sync/atomic"
-	// time: 요청 처리 시간을 재는 데 쓴다.
 	"time"
 
-	// platformv1: 우리 프로젝트가 정의한 CRD 타입들(InferenceDeployment 등)이다.
-	//
-	// import 경로 앞의 platformv1은 별칭(alias)이며, 원래 패키지 이름 v1이 다른 v1들과 헷갈리기 때문에 붙였다.
 	platformv1 "github.com/lkhun9311/gpu-mlops-platform-control-plane/api/v1"
-	// corev1: 쿠버네티스 내장 타입들이며, 여기서는 Secret의 cache 감시 범위를 지정할 때 쓴다.
 	corev1 "k8s.io/api/core/v1"
-	// runtime: 쿠버네티스의 Scheme(=Go 타입과 API 그룹/버전을 연결하는 등록부) 타입이 들어 있다.
 	"k8s.io/apimachinery/pkg/runtime"
-	// rest: apiserver 접속 정보(주소, 인증 정보 등)를 담는 rest.Config 타입을 제공한다.
 	"k8s.io/client-go/rest"
-	// cache: controller-runtime의 watch 기반 읽기 cache다.
-	//
-	// apiserver를 매번 호출하지 않고 로컬 메모리에서 객체를 읽게 해준다.
 	"sigs.k8s.io/controller-runtime/pkg/cache"
-	// client: controller-runtime의 통합 클라이언트 인터페이스(Get/List/Create 등)를 제공한다.
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	// log: context에 실린 logger를 꺼내 쓰는 controller-runtime의 로깅 진입점이다.
-	//
-	// router.go가 이미 같은 방식으로 쓰고 있어 로그 형식이 패키지 안에서 일관된다.
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// ModelNameIndex: InferenceDeployment.spec.model.name에 대한 cache field index의 key다.
+// ModelNameIndex is the cache field-index key over InferenceDeployment.spec.model.name.
 //
-// routing은 이 index로 요청된 model을 해당 Service로 해석하며, CR field selector나 요청별 apiserver 호출이 없다.
-//
-// Go 문법 설명.
-//
-//   - const 는 컴파일 시점에 값이 고정되는 상수 선언 키워드다.
-//     변수(var)와 달리 실행 중에 바뀔 수 없어서, 오타로 값이 흔들릴 여지가 없다.
-//   - 대문자로 시작하는 이름(ModelNameIndex)은 패키지 밖에서도 보이는 "공개(export)"다.
-//     index를 등록하는 쪽과 index로 조회하는 쪽이 반드시 같은 문자열을 써야 하므로 상수로 공개해 공유한다.
-//
-// 설계 근거(설계서 Components 절): index key 문자열을 양쪽에 하드코딩하면 한쪽만 고쳤을 때 조회가 조용히 실패한다.
-//
-// 상수 하나로 묶어 두면 그런 어긋남이 애초에 생기지 않는다.
+// Routing resolves a requested model to its Service via this index, with no CR field selector and no per-request apiserver call.
 const ModelNameIndex = ".spec.model.name"
 
-// Server: gateway의 공유 의존성과 HTTP handler를 보유하는 구조체다.
-//
-// Go 문법 설명.
-//
-//   - type 이름 struct { ... } 는 여러 필드를 묶는 사용자 정의 타입(구조체) 선언이다.
-//   - 이 구조체의 인스턴스 하나를 프로세스 전체가 공유하고, 모든 HTTP 요청이 그것을 동시에 읽는다.
-//   - 그래서 아래 메서드들은 전부 값이 아닌 포인터 리시버(*Server)를 받는다.
-//     값 리시버로 받으면 구조체가 복사되어 ready 플래그 변경이 원본에 반영되지 않는다.
+// Server holds the gateway's shared dependencies and HTTP handlers.
 type Server struct {
-	// Client: scope가 지정된 cache에서 InferenceDeployment, GPUQuotaPolicy, api-keys Secret을 읽는다.
-	//
-	// Go 문법 설명: client.Client는 구조체가 아니라 인터페이스(interface) 타입이다.
-	//
-	// 인터페이스는 "이런 메서드들을 가진 무엇이든 받는다"는 계약이라, 구현체를 자유롭게 갈아끼울 수 있다.
-	//
-	// 덕분에 운영에서는 진짜 cache 기반 client를, 테스트에서는 fake client를 넣어도 코드가 그대로 동작한다.
+	// Client reads InferenceDeployment, GPUQuotaPolicy, and the api-keys Secret from the scoped cache.
 	Client client.Client
-	// Namespace와 APIKeySecret은 tenant 해석에 쓰는 api-keys Secret의 위치를 지정한다.
+	// reportBackendState makes a response carry the pressure reading its admission decision was made from.
 	//
-	// Go 문법 설명: 같은 타입(string)의 필드는 이렇게 줄을 나눠 연달아 선언할 수 있다.
-	//
-	// Secret 이름과 namespace를 코드에 박지 않고 필드로 주입받는 이유는 배포 환경마다 값이 다르기 때문이다.
+	// The benchmark needs it: "not_engaged" at a cache usage of 0.10 and at 0.83 against a 0.85 threshold are
+	// the same string and opposite conclusions. Nobody else does, so it defaults off.
+	reportBackendState bool
+	// Namespace and APIKeySecret locate the api-keys Secret used to resolve tenants.
 	Namespace    string
 	APIKeySecret string
-	// ready: cache가 동기화되면 true로 뒤집히며 readiness를 gating하는 플래그다.
-	//
-	// Go 문법 설명.
-	//
-	//   - atomic.Bool은 여러 goroutine이 동시에 읽고 써도 안전한 불리언 타입이다.
-	//   - 평범한 bool 필드를 쓰면 한쪽에서 쓰고 다른 쪽에서 읽을 때 data race가 되어 동작이 정의되지 않는다.
-	//   - 값을 넣을 땐 Store(true), 읽을 땐 Load()처럼 반드시 메서드를 거친다(= 대입 연산자를 쓰지 않는다).
-	//   - 소문자로 시작하므로 패키지 밖에서는 직접 건드릴 수 없고, 아래 MarkReady를 통해서만 바꿀 수 있다.
-	//
-	// 설계 근거(설계서 Components 절): cache 동기화를 담당하는 goroutine이 이 값을 쓰고, /readyz를 처리하는 HTTP goroutine들이 동시에 이 값을 읽는다.
-	//
-	// 쓰는 쪽과 읽는 쪽이 다른 goroutine이므로 atomic이 반드시 필요하다.
+	// ready flips true once the cache has synced, gating readiness.
 	ready atomic.Bool
-	// buckets: tenant별 token bucket을 보관하는 등록부다.
+	// buckets holds the per-tenant token buckets, populated by cmd/gateway/main.go at assembly.
 	//
-	// Go 문법 설명: 소문자로 시작하므로 패키지 밖에서는 보이지 않는다.
+	// Design rationale (design spec Components section): rate limiting only means anything if the remaining-token state survives across requests.
 	//
-	// 이 필드를 채우는 일은 cmd/gateway/main.go의 조립 단계가 맡는다.
+	// A bucket built per request would always look full and never limit anything.
 	//
-	// 설계 근거(설계서 Components 절): 속도 제한은 요청 사이에 상태(남은 토큰)가 이어져야 의미가 있다.
-	//
-	// 요청마다 새 bucket을 만들면 모든 요청이 가득 찬 bucket을 보게 되어 제한이 전혀 걸리지 않는다.
-	//
-	// 그래서 프로세스 전체가 공유하는 이 등록부 하나에 tenant별 bucket을 모아 둔다.
+	// So one process-wide registry holds them all.
 	buckets *bucketRegistry
-	// backendOverride: model을 backend URL로 바꾸는 경로를 테스트에서 갈아끼우는 훅이다.
+	// mode records which admission-control mode admitter implements, purely for the mode label on the admission metrics.
 	//
-	// nil이면(운영에서는 항상 nil이다) 아래 resolveBackend가 진짜 backendFor를 쓴다.
+	// It travels alongside admitter rather than being derived from it, since the two are set together by SetAdmitter and a type switch on admitter would need one arm per implementation anyway.
 	//
-	// 왜 이런 훅이 필요한가(플랜 Task 6).
+	// The zero value "" is treated as AdmissionOff at the call site, matching admitter's nil default below.
+	mode AdmissionMode
+	// admitter runs the admission-control stage in chatCompletions, between backend resolution and the proxy handoff.
 	//
-	// backendFor는 http://<name>.<ns>.svc:<port> 라는 클러스터 내부 DNS 주소를 만든다.
+	// nil (always so unless SetAdmitter is called) makes chatCompletions default to an offAdmitter, so a gateway that never configures admission control keeps its pre-admission-guard behavior exactly.
+	admitter Admitter
+	// backendOverride swaps out model-to-backend resolution in tests.
 	//
-	// 테스트 프로세스에는 그 DNS가 없으므로 어떤 방법으로도 그 주소에 붙을 수 없다.
+	// nil (always so in production) makes resolveBackend use the real backendFor.
 	//
-	// 훅을 두면 해석 결과만 httptest 서버 주소로 바꿔 파이프라인 전체를 실제로 통과시킬 수 있다.
+	// Why the hook exists (plan Task 6).
 	//
-	// 훅이 nil일 때 운영 경로가 그대로 도는 것이 핵심이다.
+	// backendFor builds an in-cluster DNS address of the form http://<name>.<ns>.svc:<port>.
 	//
-	// 즉 이 훅은 운영 동작을 우회하지 않는다.
+	// No test process can reach that address.
+	//
+	// Overriding just the resolved address lets the whole pipeline run for real against an httptest server.
+	//
+	// The production path runs unchanged whenever the hook is nil.
+	//
+	// So this never bypasses production behavior.
+	//
+	// The hook returns a bare *url.URL rather than a *BackendRef, since tests only need the pipeline to reach an httptest server; resolveBackend wraps it into a BackendRef carrying just URL and Model.
 	backendOverride func(model string) *url.URL
-	// responseHeaderTimeout: 업스트림의 응답 헤더를 기다리는 상한이다.
+	// responseHeaderTimeout bounds the wait for upstream response headers.
 	//
-	// 0이면 proxy.go의 defaultResponseHeaderTimeout(30초)이 쓰이므로 운영에서는 비워 둔다.
+	// Zero selects proxy.go's defaultResponseHeaderTimeout (30s), so production leaves it unset.
 	//
-	// 왜 상수로 박지 않고 필드로 뺐는가.
+	// Why a field rather than a constant.
 	//
-	// 이 값은 504 응답이 나오기까지 걸리는 시간을 그대로 결정한다.
+	// This value directly sets how long a 504 takes to surface.
 	//
-	// 30초로 고정하면 504 매핑을 검증하는 테스트가 30초를 기다려야 하므로 아무도 그 테스트를 두지 않게 되고, 결국 504 분기가 검증되지 않은 채 남는다.
+	// Pinned at 30s, any spec covering the 504 mapping would have to wait 30s, so no such spec gets written and the branch goes unverified.
 	//
-	// 그 분기는 지워져도 502로 조용히 대체될 뿐이라 더 위험하다.
+	// An unverified 504 branch is the dangerous kind, since deleting it degrades silently to 502 rather than failing.
 	//
-	// 필드로 두면 테스트가 같은 코드 경로를 짧은 상한으로 즉시 통과시킬 수 있다.
+	// A field lets tests drive the same code path with a short bound.
 	responseHeaderTimeout time.Duration
+	// transport is the single outbound Transport every proxied request reuses, and transportOnce builds it on first use.
+	//
+	// The connection pool lives inside the Transport, so it is only a pool at all while one Transport outlives many requests.
+	//
+	// Construction is deferred rather than done at assembly because responseHeaderTimeout is set on the struct after it is built (production leaves it zero, tests shorten it), and a Transport built too early would capture the wrong bound.
+	transport     http.RoundTripper
+	transportOnce sync.Once
 }
 
-// markReady: gateway가 서빙 가능한 상태임을 표시하는 내부 헬퍼다.
+// sharedTransport returns the process-wide outbound Transport, building it the first time it is asked for.
 //
-// Go 문법 설명.
-//
-//   - func (s *Server) 부분이 리시버(receiver)이며, 이 함수가 Server 타입에 붙는 "메서드"라는 뜻이다.
-//   - Store(true)는 ready 플래그에 true를 원자적으로 기록한다.
-//   - 소문자 이름이라 패키지 내부에서만 호출할 수 있으며, 같은 패키지인 테스트 코드는 이걸 직접 부를 수 있다.
-//   - 본문이 짧으면 이렇게 한 줄로 붙여 써도 되며, gofmt도 이 형태를 그대로 둔다.
+// sync.Once rather than a plain nil check because chatCompletions runs concurrently, and two requests racing to build a Transport would leave one of them with a pool nobody else uses.
+func (s *Server) sharedTransport() http.RoundTripper {
+	s.transportOnce.Do(func() {
+		s.transport = newTransport(s.responseHeaderTimeout)
+	})
+	return s.transport
+}
+
+// markReady marks the gateway ready to serve.
 func (s *Server) markReady() { s.ready.Store(true) }
 
-// MarkReady: cache의 첫 동기화 이후 binary가 readiness를 뒤집기 위한 exported 진입점이다.
-//
-// Go 문법 설명: 대문자로 시작하므로 다른 패키지(cmd/의 main 등)에서 호출할 수 있는 공개 메서드다.
-//
-// 하는 일은 소문자 markReady를 그대로 부르는 것뿐이라 얼핏 중복처럼 보인다.
-//
-// 하지만 "공개 API 표면"과 "내부 구현"을 분리해 두면, 나중에 markReady의 동작이 복잡해져도 바깥에 노출된 이름과 시그니처는 흔들리지 않는다.
+// MarkReady is the exported entry point for the binary to flip readiness after the cache's first sync.
 func (s *Server) MarkReady() { s.markReady() }
 
-// InitRateLimiter: tenant별 token bucket 등록부를 만들어 넣는 exported 진입점이다.
+// InitRateLimiter installs the per-tenant token bucket registry.
 //
-// 왜 이 메서드가 필요한가.
+// Why this method exists.
 //
-// buckets 필드도 bucketRegistry 타입도 소문자라 이 패키지 밖에서는 보이지 않는다.
+// Both the buckets field and bucketRegistry are unexported, so cmd/gateway/main.go cannot populate them via a struct literal.
 //
-// 그래서 cmd/gateway/main.go는 구조체 리터럴로 직접 채울 수 없고, 이렇게 공개된 메서드를 거쳐야 한다.
-//
-// 타입을 공개하지 않고 감춰 두는 편이 나은 이유는, bucket의 내부 구조가 바뀌어도 조립하는 쪽 코드는 전혀 건드릴 필요가 없기 때문이다.
+// Keeping the type unexported means the bucket internals can change without touching the assembly code.
 func (s *Server) InitRateLimiter() { s.buckets = newBucketRegistry() }
 
-// readyz: cache가 동기화된 후에만 200을 반환하고, 아니면 503을 반환해 Pod가 Service endpoint에서 빠지도록 한다.
+// SetAdmitter installs the admission-control implementation and the mode label it reports on metrics.
 //
-// Go 문법 설명.
+// Why this method exists (mirrors InitRateLimiter above): admitter is unexported, so cmd/gateway/main.go cannot populate it via a struct literal.
 //
-//   - 이 시그니처(w http.ResponseWriter, r *http.Request)는 Go의 HTTP handler 표준 형태다.
-//     이 모양을 갖추면 아래 mux.HandleFunc에 그대로 넘길 수 있다.
-//   - w는 응답을 쓰는 통로이고, r은 들어온 요청이다.
-//   - 두 번째 인자 이름이 밑줄(_)인 것은 "받긴 하지만 쓰지 않는다"는 의미다.
-//     readyz는 요청 내용과 무관하게 판단하므로 Request를 볼 필요가 없다.
-//     인자 자리를 비울 수는 없어서(시그니처가 고정) 이름만 _로 버린다.
+// mode travels through the same call so the two can never drift out of step with each other.
+// ReportBackendState turns the X-Backend-State header on or off.
 //
-// 설계 근거(설계서 Components 절): cache가 아직 채워지지 않았는데 트래픽을 받으면 "model을 못 찾음"이나 "정책 없음" 같은 잘못된 오류를 사용자에게 돌려주게 된다.
-//
-// 503을 반환하면 kubelet의 readiness probe가 실패하고, 쿠버네티스가 이 Pod를 Service endpoint 목록에서 빼준다.
-//
-// 즉 준비되지 않은 Pod에는 애초에 요청이 도달하지 않는다.
+// Off by default and turned on only by the benchmark: a deployment serving real tenants has no reason to
+// tell a caller how full its KV cache is.
+func (s *Server) ReportBackendState(on bool) { s.reportBackendState = on }
+
+func (s *Server) SetAdmitter(mode AdmissionMode, a Admitter) {
+	s.mode = mode
+	s.admitter = a
+
+	// Publish the mode here rather than in main, for the same reason mode travels through this call at
+	// all: this is the one place that knows which Admitter is actually installed, so the series cannot
+	// claim a mode the gateway is not running.
+	admissionModeActive.Reset()
+	admissionModeActive.WithLabelValues(string(mode)).Set(1)
+}
+
+// readyz returns 200 only once the cache has synced, else 503 so the Pod stays out of Service endpoints.
 func (s *Server) readyz(w http.ResponseWriter, _ *http.Request) {
-	// Load()로 현재 ready 값을 원자적으로 읽는다.
-	//
-	// ! 는 "부정(NOT)"이므로 이 조건은 "아직 준비되지 않았다면"이라는 뜻이다.
 	if !s.ready.Load() {
-		// http.Error는 상태 코드와 본문 메시지를 한 번에 써주는 표준 헬퍼다.
-		//
-		// StatusServiceUnavailable은 503을 뜻하는 상수이며, 숫자 대신 상수를 쓰면 의도가 드러나고 오타도 막힌다.
 		http.Error(w, "cache not synced", http.StatusServiceUnavailable)
-		// return으로 여기서 함수를 끝낸다.
-		//
-		// 이게 없으면 아래 200 쓰기까지 이어져 한 응답에 상태 코드를 두 번 쓰는 버그가 된다.
 		return
 	}
-	// 준비된 경우엔 본문 없이 200만 돌려준다.
-	//
-	// WriteHeader는 상태 코드만 기록하며, probe는 코드만 보므로 본문이 필요 없다.
 	w.WriteHeader(http.StatusOK)
 }
 
-// fail: 요청을 주어진 상태 코드로 끝내고 그 사실을 metric에 남긴다.
+// fail ends the request with the given status code and records it.
 //
-// 왜 헬퍼로 묶는가.
+// Why route this through one helper.
 //
-// 파이프라인의 모든 실패 분기가 "코드를 쓴다 + metric을 센다" 두 가지를 함께 해야 한다.
+// Every failure branch must both write a code and count it.
 //
-// 한 곳이라도 metric을 빠뜨리면 그 실패는 관측되지 않아 조용히 사라진다.
+// Routing them all through one helper is what keeps a branch from silently going unobserved.
 //
-// 헬퍼 하나를 거치게 하면 그런 누락이 애초에 생기지 않는다.
+// model may be empty: the auth, policy, and rate-limit stages run before the body is parsed, so no model is known yet.
 //
-// model 인자가 빈 문자열일 수 있는 이유: 인증/정책/속도 제한 단계는 본문을 파싱하기 전이라 model을 아직 모른다.
+// The empty label records exactly that.
 //
-// 그때는 ""를 넣어 "이 단계에서는 model이 정해지지 않았다"는 사실이 metric에 그대로 드러나게 한다.
+// The response body is the OpenAI-style JSON envelope from writeJSONError, not plaintext, so every gateway failure looks the same to a client regardless of which pipeline stage produced it.
+// HeaderAdmissionTier and HeaderAdmissionReason carry the gateway's own admission decision to the caller.
+//
+// They exist for the benchmark's evidence files, which recorded a status and nothing else: the tier the
+// gateway resolved and the reason it refused both had to be reconstructed afterwards from configuration that
+// the evidence did not contain. A header costs a few bytes on a response the caller is already receiving.
+const (
+	HeaderAdmissionTier   = "X-Admission-Tier"
+	HeaderAdmissionReason = "X-Admission-Reason"
+	// HeaderBackendState carries the pressure reading a pressure-driven admission control decided on.
+	//
+	// Off by default: backend occupancy is not a caller's business. The benchmark turns it on because the
+	// question it exists to answer -- whether the guard saw the pressure and let it through, or never saw
+	// pressure at all -- cannot be read from the decision alone.
+	HeaderBackendState = "X-Backend-State"
+)
+
+// formatBackendState renders a snapshot compactly enough to sit in a header and parse without ambiguity.
+func formatBackendState(st BackendState) string {
+	return fmt.Sprintf("kv=%.3f,waiting=%d,engaged=%d,fresh=%d",
+		st.CacheUsage, st.Waiting, boolToDigit(st.Engaged), boolToDigit(st.Fresh))
+}
+
+func boolToDigit(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 func (s *Server) fail(w http.ResponseWriter, tenant, model string, code int) {
 	requests.WithLabelValues(tenant, model, strconv.Itoa(code)).Inc()
-	http.Error(w, http.StatusText(code), code)
+	writeJSONError(w, code, http.StatusText(code))
 }
 
-// resolveBackend: model을 backend URL로 해석한다.
+// unresolvedModelLabel is the fixed model label recorded when the requested model never resolved to a backend.
 //
-// 테스트 훅이 걸려 있으면 그것을 쓰고, 아니면 진짜 backendFor를 쓴다.
+// Why a sentinel and not the requested name (design spec Observability section, "Unbounded-cardinality values ... are never labels").
 //
-// Go 문법 설명: 함수 타입 필드가 nil인지 검사하는 것은 "훅이 설정되었는가"를 묻는 관용구다.
+// On the 404 and 502 routing paths the model is an arbitrary string lifted straight out of the request body, so an authenticated tenant looping over random names mints one new time series per name in requests_total.
 //
-// nil인 함수를 그냥 호출하면 패닉이 나므로 이 검사가 반드시 앞에 와야 한다.
-func (s *Server) resolveBackend(ctx context.Context, policy *platformv1.GPUQuotaPolicy, model string) (*url.URL, error) {
+// A counter's series are never reclaimed, so that walks the gateway's /metrics response and the scraping Prometheus into the ground, and it takes an authenticated client rather than an attacker to do it by accident.
+//
+// Every other model label in this file is bounded: the pre-routing stages pass an empty string, and the post-routing stages only run once resolveBackend has matched a configured InferenceDeployment.
+//
+// The leading underscore keeps the sentinel from ever colliding with a real model name, which must be a valid CR field value.
+const unresolvedModelLabel = "_unresolved"
+
+// failUnresolvedModel ends a request whose model never resolved to a backend, recording it under the sentinel label rather than the requested name.
+//
+// The requested name is not lost, only kept out of the label set: it goes into the caller's error body here and into the log line at each call site, both of which cost nothing per distinct value.
+func (s *Server) failUnresolvedModel(w http.ResponseWriter, tenant, model string, code int) {
+	requests.WithLabelValues(tenant, unresolvedModelLabel, strconv.Itoa(code)).Inc()
+	// %q rather than %s so an empty or whitespace-only name is still visible to whoever has to debug it.
+	writeJSONError(w, code, fmt.Sprintf("%s: model %q", http.StatusText(code), model))
+}
+
+// failReason ends the request with status and an explicit machine-readable reason, then records it.
+//
+// Why this cannot just be fail(): the admission guard's reasons ("input_rate_limit" here, "kv_cache_pressure" in Task 3) are not derivable from the HTTP status the way fail()'s errorCode mapping assumes, since both share status 429.
+//
+// Retry-After is set to 5s (design spec Config and API section) because an admission-guard 429 is expected to clear once bucket capacity or backend pressure recovers, unlike the RPM limiter's 429, which carries no such hint.
+func (s *Server) failReason(w http.ResponseWriter, tenant, model string, code int, reason string) {
+	requests.WithLabelValues(tenant, model, strconv.Itoa(code)).Inc()
+	w.Header().Set("Retry-After", "5")
+	writeJSONErrorCode(w, code, reason, http.StatusText(code))
+}
+
+// resolveBackend resolves a model to its backend.
+//
+// It prefers the test hook over the real backendFor.
+func (s *Server) resolveBackend(ctx context.Context, policy *platformv1.GPUQuotaPolicy, model string) ([]*BackendRef, error) {
 	if s.backendOverride != nil {
-		return s.backendOverride(model), nil
+		// The hook only fabricates a URL; Namespace/Name/Port stay zero-valued, since tests using it only need the pipeline to reach an httptest server, not a real backend's identity.
+		return []*BackendRef{{URL: s.backendOverride(model), Model: model}}, nil
 	}
-	return s.backendFor(ctx, policy, model)
+	return s.backendsFor(ctx, policy, model)
 }
 
-// chatCompletions: OpenAI 호환 chat completions 요청을 처리하는 파이프라인이다.
+// chatCompletions serves the OpenAI-compatible chat completions pipeline.
 //
-// 단계의 순서가 이 함수의 핵심이다(설계서 Request flow 절).
+// The ordering is the point (design spec Request flow section).
 //
-//  1. request id 부여: 이후 모든 로그와 업스트림 요청이 같은 id를 공유해야 추적이 이어진다.
-//  2. 인증: 누구인지 모르는 요청은 여기서 끝난다(401).
-//  3. 정책 조회: 신원은 알지만 권한이 없으면 여기서 끝난다(403).
-//  4. 속도 제한: 자기 몫을 넘겼으면 여기서 끝난다(429).
-//  5. 본문 파싱: model을 꺼낸다(400).
-//  6. 라우팅: model을 backend로 해석한다(404).
-//  7. 프록시: 업스트림으로 넘긴다(502/504 또는 업스트림의 응답).
+//  1. request id: every log line and the upstream call share one id, or tracing breaks.
+//  2. auth: an unidentified request stops here (401).
+//  3. policy: identified but unauthorized stops here (403).
+//  4. rate limit: over its share stops here (429).
+//  5. body parse: extract the model (400).
+//  6. routing: resolve the model to a backend (404).
+//  7. admission: off/static-cap/kv-aware decide whether the request proceeds (429).
+//  8. proxy: hand off upstream (502/504, or whatever the upstream returns).
 //
-// 왜 인증이 속도 제한보다 먼저인가.
+// Why auth precedes rate limiting.
 //
-// 속도 제한은 tenant별 bucket을 쓰므로 tenant를 모르면 애초에 판정할 수 없다.
+// The limiter keys on tenant and cannot judge without one.
 //
-// 게다가 인증 없이 제한을 걸면 익명 요청이 남의 bucket을 소모시켜, 공격자가 남의 tenant를 마비시킬 수 있다.
+// Limiting anonymous traffic would also let an attacker drain someone else's bucket and stall that tenant.
 //
-// 왜 속도 제한이 본문 파싱보다 먼저인가.
+// Why rate limiting precedes body parsing.
 //
-// 본문 파싱은 최대 1MB를 메모리에 올린다.
+// Parsing buffers up to 1MB.
 //
-// 제한에 걸릴 요청까지 본문을 읽으면 폭주하는 클라이언트가 게이트웨이 메모리를 계속 소모시킬 수 있다.
+// Reading the body of a request destined for rejection would let a flooding client keep spending gateway memory.
 //
-// 거절할 요청은 가능한 한 빨리, 비용을 쓰기 전에 거절하는 것이 맞다.
+// So rejections happen before that cost is paid.
 func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// 1. request id: 호출자가 이미 달아 왔으면 그대로 쓰고, 없으면 새로 만든다.
+	// 1. request id: reuse a caller-supplied id when present.
 	//
-	// 왜 들어온 id를 이어받는가.
+	// Why an incoming id is reused.
 	//
-	// 호출자가 자기 시스템의 추적 id를 달아 보냈다면 그것을 유지해야 게이트웨이의 로그와 호출자의 로그가 하나로 이어진다.
+	// Keeping it is what stitches the caller's traces and ours together.
 	//
-	// 무조건 새로 만들면 그 연결이 끊긴다.
+	// Always minting a new one would sever that link.
 	rid := r.Header.Get("X-Request-Id")
 	if rid == "" {
 		rid = newRequestID()
 	}
-	// 응답과 업스트림 요청 양쪽에 단다.
+	// Set it on both the response and the upstream request.
 	//
-	// 응답에만 달면 업스트림 로그에서 이 요청을 찾을 수 없고, 요청에만 달면 클라이언트가 자기 요청의 id를 알 수 없어 문의 시 대조가 불가능하다.
+	// Response-only leaves the request unfindable in upstream logs, and request-only leaves the client unable to quote its own id.
 	w.Header().Set("X-Request-Id", rid)
 	r.Header.Set("X-Request-Id", rid)
 
-	// 2. 인증: API key를 tenant로 해석한다.
-	tenant, ok := s.resolveTenant(ctx, r)
+	// 2. Resolve the API key to a tenant.
+	tenant, ok, err := s.resolveTenant(ctx, r)
+	if err != nil {
+		// 503, not 401. The gateway could not establish whether this key is valid, and answering
+		// Unauthorized asserts that it did — for every tenant at once, since they all read the same Secret.
+		// An operator seeing a fleet of 401s rotates credentials; one seeing 503s looks at the cluster.
+		log.FromContext(ctx).Error(err, "cannot read the api-keys secret", "request_id", rid)
+		s.fail(w, "", "", http.StatusServiceUnavailable)
+		return
+	}
 	if !ok {
 		s.fail(w, "", "", http.StatusUnauthorized)
 		return
 	}
 
-	// 3. 정책 조회: 이 tenant의 GPUQuotaPolicy를 찾는다.
-	policy, err := s.policyForTenant(ctx, tenant)
-	// errors.Is로 "정책이 없음"이라는 정상적 결과와 "조회가 깨짐"이라는 사고를 구분한다.
+	// 3. Find the tenant's GPUQuotaPolicy.
 	//
-	// 이 둘을 뭉뚱그리면 apiserver 장애가 403으로 보여 운영자가 정책 설정을 헤매게 된다.
+	// errors.Is separates "no policy" (an ordinary outcome) from a broken read.
+	//
+	// Conflating them would show an apiserver outage as a 403 and send operators hunting through policy config.
+	policy, err := s.policyForTenant(ctx, tenant)
 	if errors.Is(err, ErrNoPolicy) {
 		s.fail(w, tenant, "", http.StatusForbidden)
 		return
 	}
 	if err != nil {
-		// 조회 자체가 실패한 경우다.
+		// The lookup itself failed.
 		//
-		// 클라이언트 잘못이 아니므로 502다.
+		// This is not the client's fault.
 		log.FromContext(ctx).Error(err, "policy lookup failed", "tenant", tenant, "request_id", rid)
 		s.fail(w, tenant, "", http.StatusBadGateway)
 		return
 	}
 
-	// 4. 속도 제한: tenant의 bucket에서 토큰 하나를 꺼내 본다.
+	// 4. Take a token from the tenant's bucket.
+	// An unfinished Server is answered 503, not 429. Both are refusals, but 429 tells the caller they exceeded
+	// a budget that in this state was never being applied, and the retry it invites will be refused the same
+	// way forever.
+	if !s.buckets.configured() {
+		log.FromContext(ctx).Error(nil, "rate limiter was never initialised; refusing rather than serving unlimited",
+			"request_id", rid)
+		s.fail(w, tenant, "", http.StatusServiceUnavailable)
+		return
+	}
 	if !s.buckets.Allow(tenant, policy.Spec.RateLimit) {
-		// 전용 metric을 따로 센다(requests의 code=429와 목적이 다르다).
+		// Counted separately from requests{code="429"}; the two answer different questions.
 		rateLimited.WithLabelValues(tenant).Inc()
 		s.fail(w, tenant, "", http.StatusTooManyRequests)
 		return
 	}
 
-	// 5. 본문 파싱: model을 꺼내고 본문을 복원한다.
-	body, model, err := readModel(r)
+	// 5. Extract admission metadata and recover the body.
+	//
+	// Malformed JSON, a missing model, and an oversized body all land here.
+	//
+	// All three are the client's to fix.
+	body, meta, err := readRequestMeta(r)
 	if err != nil {
-		// 깨진 JSON, model 누락, 크기 초과가 모두 여기 해당한다.
-		//
-		// 셋 다 클라이언트가 고쳐야 할 문제이므로 400이 맞다.
+		// A body over the cap is not malformed, and 400 told the caller to fix their JSON when the JSON was
+		// fine. MaxBytesReader reports the case as a distinguishable type precisely so it can be separated.
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			s.fail(w, tenant, "", http.StatusRequestEntityTooLarge)
+			return
+		}
 		s.fail(w, tenant, "", http.StatusBadRequest)
 		return
 	}
-	// 복원된 본문을 요청에 되돌려 놓는다.
+	// Put the body back, or the upstream receives an empty one.
 	//
-	// 이 줄이 없으면 업스트림이 빈 본문을 받는다.
-	r.Body = body
+	// GetBody is set from the same factory, which is what lets the shared connection pool recover from the one stale-connection case Go will retry for a POST.
+	//
+	// When the Transport picks an idle connection the upstream has already closed and the write fails having sent nothing, http.Transport retries on a fresh connection if and only if it can rewind the body.
+	//
+	// A proxied request has no GetBody of its own, since the server side never sets one, so without this line that case reaches the client as a 502 despite nothing having been sent upstream.
+	//
+	// It does not make the pool immune to a stale connection: once bytes are on the wire, Go refuses to replay a POST at all (see readRequestMeta).
+	r.GetBody = body
+	// The factory reads from a buffer already in memory, so it has no failure mode and there is no error path to take here.
+	r.Body, _ = r.GetBody()
 
-	// 6. 라우팅: model을 서빙하는 backend를 찾는다.
-	target, err := s.resolveBackend(ctx, policy, model)
+	// 6. Resolve the model to a backend.
+	targets, err := s.resolveBackend(ctx, policy, meta.Model)
 	if errors.Is(err, ErrNoRoute) {
-		// 그런 model이 없다는 정상적 결과다.
-		s.fail(w, tenant, model, http.StatusNotFound)
+		// An ordinary "no such model" outcome, so Info rather than Error.
+		//
+		// It is logged at all because the metric now records the sentinel label, and without this line the requested name would survive nowhere the operator can reach it.
+		log.FromContext(ctx).Info("no backend for model", "tenant", tenant, "model", meta.Model, "request_id", rid)
+		s.failUnresolvedModel(w, tenant, meta.Model, http.StatusNotFound)
 		return
 	}
 	if err != nil {
-		log.FromContext(ctx).Error(err, "backend lookup failed", "tenant", tenant, "model", model, "request_id", rid)
-		s.fail(w, tenant, model, http.StatusBadGateway)
+		log.FromContext(ctx).Error(err, "backend lookup failed", "tenant", tenant, "model", meta.Model, "request_id", rid)
+		s.failUnresolvedModel(w, tenant, meta.Model, http.StatusBadGateway)
 		return
 	}
 
-	// 7. 프록시: 여기서부터는 응답을 우리가 만들지 않고 업스트림 것을 그대로 흘려보낸다.
-	start := time.Now()
-	// statusRecorder로 감싸 업스트림이 쓴 상태 코드를 나중에 metric에 남길 수 있게 한다.
-	rec := &statusRecorder{ResponseWriter: w, code: http.StatusOK}
-	newReverseProxy(target, s.responseHeaderTimeout, func(c int) {
-		upstreamErrors.WithLabelValues(tenant, model).Inc()
-		// ErrorHandler가 http.Error로 코드를 쓰지만 그 경로는 statusRecorder를 거치지 않을 수 있으므로 여기서 직접 기록해 metric이 실제 응답과 어긋나지 않게 한다.
-		rec.code = c
-	}).ServeHTTP(rec, r)
-
-	// ServeHTTP가 반환했다는 것은 응답 전송이 끝났다는 뜻이다(스트리밍이면 스트림이 닫힌 시점이다).
+	// The reachable set is decided ONCE, here, and every stage below sees the same slice.
 	//
-	// 그러므로 여기서 재는 시간은 첫 바이트까지가 아니라 요청 전체가 완료되기까지의 시간이다.
-	requests.WithLabelValues(tenant, model, strconv.Itoa(rec.code)).Inc()
-	requestDuration.WithLabelValues(tenant, model).Observe(time.Since(start).Seconds())
+	// tryBackends caps attempts at maxBackendAttempts and used to apply that cap itself, on its own copy. That
+	// was invisible while admission only ever consulted targets[0]. Once admission started asking every
+	// candidate, a third backend the request could never reach could reject it on its own pressure — a refusal
+	// attributable to a machine that was never going to serve. Registration has the same problem in the other
+	// direction: a scraper started for a backend outside the reachable set is telemetry nothing can act on.
+	targets = capBackendAttempts(targets)
+
+	// 7. Admission control: decide whether the request may proceed.
+	//
+	// Design rationale (design spec Pipeline placement section): this sits after backend resolution and before the proxy handoff, so an unroutable model (404, step 6) never consumes admission budget, while every request that will actually reach a backend is metered before it does.
+	//
+	// tier comes from the policy already fetched in step 3, not from the request, since tier is a property of the tenant's contract rather than something a caller can assert about itself.
+	tier := tierForPolicy(policy)
+	// The tier travels on the response so a replay's evidence records what the gateway decided rather than
+	// what the client assumed.
+	//
+	// The eligible population is tier == standard AND input over the threshold, and a raw row carried only
+	// the input estimate -- so the report scored the population on half the rule and agreed with the gateway
+	// by luck, the sole premium tenant happening to send prompts far below the threshold. Set before the
+	// admission stage, so a refused request carries it too: a request that was never admitted is exactly the
+	// one whose population membership decides whether the guard is being scored fairly.
+	w.Header().Set(HeaderAdmissionTier, tier)
+	admitter := s.admitter
+	if admitter == nil {
+		// SetAdmitter was never called, so behave exactly as if the guard did not exist.
+		admitter = offAdmitter{}
+	}
+	// kv-aware is the only mode that needs to learn about a backend as soon as it is routed
+	// (design spec Config and API section, "the gateway registers backends as they are first
+	// routed"); off and static-cap don't implement backendRegistrar, so this is a no-op for
+	// them.
+	//
+	// scraperManager.Register is idempotent, so calling it on every request only actually
+	// starts a scraper the first time a given backend is seen.
+	mode := s.mode
+	if mode == "" {
+		mode = AdmissionOff
+	}
+	admit, reason := admitCandidates(ctx, admitter, meta, targets, tenant, tier)
+	decision := "admit"
+	if !admit {
+		decision = "reject"
+	}
+	// The reason travels on every decision, not only refusals.
+	//
+	// An admit had none, so four different facts about arm C arrived as one: a backend the guard never
+	// registered, telemetry too stale to read, a backend under no pressure, and a caller outside the gated
+	// population. The first two mean the guard was bypassed -- a run spent entirely in them is arm A under
+	// arm C's name, reporting as a clean scientific FAIL with nothing in the evidence to say otherwise.
+	if reason != "" {
+		w.Header().Set(HeaderAdmissionReason, reason)
+	}
+	// The numbers the decision was made from, when the operator asked for them and the mode has any.
+	if s.reportBackendState {
+		if obs, ok := admitter.(admissionObserver); ok {
+			for _, b := range targets {
+				if st, has := obs.Observed(b); has {
+					w.Header().Set(HeaderBackendState, formatBackendState(st))
+					break
+				}
+			}
+		}
+	}
+	// Recorded for every request, admitted or not, so the admit rate and admitted-vs-offered token fraction can both be read straight off these two series without diffing against requests_total.
+	admissionDecisions.WithLabelValues(string(mode), tenant, meta.Model, decision, reason).Inc()
+	admissionInputTokens.WithLabelValues(string(mode), tenant, decision).Add(float64(meta.EstInputTokens))
+	if !admit {
+		// A request larger than the bucket can ever hold is refused permanently, so it must not carry the
+		// retry hint failReason attaches: a client obeying it would retry an arithmetically impossible request
+		// forever. 413 rather than 429 for the same reason — the caller's action is a smaller prompt, not a
+		// later one.
+		// The 413 does not go through failReason, so before the header above existed its reason reached
+		// nowhere a client could record it. That is why the 1,788 refusals in the 2026-09-03 run had to be
+		// explained months later by reading the runner's flags and the gateway's defaults.
+		if reason == reasonInputExceedsBurst {
+			s.fail(w, tenant, meta.Model, http.StatusRequestEntityTooLarge)
+			return
+		}
+		s.failReason(w, tenant, meta.Model, http.StatusTooManyRequests, reason)
+		return
+	}
+
+	// 8. From here the response is the upstream's, passed through rather than composed.
+	start := time.Now()
+	rec := &statusRecorder{ResponseWriter: w, code: http.StatusOK}
+	// Each candidate is tried until one answers, and the two conditions below are what make that safe rather
+	// than merely useful.
+	//
+	// A retry is only possible while NOTHING has reached the client. Once the upstream has written a status
+	// line or a token, the client is mid-response and a second backend cannot take over — it would splice two
+	// answers together. att.wrote is that latch, and for a streaming response it closes on the first token.
+	//
+	// It also needs the request body back. A POST is not replayable on its own, and this is exactly what
+	// r.GetBody was already installed for one stage earlier: the factory reads from a buffer held in memory,
+	// so rewinding costs nothing and cannot fail. Without it there would be no second attempt to make.
+	// The LAST failure code seen, kept so a request that ended without any backend answering is not published
+	// as the recorder's seeded 200. That happened on every cancelled request: the callback only wrote rec.code
+	// on a final attempt, the guards inside tryBackends stopped the loop before any final attempt ran, and a
+	// request nobody served went into requests_total as a success.
+	lastFailure := 0
+	urls := make([]*url.URL, 0, len(targets))
+	for _, t := range targets {
+		urls = append(urls, t.URL)
+	}
+	advanced := tryBackends(rec, r, urls, s.sharedTransport(), func(code int, final bool) {
+		upstreamErrors.WithLabelValues(tenant, meta.Model).Inc()
+		lastFailure = code
+		if final {
+			rec.code = code
+		}
+	})
+	// Nothing ever reached the client, so no backend answered. rec.code is still its default 200 and would
+	// publish a failed request as a success; the last failure code is what actually happened.
+	//
+	// The rec.answered guard is load-bearing rather than defensive: a request whose FIRST attempt failed and
+	// whose retry SUCCEEDED also leaves lastFailure set, and without the guard that genuine 200 would be
+	// overwritten by the failure that was recovered from.
+	if !rec.answered && lastFailure != 0 {
+		rec.code = lastFailure
+	}
+	// advanced is tryBackends reporting that it REALLY tried another candidate, not the failure callback
+	// guessing. The callback fires before the retry guards run, so latching on it counted a fallback whenever
+	// a non-final attempt failed — including the cancelled requests where no retry ever happened, which the
+	// benchmark harness produces on every timeout.
+	//
+	// A successful status is still required on top: a fallback that also failed is not a rescue, and counting
+	// it as one inverts what the ratio means. The range is 2xx and 3xx rather than everything below 500,
+	// because a 4xx from the spare means the request reached it and was refused on its own merits — the
+	// fallback path carried the request but never served an answer, and the metric's name says "served".
+	if advanced && rec.code >= 200 && rec.code < 400 {
+		backendFallbacks.WithLabelValues(tenant, meta.Model).Inc()
+	}
+
+	// ServeHTTP returning means the response finished sending (for a stream, that the stream closed).
+	//
+	// This therefore measures the whole request rather than time-to-first-byte.
+	requests.WithLabelValues(tenant, meta.Model, strconv.Itoa(rec.code)).Inc()
+	requestDuration.WithLabelValues(tenant, meta.Model).Observe(time.Since(start).Seconds())
 }
 
-// Handler: :8080에서 사용자 트래픽을 서빙하는 mux를 만들어 돌려준다.
+// Handler is the serving mux on :8080.
 //
-// Go 문법 설명.
+// Why the method is part of the pattern (design spec Error codes section).
 //
-//   - 반환 타입 http.Handler는 인터페이스이며, ServeHTTP 메서드를 가진 무엇이든 담을 수 있다.
-//     구체 타입(*http.ServeMux) 대신 인터페이스를 반환하면 호출한 쪽이 내부 구현에 묶이지 않는다.
-//   - http.NewServeMux()는 "경로 → handler" 라우팅 표를 만든다.
-//   - mux.HandleFunc(패턴, 함수)는 그 표에 한 줄을 등록한다.
-//   - s.readyz 처럼 괄호 없이 메서드 이름만 쓰면 "호출"이 아니라 "함수 값 자체"를 넘기는 것이다.
-//     이때 리시버 s가 함께 묶여서(method value) 나중에 호출될 때도 같은 Server 인스턴스를 본다.
+// Since Go 1.22 a ServeMux pattern may name a method.
 //
-// 패턴에 메서드를 함께 적는 이유(설계서 Error codes 절).
+// The mux therefore answers 405 for a right-path/wrong-method request and 404 for an unregistered path, without either being hand-written.
 //
-// Go 1.22부터 ServeMux 패턴에 "POST /경로"처럼 메서드를 적을 수 있다.
-//
-// 이렇게 등록하면 경로는 맞고 메서드만 다른 요청에 mux가 알아서 405를 돌려주고, 등록되지 않은 경로에는 404를 돌려준다.
-//
-// 즉 두 코드를 우리가 직접 구현할 필요가 없다.
-//
-// 메서드 없이 "/v1/chat/completions"로만 등록하면 GET 요청까지 파이프라인으로 들어와 405여야 할 것이 401이나 400으로 나가게 된다.
+// Registering the bare path would let a GET fall into the pipeline and surface as 401 or 400 where 405 belongs.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/chat/completions", s.chatCompletions)
@@ -419,15 +563,13 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// MetricsHandler: :8081에서 관측성을 담당하는 mux를 만들어 돌려준다.
+// MetricsHandler is the observability mux on :8081.
 //
-// 설계 근거(설계서 Components 절): 사용자 트래픽(:8080)과 관측성 트래픽(:8081)을 별도 포트로 분리한다.
+// Design rationale (design spec Components section): user traffic (:8080) and observability (:8081) are split across ports so /metrics stays cluster-internal.
 //
-// 포트가 나뉘어 있으면 metrics 엔드포인트를 외부에 노출하지 않고 클러스터 내부에만 열어둘 수 있다.
+// Per-tenant usage metrics would let a user infer other tenants' activity, so the split is mandatory.
 //
-// tenant별 사용량이 담긴 metric이 사용자에게 노출되면 다른 tenant의 활동을 추측할 수 있으므로 반드시 분리해야 한다.
-//
-// 두 mux 모두 /readyz를 등록하는 이유는 어느 포트로 probe를 걸든 같은 답을 얻게 하기 위해서다.
+// Both muxes serve /readyz so a probe on either port gets the same answer.
 func (s *Server) MetricsHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metricsHTTPHandler())
@@ -435,66 +577,40 @@ func (s *Server) MetricsHandler() http.Handler {
 	return mux
 }
 
-// NewCache: gateway의 읽기 집합에 대한 scope cache와, cache를 읽고 apiserver에 쓰는 위임 client를 생성한다.
+// NewCache builds a scoped cache over the gateway's read set plus a delegating client that reads the cache and writes the apiserver.
 //
-// 그리고 routing에 쓰는 model-name field indexer를 등록한다.
-//
-// Go 문법 설명.
-//
-//   - 리시버가 없는 일반 함수다(특정 타입에 붙지 않음).
-//   - 반환 타입 (cache.Cache, client.Client, error)처럼 Go는 값을 여러 개 돌려줄 수 있다.
-//     관례상 마지막 반환값을 error로 두고, 에러가 없으면 nil을 넣는다.
-//   - cache와 client를 둘 다 돌려주는 이유는 역할이 다르기 때문이다.
-//     cache는 호출한 쪽이 Start로 돌리고 동기화를 기다려야 하는 대상이고, client는 실제로 객체를 읽고 쓰는 도구다.
-//
-// 설계 근거(설계서 Components 절): 게이트웨이는 요청마다 apiserver를 때리면 안 된다.
-//
-// watch 기반 cache를 로컬에 두고 메모리에서 읽어야 지연이 낮고 apiserver 부하도 없다.
+// It registers the model-name field indexer used for routing.
 func NewCache(ctx context.Context, cfg *rest.Config, scheme *runtime.Scheme, namespace string) (cache.Cache, client.Client, error) {
-	// cache.New(...)는 접속 설정(cfg)과 타입 등록부(scheme)로 cache를 만든다.
-	//
-	// ca, err := ... 처럼 반환값이 둘이면 왼쪽에 변수를 둘 나열해 받는다.
-	//
-	// cache.Options의 세 필드 설명.
-	//
-	//   - Scheme: 어떤 Go 타입이 어떤 API 그룹/버전에 대응하는지 알려주는 등록부다.
-	//     이게 없으면 cache가 InferenceDeployment 같은 커스텀 타입을 역직렬화하지 못한다.
-	//   - DefaultTransform: cache에 넣기 전에 객체를 한 번 가공하는 함수다.
-	//     TransformStripManagedFields()는 metadata.managedFields를 떼어낸다.
-	//     이 필드는 서버 사이드 apply 이력이라 게이트웨이가 전혀 쓰지 않으면서 객체마다 용량을 크게 차지한다.
-	//     미리 버리면 cache 메모리 사용량이 눈에 띄게 줄어든다.
-	//   - ByObject: 타입마다 감시 범위를 따로 정한다.
-	//     아래에서 Secret에만 건다.
 	ca, err := cache.New(cfg, cache.Options{
 		Scheme:           scheme,
 		DefaultTransform: cache.TransformStripManagedFields(),
-		// Secret은 이 게이트웨이가 떠 있는 namespace 하나만 감시한다.
+		// Watch Secrets only in the namespace the gateway runs in.
 		//
-		// 이 범위 제한이 없으면 무슨 일이 벌어지는가(설계서 Components 절이 "scoped cache"를 요구하는 이유).
+		// Why the scope matters (it is what the design spec's Components section means by "scoped cache").
 		//
-		// controller-runtime의 cache는 범위를 지정하지 않으면 모든 namespace를 감시한다(cache.Options 문서: "An empty map ... means that all namespaces will be cached").
+		// controller-runtime caches every namespace when no scope is given (cache.Options docs: "An empty map ... means that all namespaces will be cached").
 		//
-		// 그러면 게이트웨이가 클러스터의 모든 Secret을 메모리에 들고 있게 된다.
+		// Unscoped, the gateway would hold every Secret in the cluster in memory.
 		//
-		// 거기엔 다른 컴포넌트의 자격증명과 TLS 개인키까지 전부 포함된다.
+		// That includes other components' credentials and TLS private keys.
 		//
-		// 게이트웨이는 외부 트래픽을 직접 받는 유일한 컴포넌트라 침해 시 그 전부가 함께 새어 나간다.
+		// It is the one component taking external traffic directly, so a compromise would leak all of it.
 		//
-		// 필요한 것은 api-keys Secret 하나뿐이므로 그 namespace로 가둔다.
+		// It needs exactly one Secret, so the watch is confined to that Secret's namespace.
 		//
-		// RBAC과 반드시 짝이 맞아야 한다.
+		// This must stay in step with RBAC.
 		//
-		// config/gateway/rbac.yaml은 secrets 읽기를 게이트웨이 namespace의 Role로만 준다.
+		// config/gateway/rbac.yaml grants secrets reads through a Role in the gateway namespace only.
 		//
-		// 여기서 범위를 가두지 않으면 cache가 모든 namespace의 secrets를 list/watch 하려다 권한이 없어 실패하고, cache가 영영 동기화되지 않아 readiness가 열리지 않는다.
+		// Without this scope the cache tries to list/watch secrets in every namespace, is denied, and never syncs, so readiness never opens.
 		//
-		// 즉 게이트웨이가 아무 요청도 받지 못한다.
+		// The gateway then serves nothing.
 		//
-		// InferenceDeployment는 여기에 넣지 않는다.
+		// InferenceDeployment is deliberately absent.
 		//
-		// tenant마다 다른 namespace에 있고 게이트웨이는 어떤 tenant의 요청이든 받아야 하므로 범위를 미리 좁힐 수 없다.
+		// Tenants live in different namespaces and the gateway must serve any of them, so its scope cannot be narrowed ahead of time.
 		//
-		// GPUQuotaPolicy는 cluster-scoped라 애초에 namespace 개념이 없다.
+		// GPUQuotaPolicy is cluster-scoped and has no namespace to begin with.
 		ByObject: map[client.Object]cache.ByObject{
 			&corev1.Secret{}: {
 				Namespaces: map[string]cache.Config{
@@ -503,50 +619,66 @@ func NewCache(ctx context.Context, cfg *rest.Config, scheme *runtime.Scheme, nam
 			},
 		},
 	})
-	// 에러가 있으면 두 개의 반환값 자리에 nil을 채우고 에러만 위로 올린다.
 	if err != nil {
-		// fmt.Errorf의 %w 동사는 원래 에러를 "감싸서(wrap)" 새 에러 안에 보존한다.
-		//
-		// %v로 문자열만 붙이면 원인 에러가 사라지지만, %w를 쓰면 나중에 errors.Is/As로 원인을 다시 꺼낼 수 있다.
-		//
-		// 앞에 "new cache: "를 붙여 어느 단계에서 깨졌는지 맥락을 남긴다.
 		return nil, nil, fmt.Errorf("new cache: %w", err)
 	}
-	// routing 조회를 위해 InferenceDeployment를 그것이 서빙하는 model 이름으로 index한다.
-	//
-	// Go 문법 설명.
-	//
-	//   - IndexField의 마지막 인자는 함수 리터럴(익명 함수)이다.
-	//     이름 없이 func(...) ... { ... } 형태로 그 자리에서 함수를 정의해 값으로 넘긴다.
-	//   - 이 함수는 객체 하나를 받아 "이 객체를 어떤 key들로 찾을 수 있는지"를 문자열 슬라이스로 답한다.
-	//     반환이 슬라이스인 이유는 한 객체가 여러 key를 가질 수도 있기 때문이며, 여기서는 항상 1개다.
-	//   - o.(*platformv1.InferenceDeployment)는 타입 단언(type assertion)이다.
-	//     인자 o는 임의의 쿠버네티스 객체를 담는 client.Object 인터페이스라 구체 타입으로 되돌려야 Spec에 접근할 수 있다.
-	//     반환값 하나로 받는 이 형태는 타입이 다르면 패닉이 나지만, 이 indexer는 InferenceDeployment에만 등록되므로 안전하다.
-	//   - &platformv1.InferenceDeployment{}는 값이 빈 객체이며, 내용이 아니라 "어떤 타입에 index를 걸지"만 알려주는 용도다.
-	//
-	// 설계 근거(설계서 Request flow 절): index가 없으면 요청마다 전체 InferenceDeployment를 훑어야 한다.
-	//
-	// index를 걸어두면 model 이름으로 즉시 조회되므로 배포 개수가 늘어도 조회 비용이 일정하다.
+	// Index InferenceDeployment by its served model name for routing lookups.
 	if err := ca.IndexField(ctx, &platformv1.InferenceDeployment{}, ModelNameIndex, func(o client.Object) []string {
 		return []string{o.(*platformv1.InferenceDeployment).Spec.Model.Name}
 	}); err != nil {
-		// index key 이름을 에러에 함께 남겨, 여러 index 중 어느 것이 실패했는지 바로 알 수 있게 한다.
 		return nil, nil, fmt.Errorf("index %s: %w", ModelNameIndex, err)
 	}
-	// client.New(...)로 "위임(delegating) client"를 만든다.
-	//
-	// Go 문법 설명: client.Options의 Cache 필드에 &client.CacheOptions{Reader: ca}를 넣는 것이 핵심이다.
-	//
-	// 이렇게 하면 읽기(Get/List)는 방금 만든 cache(ca)로 가고, 쓰기(Create/Update)는 apiserver로 직접 간다.
-	//
-	// 이 필드를 비워두면 모든 읽기가 apiserver를 때려서 cache를 만든 의미가 사라진다.
 	cl, err := client.New(cfg, client.Options{Scheme: scheme, Cache: &client.CacheOptions{Reader: ca}})
 	if err != nil {
 		return nil, nil, fmt.Errorf("new delegating client: %w", err)
 	}
-	// 정상 경로: cache와 client를 돌려주고, 마지막 자리엔 "에러 없음"을 뜻하는 nil을 넣는다.
-	//
-	// 여기서 반환된 cache는 아직 시작되지 않았으므로, 호출한 쪽이 Start를 부르고 동기화를 기다린 뒤 MarkReady를 호출해야 한다.
 	return ca, cl, nil
+}
+
+// admitCandidates registers every backend that could serve this request and meters the one that will be
+// tried first.
+//
+// The two halves take different sets, and that asymmetry is the point rather than an inconsistency.
+//
+// EVERY candidate is registered, because registration starts a telemetry scraper and a backend that can serve
+// traffic has to be observable before it does. Registering only the head meant that when the head went down
+// its scraper hit the same dead Service, its snapshot went stale, and the kv-aware guard — which fails OPEN on
+// staleness — admitted everything, while the spare absorbing all of the traffic had no scraper at all. The
+// guard went blind exactly when fallback made it matter, and nothing reported it, because every request still
+// succeeded. Register is idempotent, so this starts a scraper only the first time a backend is seen.
+//
+// WHICH candidates are ASKED depends on whether asking costs anything.
+//
+// Asking only the head was wrong in the same shape as registering only the head, and for the same reason.
+// Admission runs before any attempt, so it cannot know which backend will serve; the head is merely the one
+// that will be TRIED first. When the head is unreachable its telemetry goes stale, the kv-aware guard
+// bypasses on staleness — correctly, since refusing traffic on a number nobody could read would be worse —
+// and the request then travels to a spare that was never consulted. The guard is at its most permissive
+// exactly when the backend under real pressure is the one about to receive the request.
+//
+// So a stateless admitter is asked about every candidate, and one dissent rejects. It is the conservative
+// reading and deliberately so: a request is admitted only if every backend it could reach would take it. The
+// cost is that a loaded spare can now shed a long standard-tier request the head would have served. That
+// costs something only while a spare is genuinely under KV pressure, which on this routing table means it is
+// already absorbing traffic.
+//
+// A STATEFUL admitter is still asked once, about the head. static-cap's Admit spends EstInputTokens from a
+// per-backend limiter, so asking it about each candidate would bill one request several times and the arm
+// would stop measuring offered load. One request, one charge, decided up front.
+func admitCandidates(ctx context.Context, admitter Admitter, meta RequestMeta,
+	targets []*BackendRef, tenant, tier string) (bool, string) {
+	if reg, ok := admitter.(backendRegistrar); ok {
+		for _, t := range targets {
+			reg.RegisterBackend(t)
+		}
+	}
+	if _, stateless := admitter.(statelessAdmitter); !stateless {
+		return admitter.Admit(ctx, meta, targets[0], tenant, tier)
+	}
+	for _, t := range targets {
+		if ok, reason := admitter.Admit(ctx, meta, t, tenant, tier); !ok {
+			return false, reason
+		}
+	}
+	return true, ""
 }

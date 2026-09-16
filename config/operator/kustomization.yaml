@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The operator workload without the CRDs.
+#
+# The crds Application owns the CustomResourceDefinitions via ServerSideApply, so this overlay excludes them to avoid dual ownership.
+#
+# Namespace and namePrefix mirror config/default so the GitOps operator matches the make-deploy operator.
+namespace: gpu-platform-control-plane-system
+namePrefix: gpu-platform-control-plane-
+
+resources:
+  - ../rbac
+  - ../manager

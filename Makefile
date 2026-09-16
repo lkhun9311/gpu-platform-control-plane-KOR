@@ -1,8 +1,12 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
-# 게이트웨이는 별도의 프로세스이자 별도의 이미지라 태그도 따로 받는다.
-# IMG 하나를 공유하면 컨트롤러를 밀 때 게이트웨이까지 같은 태그로 덮여 버린다.
+# The gateway is a separate process and a separate image, so it takes its own tag.
+# Sharing IMG would overwrite the gateway with the controller's tag on every push.
 GATEWAY_IMG ?= gateway:latest
+# gpu-simulator is a third, independent process (a DaemonSet, not a Deployment), so it takes its own tag for the same reason.
+GPU_SIMULATOR_IMG ?= gpu-simulator:latest
+# benchharness stub-serve runs in-cluster as the backend the gateway-path evidence routes to, so it needs its own tag too.
+BENCHHARNESS_IMG ?= benchharness:latest
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -48,7 +52,15 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	# The webhook output is redirected away from its default, which is config/webhook/manifests.yaml -- the file
+	# the cluster actually gets, and which is hand-written because controller-gen cannot express a
+	# namespaceSelector or the fully-qualified Service name this layout needs. Left at the default, every
+	# `make test` overwrote the deployed configuration with a weaker one and then tested the result; CI was red
+	# for exactly that reason. config/webhook/generated is what the markers say, and
+	# TestHandWrittenWebhookMatchesTheMarkers keeps the two from disagreeing.
+	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." \
+		output:crd:artifacts:config=config/crd/bases \
+		output:webhook:artifacts:config=config/webhook/generated
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -107,7 +119,17 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 
 .PHONY: lint-config
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
-	"$(GOLANGCI_LINT)" config verify
+# `config verify` fetches its JSON schema over the network, so this target fails whenever
+# golangci-lint.run is slow -- observed as a CI failure on a change that touched no Go code at all.
+# Retry absorbs that, and only that: an actually invalid config fails all three attempts just as fast,
+# because the schema loads and the validation is what rejects it. Still fails closed when the network
+# never comes back, which is the right answer -- an unverified config is not a verified one.
+	@for i in 1 2 3; do \
+		"$(GOLANGCI_LINT)" config verify && exit 0; \
+		echo "config verify attempt $$i failed; retrying in 5s"; \
+		sleep 5; \
+	done; \
+	echo "config verify failed three times"; exit 1
 
 ##@ Build
 
@@ -134,6 +156,26 @@ docker-build-gateway: ## Build docker image with the gateway.
 .PHONY: docker-push-gateway
 docker-push-gateway: ## Push docker image with the gateway.
 	$(CONTAINER_TOOL) push ${GATEWAY_IMG}
+
+.PHONY: build-gpu-simulator
+build-gpu-simulator: fmt vet ## Build gpu-simulator binary.
+	go build -o bin/gpu-simulator cmd/gpu-simulator/main.go
+
+.PHONY: run-gpu-simulator
+run-gpu-simulator: fmt vet ## Run the gpu-simulator from your host.
+	go run ./cmd/gpu-simulator/main.go
+
+.PHONY: docker-build-gpu-simulator
+docker-build-gpu-simulator: ## Build docker image with gpu-simulator.
+	$(CONTAINER_TOOL) build -t ${GPU_SIMULATOR_IMG} -f Dockerfile.gpu-simulator .
+
+.PHONY: docker-push-gpu-simulator
+docker-push-gpu-simulator: ## Push docker image with gpu-simulator.
+	$(CONTAINER_TOOL) push ${GPU_SIMULATOR_IMG}
+
+.PHONY: docker-build-benchharness
+docker-build-benchharness: ## Build docker image with benchharness (entrypoint: stub-serve).
+	$(CONTAINER_TOOL) build -t ${BENCHHARNESS_IMG} -f Dockerfile.benchharness .
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
@@ -208,6 +250,9 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+GO_MOD_VERSION = $(shell awk '/^go [0-9]/{print $$2}' go.mod)
+TERRAFORM = $(LOCALBIN)/terraform
+ACTIONLINT = $(LOCALBIN)/actionlint
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.8.1
@@ -224,6 +269,11 @@ ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
   printf '%s\n' "$$v" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')
 
 GOLANGCI_LINT_VERSION ?= v2.11.4
+# Kept equal to TF_VERSION in the infra workflows on purpose, and TestTerraformVersionAgreesEverywhere fails
+# when it drifts. It drifted once already: this line sat at 1.9.8 while the roots moved to
+# `required_version = ">= 1.10"` for use_lockfile, and `make infra-validate` refused every root in CI.
+TERRAFORM_VERSION ?= 1.16.0
+ACTIONLINT_VERSION ?= v1.7.7
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
 $(KUSTOMIZE): $(LOCALBIN)
@@ -251,9 +301,18 @@ $(ENVTEST): $(LOCALBIN)
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+# The plugin build must use the Go version this module targets. Left alone it follows golangci-lint's
+# own go.mod (go 1.25) and produces a binary that then refuses to read this repo's config -- "the Go
+# language version (go1.25) used to build golangci-lint is lower than the targeted Go version (1.26.0)".
+# CI never sees this because setup-go's go-version-file: go.mod already pins the toolchain there, so it
+# is a local-only failure that looks like a broken config rather than a broken build.
+#
+# GOTOOLCHAIN=local is not enough; the version has to be named. It is read from go.mod rather than
+# written here, because a Go version repeated in two places is exactly the drift this repo keeps
+# getting caught by -- bumping go.mod alone would silently rebuild the wrong linter.
 	@test -f .custom-gcl.yml && { \
-		echo "Building custom golangci-lint with plugins..." && \
-		$(GOLANGCI_LINT) custom --destination $(LOCALBIN) --name golangci-lint-custom && \
+		echo "Building custom golangci-lint with plugins (go$(GO_MOD_VERSION))..." && \
+		GOTOOLCHAIN=go$(GO_MOD_VERSION) $(GOLANGCI_LINT) custom --destination $(LOCALBIN) --name golangci-lint-custom && \
 		mv -f $(LOCALBIN)/golangci-lint-custom $(GOLANGCI_LINT); \
 	} || true
 
@@ -276,3 +335,42 @@ endef
 define gomodver
 $(shell go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $(1) 2>/dev/null)
 endef
+
+.PHONY: terraform
+terraform: $(TERRAFORM) ## Download terraform locally if necessary.
+$(TERRAFORM): $(LOCALBIN)
+	@# The version is checked, not just the file's existence. A cached binary from an earlier pin is the same
+	@# defect as a stale pin and hides behind the same `test -x`: bumping TERRAFORM_VERSION to 1.16.0 left an
+	@# existing bin/terraform at 1.9.8, so `make infra-validate` kept refusing every root locally while CI --
+	@# which starts with an empty bin/ -- passed.
+	@"$(TERRAFORM)" version 2>/dev/null | head -1 | grep -qx "Terraform v$(TERRAFORM_VERSION)" || { \
+		echo "Downloading terraform $(TERRAFORM_VERSION)"; \
+		curl -fsSL "https://releases.hashicorp.com/terraform/$(TERRAFORM_VERSION)/terraform_$(TERRAFORM_VERSION)_linux_amd64.zip" -o "$(LOCALBIN)/terraform.zip"; \
+		unzip -o "$(LOCALBIN)/terraform.zip" -d "$(LOCALBIN)" >/dev/null; \
+		rm -f "$(LOCALBIN)/terraform.zip"; \
+	}
+
+.PHONY: actionlint
+actionlint: $(ACTIONLINT) ## Download actionlint locally if necessary.
+$(ACTIONLINT): $(LOCALBIN)
+	$(call go-install-tool,$(ACTIONLINT),github.com/rhysd/actionlint/cmd/actionlint,$(ACTIONLINT_VERSION))
+
+.PHONY: infra-fmt
+infra-fmt: terraform ## Check Terraform formatting under infra/aws.
+	"$(TERRAFORM)" fmt -check -recursive infra/aws
+
+.PHONY: infra-validate
+infra-validate: terraform kustomize actionlint ## Validate Terraform (offline), Argo manifests, and workflow YAML.
+	@for d in infra/aws/*/; do \
+		if [ -f "$$d/versions.tf" ]; then \
+			echo "validate $$d"; \
+			( cd "$$d" && "$(abspath $(TERRAFORM))" init -backend=false -input=false >/dev/null && "$(abspath $(TERRAFORM))" validate ); \
+		fi; \
+	done
+	@for k in config/argocd config/operator config/gateway config/device-plugin config/crd config/prometheus config/kueue config/samples; do \
+		if [ -f "$$k/kustomization.yaml" ]; then \
+			echo "kustomize build $$k"; \
+			"$(KUSTOMIZE)" build "$$k" >/dev/null; \
+		fi; \
+	done
+	"$(ACTIONLINT)" -color

@@ -1,0 +1,33 @@
+# PodMonitor rather than a ServiceMonitor, and the gateway's own Service explains why.
+#
+# config/gateway/service.yaml deliberately omits port 8081: metrics carry per-tenant usage, so exposing them
+# through the same Service that fronts user inference traffic would put them one port-forward away from any
+# caller who can reach the gateway. Its comment says Prometheus scrapes Pod IPs directly — which is true of
+# how Prometheus works, and was not true of this deployment, because nothing selected these Pods.
+#
+# The ServiceMonitor beside this file matches `control-plane: controller-manager`, a label the gateway does
+# not carry and should not: it is not the manager. So the gateway's twelve metrics — including
+# backend_fallbacks_total, admission_guard_engaged, backend_kv_cache_usage and everything the admission arms
+# publish — had no scrape path at all. They were defined, incremented, and collected by nobody.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: gateway-metrics
+  namespace: system
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gpu-platform-control-plane
+      app.kubernetes.io/component: gateway
+  podMetricsEndpoints:
+    # Named rather than numbered, so a port renumbering in deployment.yaml cannot silently point the scrape at
+    # the inference port — which would both miss the metrics and send Prometheus into user traffic.
+    - port: metrics
+      path: /metrics
+      # 15s rather than the default minute: the admission arms are measured over runs of a few minutes, and a
+      # 60s sample cannot resolve the transitions those runs are about.
+      interval: 15s

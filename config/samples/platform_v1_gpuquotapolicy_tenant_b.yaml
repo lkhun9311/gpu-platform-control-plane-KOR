@@ -1,0 +1,17 @@
+# tenant-b's GPU quota policy with training admission enabled.
+#
+# It mirrors tenant-a with the same ceiling, so the two tenants share one cohort with equal nominal quota and an idle tenant's quota can be borrowed and then reclaimed.
+apiVersion: platform.lkhun9311.github.io/v1
+kind: GPUQuotaPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/managed-by: kustomize
+  name: tenant-b-quota
+spec:
+  tenant: tenant-b
+  targetNamespace: tenant-b
+  gpuClass: l40s
+  limits:
+    gpuCount: 4
+  trainingQuota: true

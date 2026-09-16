@@ -56,11 +56,13 @@ spec:
               gpuClass:
                 description: |-
                   gpuClass is the illustrative GPU class (e.g. "l40s").
+
                   Locally this is backed by simulated capacity (see the dev runbook).
                 type: string
               gpuCount:
                 description: |-
                   gpuCount is the number of GPUs (nvidia.com/gpu) per replica.
+
                   Locally this is backed by simulated capacity, not real hardware.
                 format: int32
                 minimum: 0
@@ -90,8 +92,10 @@ spec:
                 minimum: 1
                 type: integer
               replicas:
-                description: replicas is the fixed number of serving replicas. Autoscaling
-                  lands in M4.
+                description: |-
+                  replicas is the fixed number of serving replicas.
+
+                  Autoscaling lands in M4.
                 format: int32
                 minimum: 0
                 type: integer
@@ -107,6 +111,7 @@ spec:
               conditions:
                 description: |-
                   conditions represent the current state of the InferenceDeployment resource.
+
                   The status of each condition is one of True, False, or Unknown.
                 items:
                   description: Condition contains details for one aspect of the current

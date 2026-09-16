@@ -205,3 +205,31 @@ var _ = Describe("bucketRegistry", func() {
 		Expect(b.Allow("t", nil)).To(BeTrue()) // nil이면 무제한이라 항상 통과
 	})
 })
+
+// A Server whose rate limiter was never installed used to PANIC on the first request carrying a policy with a
+// rate limit: Allow handled a nil policy and then dereferenced the nil registry. The comment on
+// InitRateLimiter claimed the gateway guarded that case, and nothing did.
+//
+// It refuses rather than allows, because a limiter that cannot function must not answer "within budget" —
+// that serves unlimited traffic under a configuration saying otherwise, with nothing anywhere to say so.
+//
+// Mutation that turns this red: drop the nil check from Allow, or make it return true.
+var _ = Describe("a rate limiter that was never installed", func() {
+	It("refuses instead of panicking or serving unlimited", func() {
+		var registry *bucketRegistry
+		rl := &platformv1.GPUQuotaRateLimit{RequestsPerMinute: 60, Burst: 1}
+
+		var allowed bool
+		Expect(func() { allowed = registry.Allow("t1", rl) }).NotTo(Panic())
+		Expect(allowed).To(BeFalse(), "an unfinished gateway served a request under a limit it was not applying")
+		Expect(registry.configured()).To(BeFalse())
+	})
+
+	// The control: an installed registry still allows a tenant within budget, so the guard has not turned into
+	// a blanket refusal.
+	It("does not refuse a tenant under an installed registry", func() {
+		registry := newBucketRegistry()
+		Expect(registry.configured()).To(BeTrue())
+		Expect(registry.Allow("t1", &platformv1.GPUQuotaRateLimit{RequestsPerMinute: 600, Burst: 10})).To(BeTrue())
+	})
+})

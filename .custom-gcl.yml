@@ -5,6 +5,17 @@
 version: v2.11.4
 plugins:
   # 구조적 로깅 규칙을 검사하는 logcheck plugin
+  #
+  # 버전을 latest가 아니라 고정한 이유는, 이 바이너리 자체가 린트 게이트이기 때문이다.
+  # golangci-lint custom 은 플러그인이 끌어오는 것에 맞춰 golangci-lint 자신의 린터까지 포함한
+  # 의존성 그래프 전체를 다시 푼다.
+  # 플러그인을 고정하지 않으면 커밋 없이도 게이트의 판정이 바뀐다. CI는 실행할 때마다 이 바이너리를
+  # 새로 빌드하므로, 같은 트리가 날마다 다르게 린트될 수 있다.
+  #
+  # 가정이 아니다. internal/queuelab/provenance.go 의 goconst 한 건을 CI는 보고했고, 같은 코드를
+  # 캐시를 비우고 로컬에서 돌리면 보고하지 않았다. 두 바이너리는 같은 golangci-lint 버전에서 나왔다.
+  # 원인은 증명하지 못했지만, 로컬에서 재현되지 않는 게이트는 아무도 대응할 수 없는 게이트다.
+  # 그래서 오늘 풀리는 버전으로 고정한다.
   - module: "sigs.k8s.io/logtools"
     import: "sigs.k8s.io/logtools/logcheck/gclplugin"
-    version: latest
+    version: v0.10.1

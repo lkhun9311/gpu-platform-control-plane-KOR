@@ -1,0 +1,25 @@
+# Volumes and volumeMounts DO have a merge key (name), so a strategic merge adds rather than replaces here.
+# Keeping them separate from the args patch above makes that distinction explicit instead of relying on the
+# reader to know which lists kustomize can merge.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-manager
+  namespace: system
+spec:
+  template:
+    spec:
+      containers:
+        - name: manager
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
+          ports:
+            - containerPort: 9443
+              name: webhook-server
+              protocol: TCP
+      volumes:
+        - name: webhook-certs
+          secret:
+            secretName: gpu-platform-control-plane-webhook-server-cert

@@ -378,6 +378,14 @@ func (in *MLTrainingJobStatus) DeepCopyInto(out *MLTrainingJobStatus) {
 		in, out := &in.LastTransitionTime, &out.LastTransitionTime
 		*out = (*in).DeepCopy()
 	}
+	if in.AdmittedAt != nil {
+		in, out := &in.AdmittedAt, &out.AdmittedAt
+		*out = (*in).DeepCopy()
+	}
+	if in.RunningObservedAt != nil {
+		in, out := &in.RunningObservedAt, &out.RunningObservedAt
+		*out = (*in).DeepCopy()
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]metav1.Condition, len(*in))
@@ -498,6 +506,151 @@ func (in *NodeHealthStatus) DeepCopy() *NodeHealthStatus {
 		return nil
 	}
 	out := new(NodeHealthStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// 리시버를 복사해 out에 기록하는 자동 생성 deepcopy 함수, in은 non-nil 필수
+func (in *WorkloadRun) DeepCopyInto(out *WorkloadRun) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	out.Spec = in.Spec
+	in.Status.DeepCopyInto(&out.Status)
+}
+
+// 리시버를 복사해 새 WorkloadRun 생성, 자동 생성 deepcopy 함수
+func (in *WorkloadRun) DeepCopy() *WorkloadRun {
+	if in == nil {
+		return nil
+	}
+	out := new(WorkloadRun)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// 리시버를 복사해 새 runtime.Object 생성, 자동 생성 deepcopy 함수
+func (in *WorkloadRun) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+// 리시버를 복사해 out에 기록하는 자동 생성 deepcopy 함수, in은 non-nil 필수
+func (in *WorkloadRunList) DeepCopyInto(out *WorkloadRunList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		in, out := &in.Items, &out.Items
+		*out = make([]WorkloadRun, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+}
+
+// 리시버를 복사해 새 WorkloadRunList 생성, 자동 생성 deepcopy 함수
+func (in *WorkloadRunList) DeepCopy() *WorkloadRunList {
+	if in == nil {
+		return nil
+	}
+	out := new(WorkloadRunList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// 리시버를 복사해 새 runtime.Object 생성, 자동 생성 deepcopy 함수
+func (in *WorkloadRunList) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+// 리시버를 복사해 out에 기록하는 자동 생성 deepcopy 함수, in은 non-nil 필수
+func (in *WorkloadRunObservation) DeepCopyInto(out *WorkloadRunObservation) {
+	*out = *in
+}
+
+// 리시버를 복사해 새 WorkloadRunObservation 생성, 자동 생성 deepcopy 함수
+func (in *WorkloadRunObservation) DeepCopy() *WorkloadRunObservation {
+	if in == nil {
+		return nil
+	}
+	out := new(WorkloadRunObservation)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// 리시버를 복사해 out에 기록하는 자동 생성 deepcopy 함수, in은 non-nil 필수
+func (in *WorkloadRunSpec) DeepCopyInto(out *WorkloadRunSpec) {
+	*out = *in
+	out.Target = in.Target
+}
+
+// 리시버를 복사해 새 WorkloadRunSpec 생성, 자동 생성 deepcopy 함수
+func (in *WorkloadRunSpec) DeepCopy() *WorkloadRunSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(WorkloadRunSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// 리시버를 복사해 out에 기록하는 자동 생성 deepcopy 함수, in은 non-nil 필수
+func (in *WorkloadRunStatus) DeepCopyInto(out *WorkloadRunStatus) {
+	*out = *in
+	if in.StartedAt != nil {
+		in, out := &in.StartedAt, &out.StartedAt
+		*out = (*in).DeepCopy()
+	}
+	if in.LastObservedAt != nil {
+		in, out := &in.LastObservedAt, &out.LastObservedAt
+		*out = (*in).DeepCopy()
+	}
+	if in.Observations != nil {
+		in, out := &in.Observations, &out.Observations
+		*out = make([]WorkloadRunObservation, len(*in))
+		copy(*out, *in)
+	}
+	if in.RecoveredAtSeconds != nil {
+		in, out := &in.RecoveredAtSeconds, &out.RecoveredAtSeconds
+		*out = new(int32)
+		**out = **in
+	}
+	if in.Conditions != nil {
+		in, out := &in.Conditions, &out.Conditions
+		*out = make([]metav1.Condition, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+}
+
+// 리시버를 복사해 새 WorkloadRunStatus 생성, 자동 생성 deepcopy 함수
+func (in *WorkloadRunStatus) DeepCopy() *WorkloadRunStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(WorkloadRunStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// 리시버를 복사해 out에 기록하는 자동 생성 deepcopy 함수, in은 non-nil 필수
+func (in *WorkloadRunTarget) DeepCopyInto(out *WorkloadRunTarget) {
+	*out = *in
+}
+
+// 리시버를 복사해 새 WorkloadRunTarget 생성, 자동 생성 deepcopy 함수
+func (in *WorkloadRunTarget) DeepCopy() *WorkloadRunTarget {
+	if in == nil {
+		return nil
+	}
+	out := new(WorkloadRunTarget)
 	in.DeepCopyInto(out)
 	return out
 }

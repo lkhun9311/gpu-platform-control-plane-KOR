@@ -3,6 +3,7 @@
 # config/default를 통해 실행해야 한다.
 resources:
 - bases/platform.lkhun9311.github.io_nodehealths.yaml
+- bases/platform.lkhun9311.github.io_workloadruns.yaml
 - bases/platform.lkhun9311.github.io_gpuquotapolicies.yaml
 - bases/platform.lkhun9311.github.io_inferencedeployments.yaml
 - bases/platform.lkhun9311.github.io_mltrainingjobs.yaml

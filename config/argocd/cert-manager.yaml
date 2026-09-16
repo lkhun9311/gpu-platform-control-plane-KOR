@@ -1,0 +1,51 @@
+# cert-manager, and it exists because another file already said it had to.
+#
+# config/operator-webhook/kustomization.yaml states it plainly: "cert-manager is a hard dependency: without
+# it the Certificate is never issued and every governed write is refused for want of a serving certificate.
+# Argo CD must sync cert-manager before this Application." Nothing did. There was no cert-manager
+# Application, and infra/aws/argo-bootstrap installs only Argo CD itself, so on a fresh cluster the
+# Certificate CRD is absent, the serving-cert Secret is never created, and the operator Pod cannot mount it.
+#
+# The failure is worse than a stuck operator. The ValidatingWebhookConfigurations in config/webhook carry
+# failurePolicy: Fail, so once they exist without a reachable webhook they refuse every governed write in
+# the cluster -- a dependency that was documented, required, and absent.
+#
+# Wave -2, ahead of the CRDs at -1 and the operator at 0. cert-manager installs its own CRDs and then must
+# have its webhook serving before anything asks it to issue a Certificate, which is what the sync waves
+# order here.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-manager
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  project: default
+  source:
+    repoURL: https://charts.jetstack.io
+    chart: cert-manager
+    # Pinned rather than tracking a range. An upstream chart that moves on its own is a change to this
+    # cluster that no commit here records, and the operator's serving certificate depends on it.
+    targetRevision: v1.21.1
+    helm:
+      # The chart installs its own CRDs when asked. The alternative is a separate manifest apply outside
+      # Argo, which is the kind of step that gets skipped on a rebuild and then fails as a missing kind.
+      parameters:
+        - name: crds.enabled
+          value: "true"
+        - name: crds.keep
+          value: "true"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      # cert-manager's CRDs are large enough to exceed the last-applied-configuration annotation limit.
+      - ServerSideApply=true

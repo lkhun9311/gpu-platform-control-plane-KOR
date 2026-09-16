@@ -7,6 +7,15 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - nodes
   verbs:
   - get
@@ -49,11 +58,45 @@ rules:
   - update
   - watch
 - apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - kueue.x-k8s.io
+  resources:
+  - clusterqueues
+  - localqueues
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - kueue.x-k8s.io
+  resources:
+  - workloads
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - platform.lkhun9311.github.io
   resources:
   - gpuquotapolicies
   - mltrainingjobs
   - nodehealths
+  - workloadruns
   verbs:
   - create
   - delete
@@ -77,6 +120,7 @@ rules:
   - inferencedeployments/status
   - mltrainingjobs/status
   - nodehealths/status
+  - workloadruns/status
   verbs:
   - get
   - patch

@@ -1,0 +1,12 @@
+# The bundle of gpu-simulator manifests.
+#
+# config/default does not compose this directory, so nothing else rewrites
+# the placeholder namespace.
+#
+# daemonset.yaml hardcodes namespace: system as a kubebuilder scaffold
+# placeholder, matching config/gateway, and this transform rewrites that
+# placeholder to the real namespace for a standalone build.
+namespace: gpu-platform-control-plane-system
+
+resources:
+- daemonset.yaml

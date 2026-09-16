@@ -1,0 +1,34 @@
+# The CRDs sync before any workload, and server-side apply gives them exactly one owner.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gpu-platform-crds
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/lkhun9311/gpu-platform-control-plane.git
+    targetRevision: main
+    path: config/crd
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gpu-platform-control-plane-system
+  syncPolicy:
+  # prune is OFF, and the finalizer is absent, because these are CustomResourceDefinitions.
+  #
+  # Deleting a CRD is not a schema change. The API server removes every instance of it in the same
+  # operation, so a rename in this directory, a path that renders without one of these files, removing the
+  # child from the root Application, or deleting the root itself would each take the definitions AND every
+  # Workload, LocalQueue, ClusterQueue and ResourceFlavor with them. With a cascade finalizer on the
+  # Application, removing the child from root is a two-stage version of exactly that.
+  #
+  # selfHeal stays on: re-creating a definition someone deleted by hand is the safe direction. Removing one
+  # because a file moved is not, and it is not a decision Argo should make unattended.
+    automated:
+      prune: false
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
+      - CreateNamespace=true

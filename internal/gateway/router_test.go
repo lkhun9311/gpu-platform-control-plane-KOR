@@ -105,7 +105,7 @@ var _ = Describe("backendFor", func() {
 		//
 		// 설계서 Error codes 절에 따라 이 경우는 404가 되어야 하므로, 구분 가능한 센티넬 에러가 필요하다.
 		s := &Server{Client: newRouterClient()}
-		_, err := s.backendFor(ctx, policyFor("vision"), "llama-3-8b")
+		_, err := s.headBackendFor(ctx, policyFor("vision"), "llama-3-8b")
 		Expect(err).To(MatchError(ErrNoRoute))
 	})
 
@@ -115,9 +115,22 @@ var _ = Describe("backendFor", func() {
 		// Service 이름은 InferenceDeployment 이름과 같고, 포트는 spec.port를 따른다.
 		infd := newInfD("llama", "vision", "llama-3-8b", 9000, now)
 		s := &Server{Client: newRouterClient(infd)}
-		got, err := s.backendFor(ctx, policyFor("vision"), "llama-3-8b")
+		got, err := s.headBackendFor(ctx, policyFor("vision"), "llama-3-8b")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(got.String()).To(Equal("http://llama.vision.svc:9000"))
+		Expect(got.URL.String()).To(Equal("http://llama.vision.svc:9000"))
+	})
+
+	It("populates every BackendRef field for a routed model", func() {
+		// The scraper (a later task) needs namespace/name/port to build the metrics URL and manage lifecycle, which a bare *url.URL cannot provide.
+		infd := newInfD("llama", "vision", "llama-3-8b", 9000, now)
+		s := &Server{Client: newRouterClient(infd)}
+		got, err := s.headBackendFor(ctx, policyFor("vision"), "llama-3-8b")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got.Namespace).To(Equal("vision"))
+		Expect(got.Name).To(Equal("llama"))
+		Expect(got.Port).To(Equal(int32(9000)))
+		Expect(got.Model).To(Equal("llama-3-8b"))
+		Expect(got.URL.String()).To(Equal("http://llama.vision.svc:9000"))
 	})
 
 	It("defaults the port to 8080 when spec.port is unset", func() {
@@ -128,9 +141,10 @@ var _ = Describe("backendFor", func() {
 		// 포트 0으로 URL을 만들면 프록시가 붙지 못하므로 코드 쪽에서도 같은 기본값을 보장해야 한다.
 		infd := newInfD("llama", "vision", "llama-3-8b", 0, now)
 		s := &Server{Client: newRouterClient(infd)}
-		got, err := s.backendFor(ctx, policyFor("vision"), "llama-3-8b")
+		got, err := s.headBackendFor(ctx, policyFor("vision"), "llama-3-8b")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(got.String()).To(Equal("http://llama.vision.svc:8080"))
+		Expect(got.Port).To(Equal(int32(8080)))
+		Expect(got.URL.String()).To(Equal("http://llama.vision.svc:8080"))
 	})
 
 	It("uses the older InferenceDeployment when more than one serves the model", func() {
@@ -141,9 +155,9 @@ var _ = Describe("backendFor", func() {
 		newer := newInfD("llama-new", "vision", "llama-3-8b", 8080, now)
 		// 일부러 newer를 먼저 넣어, 저장 순서가 아니라 생성 시각으로 고르는지 확인한다.
 		s := &Server{Client: newRouterClient(newer, older)}
-		got, err := s.backendFor(ctx, policyFor("vision"), "llama-3-8b")
+		got, err := s.headBackendFor(ctx, policyFor("vision"), "llama-3-8b")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(got.String()).To(Equal("http://llama-old.vision.svc:8080"))
+		Expect(got.URL.String()).To(Equal("http://llama-old.vision.svc:8080"))
 	})
 
 	It("picks the lexicographically smaller name when creation timestamps tie", func() {
@@ -160,9 +174,9 @@ var _ = Describe("backendFor", func() {
 		b := newInfD("llama-b", "vision", "llama-3-8b", 8080, same)
 		a := newInfD("llama-a", "vision", "llama-3-8b", 8080, same)
 		s := &Server{Client: newRouterClient(b, a)}
-		got, err := s.backendFor(ctx, policyFor("vision"), "llama-3-8b")
+		got, err := s.headBackendFor(ctx, policyFor("vision"), "llama-3-8b")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(got.String()).To(Equal("http://llama-a.vision.svc:8080"))
+		Expect(got.URL.String()).To(Equal("http://llama-a.vision.svc:8080"))
 	})
 
 	It("ignores an InferenceDeployment outside the policy's target namespace", func() {
@@ -171,7 +185,7 @@ var _ = Describe("backendFor", func() {
 		// 같은 model 이름을 서로 다른 tenant가 쓰는 것은 충분히 흔한 일이라 실제로 일어날 수 있다.
 		other := newInfD("llama", "nlp", "llama-3-8b", 8080, now)
 		s := &Server{Client: newRouterClient(other)}
-		_, err := s.backendFor(ctx, policyFor("vision"), "llama-3-8b")
+		_, err := s.headBackendFor(ctx, policyFor("vision"), "llama-3-8b")
 		Expect(err).To(MatchError(ErrNoRoute))
 	})
 })
@@ -209,3 +223,19 @@ var _ = Describe("olderInfD", func() {
 		Expect(olderInfD(b, a)).To(BeFalse())
 	})
 })
+
+// headBackendFor returns only the backend a request routes to first.
+//
+// It lives in the test file because only tests call it: a production function nothing in production reaches
+// is a claim about the code that is not true of the build.
+//
+// It exists for the specs that predate fallback, and it keeps them honest rather than merely compiling: they
+// pin which deployment wins when several serve one model, and that choice must not drift now that the losers
+// are kept instead of discarded. The head is the whole of the old behaviour.
+func (s *Server) headBackendFor(ctx context.Context, policy *platformv1.GPUQuotaPolicy, model string) (*BackendRef, error) {
+	refs, err := s.backendsFor(ctx, policy, model)
+	if err != nil {
+		return nil, err
+	}
+	return refs[0], nil
+}

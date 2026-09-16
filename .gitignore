@@ -1,17 +1,67 @@
 # Local AI tool workspace - do not commit
 superpowers/
-.superpowers/
-AGENTS.md
-docs/
+
+# docs/ is published selectively: the design documents and the specs are the substance a reader needs,
+# while the implementation plans and the interview notes are working material and stay local.
+docs/*
+!docs/0[0-7]*.md
+!docs/09*.md
+!docs/superpowers/
+docs/superpowers/*
+!docs/superpowers/specs/
 .claude/
 .cursor/
 .chatgpt/
 .codex/
 .githooks/
 
-# Markdown: only the root README is committed (other .md kept locally under superpowers/)
+# Markdown is committed selectively. The design documents and specs are published because a reader who
+# clones this repository should be able to see the reasoning, not just the code; the implementation plans
+# and the interview notes are working material and stay local.
 *.md
 !/README.md
+!/infra/**/README.md
+!/hack/m6-kind-e2e.md
+!/hack/m5b-gateway-path.md
+!/hack/chaos-fr004-degraded-node.md
+!/hack/observability-kind.md
+!/hack/chaos-fr002-serving-pod-killed.md
+!/hack/chaos-fr002b-backend-fallback.md
+!/hack/argocd-kind.md
+!/hack/kueue-deployment-integration.md
+!/hack/kserve-queue-label-propagation.md
+!/hack/m5d-writeup.md
+!/hack/queuelab-refusal-register.md
+!/hack/m5c-sharing-sizing.md
+!/hack/m5b-vllm-sizing.md
+!/hack/queue-drain-under-load.md
+!/hack/alert-firing-verification.md
+!/hack/queuelab-reclaim-first-result.md
+!/hack/quota-bypass-guard.md
+!/hack/queue-load-under-concurrency.md
+!/hack/queuelab-grace-boundary.md
+!/hack/grace-holds-the-device.md
+!/hack/tenant-writable-fields.md
+!/hack/gpu-session-preregistration.md
+!/docs/0[0-7]*.md
+!/docs/09*.md
+!/docs/10_WHAT_I_GOT_WRONG.md
+!/docs/superpowers/specs/*.md
+
+# Terraform local state, cache and secrets (state lives in the remote backend, not here)
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
 
 # JetBrains / IntelliJ
 .idea/
@@ -41,6 +91,15 @@ bin/
 dist/
 build/
 
+# The characterization harness's stubs are source, not generated binaries.
+#
+# They live in a directory called bin/ because that is what goes on PATH, and the rule above swallowed
+# them: `git add hack/test` staged the driver and every golden file and silently left out the two files
+# that make the harness a harness. A fresh checkout would then prepend a directory containing nothing to
+# PATH and run the REAL aws and the REAL sleep against a real account.
+!/hack/test/spot-lifecycle/bin/
+!/hack/test/spot-lifecycle/bin/*
+
 # OS files
 .DS_Store
 Thumbs.db
@@ -51,3 +110,70 @@ Thumbs.db
 
 # Claude Code personal overrides
 .claude/settings.local.json
+
+# M6 kind E2E run artifact (curated evidence lives in hack/m6-kind-e2e.md)
+
+# stray local build of cmd/benchharness, anchored so it cannot also swallow new files under cmd/benchharness/
+/benchharness
+
+# stray local build of cmd/queuelabrun, anchored so it cannot also swallow new files under cmd/queuelabrun/
+/queuelabrun
+
+# Raw chaos-run records were excluded here, and queuelab inherited the rule without anyone asking whether it
+# fit. It does not. This lab's thesis is that the record outlives the terminal and that a conclusion nobody
+# can re-derive is prose -- and its records sat outside version control while committed documents told
+# readers to run `queuelabrun -compare 'ex/e14-*.json'` against files that do not ship.
+#
+# It cost what you would expect. A pre-registration fixed the GPU session's baseline at a figure assembled at
+# a shell from records that were then deleted, and the number appears in no record that exists. Git is the
+# notary a pre-registration needs; declining it left half the evidence with an mtime and nothing else.
+#
+# So run records are committed and the rest of ex/ -- scratch output, ad-hoc blobs -- is not. The whole
+# directory is 248 KB.
+ex/*
+!ex/*.json
+
+# Paid-session output, which belongs beside the session rather than in the source tree.
+#
+# hack/m5b-arms.sh writes a run directory per invocation -- traces, manifests, raw JSONL, the report -- and
+# hack/m5b-gpu-session.sh writes .m5b-rate for the second shell to read. Three runs of these landed in the
+# repository because a commit used `git add -A`, which is how ~40 files of experiment output ended up in a
+# source history that has to stay readable.
+#
+# The evidence still matters and is kept: it is copied out of the working tree when a run finishes. What
+# does not belong here is a growing pile of one-off measurements that no code reads.
+hack/m5b-run-*/
+hack/m5c-run-*/
+# The M5-c SESSION's own directory, which is not the matrix's.
+#
+# hack/m5c-matrix.sh writes hack/m5c-run-<stamp> and is covered by the line above. hack/m5c-gpu-session.sh
+# writes hack/m5c-<stamp>, one level out, and holds about 100 MB: the source archive plus the gateway and
+# harness binaries it ships to the instance. The pattern above does not match it, so the first failed run
+# left all of that untracked in the tree -- one `git add -A` from the mistake this block was written about.
+hack/m5c-2*/
+# The capacity ladder's session directory, which is the same script under a different OUT.
+#
+# hack/m5c-gpu-session.sh writes wherever OUT points, and the ladder runs use hack/ladder-<stamp> so that a
+# ladder's evidence is not filed among the sharing matrix's. Ignored for the reason above and for the one
+# below: this runner REFUSES TO START when the tree is dirty, so a run's own output directory makes the
+# next run impossible. That is exactly what happened -- a killed ladder session left hack/ladder-<stamp>
+# untracked and the relaunch refused, with the card already released.
+hack/ladder-*/
+# Microtest output: instance ids, user-data, and the raw results, which are copied into
+# docs/evidence when a run produces something worth keeping.
+hack/microtest-*/
+# The device-observation session writes a run directory per invocation. Ignored for the same reason as the
+# others, and for one more: this runner refuses to start when the tree is dirty, so its own output would
+# otherwise stop the next run.
+hack/qlgpu-*/
+hack/pop-*/
+hack/m5b-gpu-session-evidence.log
+.m5b-rate
+
+# Captures written by hack/capture-evidence.sh, and tracked on purpose.
+#
+# The run directories these come from are ignored and do not survive, so a number nobody can read later was
+# not worth measuring. Placed LAST because git applies the final matching rule: earlier in this file `docs/*`
+# hides the directory and `*.md` hides the index, and a negation above either of them does nothing.
+!docs/captures/
+!docs/captures/**

@@ -1,0 +1,23 @@
+# The root Application points at config/argocd and creates the child Applications.
+#
+# Its own manifest lives in that same path, which Argo CD tolerates as the standard app-of-apps self-reference.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gpu-platform-root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/lkhun9311/gpu-platform-control-plane.git
+    targetRevision: main
+    path: config/argocd
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

@@ -1,0 +1,13 @@
+{
+  "labels": {
+    "alertname": "GatewayUpstreamErrorsReachingClients",
+    "model": "demo-llm",
+    "severity": "critical"
+  },
+  "annotations": {
+    "summary": "Model demo-llm is failing requests outright"
+  },
+  "state": "firing",
+  "activeAt": "2026-08-17T06:31:51.979083425Z",
+  "value": "9.999999999999999e-01"
+}

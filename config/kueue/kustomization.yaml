@@ -1,0 +1,11 @@
+# The Kueue fixtures for the two-tenant training demo.
+#
+# The shared gpu ResourceFlavor and the tenant namespaces are static; the per-tenant ClusterQueues and LocalQueues come from the GPUQuotaPolicy sync, so only one LocalQueue is shown here as a reference.
+#
+# No global namespace is set here, because the resources are either cluster-scoped or already carry their own namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- namespaces.yaml
+- resourceflavor.yaml
+- localqueue-example.yaml

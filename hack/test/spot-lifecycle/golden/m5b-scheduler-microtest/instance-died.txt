@@ -1,0 +1,39 @@
+aws sts get-caller-identity --query Account --output text
+aws s3api head-bucket --bucket stub-bucket
+aws iam get-instance-profile --instance-profile-name m5b-microtest
+aws ssm get-parameter --region ap-northeast-2 --name /aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-ubuntu-22.04/latest/ami-id --query Parameter.Value --output text
+aws ec2 describe-instance-type-offerings --region ap-northeast-2 --location-type availability-zone --filters Name=instance-type,Values=g5.xlarge --query InstanceTypeOfferings[].Location --output text
+aws ec2 describe-subnets --region ap-northeast-2 --filters Name=default-for-az,Values=true Name=map-public-ip-on-launch,Values=true Name=availability-zone,Values=ap-northeast-2a --query Subnets[0].SubnetId --output text
+aws ec2 describe-subnets --region ap-northeast-2 --filters Name=default-for-az,Values=true Name=map-public-ip-on-launch,Values=true Name=availability-zone,Values=ap-northeast-2a --query Subnets[0].SubnetId --output text
+aws ec2 run-instances --region ap-northeast-2 --image-id ami-0stubgpu --instance-type g5.xlarge --subnet-id subnet-ap-northeast-2a --iam-instance-profile Name=m5b-microtest --instance-initiated-shutdown-behavior terminate --block-device-mappings [{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":150,"VolumeType":"gp3","DeleteOnTermination":true}}] --instance-market-options {"MarketType":"spot","SpotOptions":{"MaxPrice":"0.80","SpotInstanceType":"one-time"}} --user-data file://<USERDATA> --tag-specifications ResourceType=instance,Tags=[{Key=Name,Value=m5b-microtest},{Key=purpose,Value=m5b-scheduler-microtest}] --query Instances[0].InstanceId --output text
+user-data: matches the copy saved in the run directory
+aws s3api head-object --bucket stub-bucket --key run/DONE
+aws ec2 describe-instances --region ap-northeast-2 --instance-ids i-0stub --query Reservations[0].Instances[0].State.Name --output text
+sleep 30
+aws s3api head-object --bucket stub-bucket --key run/DONE
+aws ec2 describe-instances --region ap-northeast-2 --instance-ids i-0stub --query Reservations[0].Instances[0].State.Name --output text
+aws s3 cp s3://stub-bucket/run/results.json <OUT>/results.json
+aws s3 cp s3://stub-bucket/run/log.txt <OUT>/log.txt
+aws s3 cp s3://stub-bucket/run/stderr.txt <OUT>/stderr.txt
+aws ec2 terminate-instances --region ap-northeast-2 --instance-ids i-0stub
+--- exit 1
+--- messages
+== engine vllm/vllm-openai@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967
+== model  Qwen/Qwen2.5-3B-Instruct
+== output <OUT>
+== g5.xlarge is offered in: ap-northeast-2a ap-northeast-2c
+== using subnet-ap-northeast-2a in ap-northeast-2a
+== ami ami-0stubgpu in subnet-ap-northeast-2a
+== launching g5.xlarge spot (max $0.80/h)
+== trying ap-northeast-2a (subnet-ap-northeast-2a)
+== instance i-0stub
+== waiting for results (the engine has an image and weights to pull first)
+== instance ended before writing DONE
+== terminating i-0stub
+FAIL: the instance was terminated before it wrote its completion marker; <OUT>/log.txt is whatever it managed to upload
+--- files
+./instance-id
+./launch-errors.txt
+./log.txt
+./microtest.py
+./user-data.sh

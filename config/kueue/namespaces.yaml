@@ -1,0 +1,18 @@
+# The two demo tenants each get their own namespace.
+#
+# tenant-a and tenant-b hold their LocalQueues and MLTrainingJobs, so the two-tenant fair-sharing demo has isolated namespaces to submit into.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-a
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: kueue-tenant
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-b
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: kueue-tenant

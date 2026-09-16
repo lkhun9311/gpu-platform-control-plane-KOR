@@ -1,10 +1,29 @@
 # 게이트웨이 매니페스트 묶음이다.
 #
-# config/default가 이 디렉터리를 resources로 포함하면 namespace(system → 실제 namespace)와
-# namePrefix가 여기 있는 모든 이름에 함께 적용된다.
-# 그래서 각 파일은 namespace를 그대로 system으로 적어 두고, 치환은 default가 담당한다.
+# config/default는 더 이상 이 디렉터리를 resources로 포함하지 않는다.
+# 그래서 여기 있는 placeholder namespace를 대신 고쳐 줄 주체가 없다.
+# 각 매니페스트는 kubebuilder 스캐폴드가 남긴 `namespace: system`을 그대로 들고 있으므로,
+# 단독 빌드에서 실제 namespace로 바꾸는 일은 이 transform이 맡는다.
+namespace: gpu-platform-control-plane-system
+
 resources:
 - serviceaccount.yaml
 - rbac.yaml
 - deployment.yaml
 - service.yaml
+
+# digest가 Deployment가 아니라 여기 사는 이유는, 이 매니페스트를 읽는 소비자가 둘인데
+# 그중 하나만 ECR에서 이미지를 받을 수 있기 때문이다.
+#
+# `make deploy`는 `kustomize edit set image gateway=${IMG}`로 이 transform을 다시 쓴다.
+# 그래서 kind 경로는 로컬 빌드를 사이드로드하고 핀을 덮어쓰는 반면,
+# Argo CD는 같은 디렉터리를 손대지 않고 빌드해 게시된 digest를 받는다.
+# ECR 참조를 Deployment에 직접 넣었더니 transform이 매칭할 이름이 사라져 덮어쓰기가 조용히 멈췄고,
+# kind가 자격 증명을 갖지 못한 레지스트리에서 이미지를 받으려다 모든 e2e 실행이 실패했다.
+#
+# ci.yml은 두 kustomization의 이 필드를 한 커밋에서 함께 갱신하도록 쓰여 있다.
+# 오퍼레이터와 게이트웨이가 서로 다른 빌드에서 핀되는 일이 생길 수 없게 하기 위해서다.
+images:
+  - name: gateway
+    newName: 007635145730.dkr.ecr.ap-northeast-2.amazonaws.com/gpu-platform-gateway
+    digest: sha256:91050d2ad7fe4f856fe9eb005c7062929437a7f4c959477508c80a9b97d5685c

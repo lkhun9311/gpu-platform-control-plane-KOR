@@ -1,0 +1,13 @@
+# The namespace is the operator's, not the literal `system`.
+#
+# `system` is kubebuilder's placeholder: config/default rewrites it to gpu-platform-control-plane-system,
+# and nothing ever creates a namespace actually called `system`. An overlay that renders `namespace: system`
+# is refused at apply time with "namespaces \"system\" not found" -- which is where the two sharing overlays
+# were, having declared the placeholder and never set the rewrite. config/nvidia-device-plugin had the line
+# and they did not, and nothing compared any of them against the namespace the operator creates.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: gpu-platform-control-plane-system
+
+resources:
+  - daemonset.yaml

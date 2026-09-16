@@ -1,7 +1,16 @@
 # 프로젝트 sample CR manifest 목록입니다.
+#
+# config/default가 이 디렉터리를 더 이상 합성하지 않으므로 namespace를 여기서 직접 지정한다.
+namespace: gpu-platform-control-plane-system
 resources:
 - platform_v1_nodehealth.yaml
 - platform_v1_gpuquotapolicy.yaml
 - platform_v1_inferencedeployment.yaml
 - platform_v1_mltrainingjob.yaml
+# The two-tenant training policies are cluster-scoped, so the namespace above does not move them.
+- platform_v1_gpuquotapolicy_tenant_a.yaml
+- platform_v1_gpuquotapolicy_tenant_b.yaml
+# The two-tenant MLTrainingJob demos are intentionally not listed here.
+#
+# They are namespaced into tenant-a and tenant-b, and the namespace override above would collapse both into one namespace, so they are applied directly (see the kind E2E) rather than through this overlay.
 # +kubebuilder:scaffold:manifestskustomizesamples

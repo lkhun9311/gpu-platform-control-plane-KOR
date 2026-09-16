@@ -1,0 +1,37 @@
+# Overlay that turns the admission webhook on.
+#
+# It is separate from config/default rather than a flag inside it, because enabling the webhook adds a hard
+# dependency on cert-manager. Folding it into the default would make `kubectl apply -k config/default` fail on
+# every cluster that does not have cert-manager installed, for the sake of a component most of them do not run.
+#
+#   kubectl apply -k config/webhook-enabled
+#
+# Requires cert-manager. Without it the Certificate is never issued, the manager never gets a certificate,
+# and — because failurePolicy is Fail — every MLTrainingJob write is refused. That is the intended direction
+# for this rule but a confusing way to discover a missing dependency, so install cert-manager first.
+resources:
+  - ../default
+
+# The guards themselves live in a component shared with config/operator, so the overlay Argo CD reconciles
+# and the one a developer applies on kind cannot disagree about whether admission validation exists.
+components:
+  - ../webhook-component
+
+# A concrete tag, because this image is SIDE-LOADED into kind rather than pulled.
+#
+# config/manager pins controller:latest, and the kubelet treats :latest as "always pull" no matter what is
+# already on the node — so a side-loaded :latest image sends it to a registry that does not have it. The same
+# trap is already recorded in hack/m5b-gateway-path.sh.
+images:
+  - name: controller
+    newTag: webhook-v1
+
+patches:
+  # IfNotPresent for the same side-loading reason as the tag above.
+  - target:
+      kind: Deployment
+      name: controller-manager
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: IfNotPresent

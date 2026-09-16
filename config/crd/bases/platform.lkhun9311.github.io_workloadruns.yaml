@@ -1,0 +1,277 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: workloadruns.platform.lkhun9311.github.io
+spec:
+  group: platform.lkhun9311.github.io
+  names:
+    kind: WorkloadRun
+    listKind: WorkloadRunList
+    plural: workloadruns
+    singular: workloadrun
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.scenario
+      name: Scenario
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.verdict
+      name: Verdict
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: WorkloadRun is one injected failure and the evidence trail assembled
+          while it was watched.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              WorkloadRunSpec declares what was injected, what is being watched, and what would count as recovery.
+
+              The expectation is DECLARED BEFORE the run rather than read off the result, which is the same reason the
+              benchmark harness freezes its manifest: a threshold chosen after seeing the number is not a threshold.
+            properties:
+              observationWindowSeconds:
+                description: |-
+                  observationWindowSeconds is how long to watch after the run starts.
+
+                  The window bounds the CLAIM as much as the work: a verdict says what happened inside it and nothing
+                  about after, and a run that recovers one second late is a fail rather than a slow pass.
+                format: int32
+                maximum: 3600
+                minimum: 5
+                type: integer
+              recoversWithinSeconds:
+                description: |-
+                  recoversWithinSeconds is the deadline the target must be observed healthy by, measured from the run's
+                  start. It must not exceed observationWindowSeconds, or the run would be asked to judge a deadline it
+                  stopped watching before.
+                format: int32
+                minimum: 1
+                type: integer
+              scenario:
+                description: |-
+                  scenario is the failure to inject. Immutable: a run is evidence about one injection, and editing it
+                  would leave observations attributed to an event that did not happen.
+                enum:
+                - ServingPodKilled
+                - DegradedNode
+                type: string
+                x-kubernetes-validations:
+                - message: scenario is immutable
+                  rule: self == oldSelf
+              target:
+                description: target is the object to watch.
+                properties:
+                  kind:
+                    description: kind is the target's kind. Only the kinds a scenario
+                      can actually act on are accepted.
+                    enum:
+                    - InferenceDeployment
+                    - NodeHealth
+                    type: string
+                  name:
+                    description: name is the target's name.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: namespace is the target's namespace; empty for cluster-scoped
+                      kinds.
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+                x-kubernetes-validations:
+                - message: target is immutable
+                  rule: self == oldSelf
+            required:
+            - observationWindowSeconds
+            - recoversWithinSeconds
+            - scenario
+            - target
+            type: object
+          status:
+            description: WorkloadRunStatus is the evidence trail.
+            properties:
+              conditions:
+                description: conditions carries the standard machine-readable summary.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              lastObservedAt:
+                description: |-
+                  lastObservedAt is when the controller last actually looked.
+
+                  It exists so a GAP is detectable. Observations record only changes, so a trail with nothing in it for
+                  twenty seconds is indistinguishable from a platform that was steady for twenty seconds -- unless the
+                  controller also says when it last looked. A run whose gap exceeds what its poll interval allows is
+                  refused rather than concluded, because "nobody was watching" and "nothing happened" are the two facts
+                  an evidence trail exists to keep apart.
+                format: date-time
+                type: string
+              observations:
+                description: |-
+                  observations is the trail, in the order they were seen.
+
+                  Only CHANGES are appended. A trail that recorded every poll would say how often the controller ran
+                  rather than what the platform did.
+                items:
+                  description: WorkloadRunObservation is one thing the controller
+                    saw, stamped against the run's own start.
+                  properties:
+                    elapsedSeconds:
+                      description: |-
+                        elapsedSeconds is when it was seen, measured from startedAt rather than in wall-clock, so a trail can
+                        be read without knowing when the run happened.
+                      format: int32
+                      type: integer
+                    healthy:
+                      description: healthy is this controller's reading of state,
+                        kept beside it rather than replacing it.
+                      type: boolean
+                    state:
+                      description: |-
+                        state is what the target reported. Recorded verbatim rather than normalised: a controller that
+                        rewrote the target's own vocabulary would be summarising, which is what this type exists to stop.
+                      type: string
+                  required:
+                  - elapsedSeconds
+                  - healthy
+                  - state
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              observedGeneration:
+                description: observedGeneration is the spec generation this status
+                  describes.
+                format: int64
+                type: integer
+              observedUnhealthy:
+                description: |-
+                  observedUnhealthy records that the target was seen in a non-healthy state at least once.
+
+                  Without it a recovery cannot be told from a target that was never broken. Every run starts with its
+                  target healthy, so "first healthy observation" is second zero -- and a run whose target never came
+                  back would report Recovered at 0s on the strength of the state it began in.
+                type: boolean
+              phase:
+                description: phase is the run's lifecycle position.
+                enum:
+                - Pending
+                - Observing
+                - Complete
+                - Refused
+                type: string
+              reason:
+                description: |-
+                  reason explains the phase, and for Refused it names which part of the observation is missing so the
+                  reader knows whether to re-run or to fix something.
+                type: string
+              recoveredAtSeconds:
+                description: recoveredAtSeconds is when the target was first observed
+                  healthy AFTER being observed unhealthy.
+                format: int32
+                type: integer
+              startedAt:
+                description: startedAt is when observation began. Every elapsedSeconds
+                  is relative to it.
+                format: date-time
+                type: string
+              verdict:
+                description: |-
+                  verdict is set only in phase Complete. An empty verdict beside phase Refused is the point: there is
+                  no answer, rather than an answer of "no".
+                enum:
+                - Recovered
+                - NotRecovered
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

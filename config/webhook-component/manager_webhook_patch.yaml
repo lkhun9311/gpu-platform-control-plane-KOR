@@ -1,0 +1,12 @@
+# A JSON6902 add, not a strategic merge.
+#
+# containers[].args is a list of plain strings with no merge key, so a strategic-merge patch REPLACES it
+# rather than adding to it. The first version of this file used one, and it silently deleted
+# --metrics-bind-address=:8443 that config/default's metrics patch had added — the Deployment rolled out
+# cleanly, the webhook worked, and the operator stopped exposing metrics entirely. Nothing reported it until
+# Prometheus was pointed at the endpoint and could not connect.
+#
+# config/default/manager_metrics_patch.yaml uses the same form for the same reason.
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --webhook-cert-path=/tmp/k8s-webhook-server/serving-certs

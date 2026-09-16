@@ -4,7 +4,7 @@
 # 기존 Dockerfile은 cmd/main.go(컨트롤러)를 빌드해 manager 바이너리를 만든다.
 # 게이트웨이는 별도의 프로세스이고 별도의 Deployment로 뜨므로 이미지도 따로여야 한다.
 # 하나의 이미지에 두 바이너리를 넣으면 한쪽만 고쳐도 양쪽이 함께 재배포되고, 이미지도 불필요하게 커진다.
-FROM golang:1.25 AS builder
+FROM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 

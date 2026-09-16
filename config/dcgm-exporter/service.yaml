@@ -1,0 +1,24 @@
+# A headless Service, so a scrape reaches ONE node's exporter rather than whichever endpoint a load balancer
+# picks.
+#
+# That distinction is not cosmetic here. The verdict attributes utilisation to a Pod on a specific worker,
+# and a round-robin Service would answer alternate scrapes from a different node's exporter -- producing an
+# observation that looks continuous while covering neither card. The runner is pointed at one endpoint for
+# one run's worker, which is what -device-metrics means.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dcgm-exporter
+  namespace: system
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: dcgm-exporter
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: dcgm-exporter
+  ports:
+    - name: metrics
+      port: 9400
+      targetPort: metrics

@@ -1,0 +1,25 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyLeavingTheCeiling",
+      "Effect": "Deny",
+      "Action": [
+        "organizations:LeaveOrganization",
+        "account:CloseAccount"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyDisablingTheTrail",
+      "Effect": "Deny",
+      "Action": [
+        "cloudtrail:StopLogging",
+        "cloudtrail:DeleteTrail",
+        "cloudtrail:UpdateTrail",
+        "cloudtrail:PutEventSelectors"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

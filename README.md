@@ -1,75 +1,175 @@
-# gpu-platform-control-plane 한국어판
+# gpu-platform-control-plane
 
-GPU를 단순한 장비가 아니라 Kubernetes 플랫폼 리소스로 다루는 컨트롤 플레인입니다.
+Kubernetes-native control plane that manages GPUs as a platform resource.
 
-## 한 줄 요약
+## Overview
 
-이 프로젝트는 GPU 노드 상태, 테넌트별 쿼터, 추론 서빙, 학습 잡 입장 제어, 관측성 증거를 하나의 Kubernetes-native 컨트롤 플레인으로 묶습니다. 포트폴리오 관점에서는 "GPU 플랫폼을 운영자가 어떻게 안전하게 공유 자원으로 노출할 것인가"를 보여주는 프로젝트입니다.
+Most GPU setups stop at running a single workload. This project treats the GPU as a shared platform resource, covering node readiness, multi-tenant quota, serving, and training through one Kubernetes-native control plane.
 
-## 핵심 범위
+## Scope
 
-| 영역 | 설명 |
-| --- | --- |
-| GPU 노드 상태 | `NodeHealth` CR로 GPU 노드의 준비 상태를 표현하고, 비정상 노드는 스케줄링에서 제외합니다. |
-| 멀티테넌트 쿼터 | `GPUQuotaPolicy`를 기준으로 namespace별 `ResourceQuota`와 격리 정책을 동기화합니다. |
-| 추론 서빙 | `InferenceDeployment`로 모델 서빙 Deployment와 Service를 선언적으로 관리합니다. |
-| 성능 격리 | GPU 공유 상황에서 noisy neighbor가 p99 지연시간에 주는 영향을 측정하고 완화합니다. |
-| 게이트웨이 | API key로 테넌트를 식별하고, 토큰 버킷 기반 rate limit과 모델 라우팅을 수행합니다. |
-| 학습 입장 제어 | `MLTrainingJob`을 Kueue 기반 `Job`/`Workload` 흐름으로 연결합니다. |
-| 운영 증거 | 메트릭, 상태, 이벤트, 운영 로그를 문서와 ledger로 남겨 설계 판단을 검증합니다. |
+The control plane is organized into the following areas:
 
-## 아키텍처
+The **State** column is the point of this table: several areas below are designed and written up but have
+no code in this repository, and saying which is which is more useful to a reader than a uniform list.
 
-컨트롤 플레인은 CRD를 소유하고, 각 CR을 Kubernetes 기본 리소스로 reconcile합니다. 데이터 플레인은 Deployment, Service, Job, ResourceQuota처럼 익숙한 Kubernetes 오브젝트로 유지하며 owner reference로 수명주기를 관리합니다.
+| Area                   | What it does                                                                                     | State |
+|------------------------|--------------------------------------------------------------------------------------------------|-------|
+| Node readiness         | Mirror a Node's `Ready` condition into a `NodeHealth` CR and taint on degradation                | Built — but the CR is hand-created, and there is **no GPU-specific fault detection** (no DCGM, Xid or ECC) |
+| Multi-tenant quota     | Sync per-tenant quota and isolation policy from `GPUQuotaPolicy` into namespace objects          | Built |
+| Inference serving      | Manage serving workloads declaratively via `InferenceDeployment`                                 | Built |
+| Training admission     | Translate `MLTrainingJob` into queued `batch/v1` Jobs admitted through Kueue (M6)                | Built. It also reports what the tenant waited: `admitToRunningSeconds` on the CR and a histogram beside it, and it **refuses to report a window it did not watch** rather than subtracting Kueue's stored stamp after the fact |
+| Gateway                | Tenant-aware serving gateway: API key → tenant, token bucket, model routing, proxy, metrics      | Built and unit-tested; **never deployed** |
+| Admission guard        | KV-cache-aware three-arm admission guard and open-loop benchmark harness (M5-b)                  | **Built and measured on a paid GPU.** The guard missed its pre-registered 1.25x premium-tail target at 83.7x over four repetitions, and the harness declared the run invalid rather than reporting a protection claim. Re-analysing the same rows at no further spend then found the occupancy signal the milestone was named for had been unreachable by construction and never fired at all ([write-up](hack/m5d-writeup.md), [analysis](docs/superpowers/specs/2026-09-04-the-layer-not-the-signal.md)) |
+| Performance isolation  | Measure multi-tenant noisy-neighbor p99 contention under GPU sharing                             | Sizing arithmetic and the run script are built (`internal/bench/sharing.go`, `hack/m5c-matrix.sh`), and `SharingPlan.Validate` already refuses a card too small to host the matrix. **No `GpuSharingBenchmark` CRD**, and the matrix has since run on rented cards — nine paid pilots in 2026-09 and six capacity-ladder sessions after them — but before the first of those, reading it, rehearsing it on a kind cluster, implementing its readings, running the runner itself on a cluster and putting a second engine and a mutation battery against the result found 37 defects in 2026-09 that each would have ended or corrupted a paid session, all fixed and pinned by tests that were deliberately broken to confirm they fire — and that count is the pass's, not the total: the pilots after it found sixteen more, numbered 41 to 56 ([pre-registration](docs/superpowers/specs/2026-09-10-does-splitting-the-card-buy-protection.md), [sizing](hack/m5c-sharing-sizing.md)) |
+| Paid-run harness       | Pin what a GPU-renting script does before it can be run against a card                            | Built. Four runners, 40 recorded scenarios plus a source-order assertion each: every scenario runs the real script with `aws` and `sleep` replaced by recording stubs and diffs the AWS calls, exit status, messages and run-directory contents against a golden. It pins the **host** side. What it cannot tell — whether a cluster then comes up — is covered separately by two rehearsals that run for real on a local kind cluster: `hack/test/rehearse-bringup.sh` extracts the GPU-free span of a session's user-data, and `hack/test/rehearse-m5c-matrix.sh` runs the M5-c matrix itself with stub engines and simulated devices |
+| Failure & recovery     | Inject failure scenarios and record an operational evidence trail                                | Built — `WorkloadRun` CRD, controller and driver — and **run for real**: deleting a serving Pod produced a trail nobody wrote by hand, and the run exposed a defect envtest could not. Two of three scenarios are recordable ([evidence](hack/m6-kind-e2e.md)) |
+| Ledger                 | A SQLite ledger projecting CR/status/events                                                      | **Designed only** — no code |
+| CLI                    | A `platformctl` CLI                                                                              | **Designed only** — no code |
 
-```text
-사용자/플랫폼 팀
-  -> GPUQuotaPolicy / NodeHealth / InferenceDeployment / MLTrainingJob
-  -> Controller Reconcile
-  -> ResourceQuota / Deployment / Service / Job / Kueue Workload
-  -> 메트릭, 상태, 이벤트, 운영 증거
-```
+Training admission (M6) uses [Kueue](https://kueue.sigs.k8s.io/) as the admission engine — this project does not reimplement a scheduler; it provides the `MLTrainingJob` abstraction and the status translation on top of Kueue. For training GPUs, Kueue owns the admission quota (`GPUQuotaPolicy` syncs to ClusterQueue/ResourceFlavor rather than double-counting the same GPUs in a namespace ResourceQuota).
 
-## 마일스톤 상태
+## Architecture
 
-| 마일스톤 | 범위 | 상태 |
-| --- | --- | --- |
-| M1 | 프로젝트 골격과 핵심 CRD 정의, envtest 검증 | 완료 |
-| M2 | idempotent reconcile, finalizer, drift recovery | 완료 |
-| M3 | 비정상 GPU 노드 taint, 테넌트별 ResourceQuota 동기화 | 완료 |
-| M4-a | `InferenceDeployment` 기반 추론 워크로드 관리 | 완료 |
-| M4-b | 테넌트 인식 서빙 게이트웨이: API key → tenant, 토큰 버킷 → 429, 모델 라우팅, 프록시, 메트릭 | 완료 |
-| M5-a | AWS 호스팅: Terraform(state bootstrap, EKS, 노드 그룹), GitHub Actions CI(OIDC → ECR), Argo CD GitOps, EKS에 오퍼레이터 배포, 경량 관측성(아직 GPU 없음) | 설계 완료(v3.1) |
-| M5-b | 그 인프라 위의 real-GPU 플래그십: GPU 노드 그룹(On-Demand, ephemeral), `GpuSharingBenchmark`와 KV-cache 인식 입장 가드, noisy neighbor p99 A/B 측정(핵심 기능) | 설계 완료 |
-| M5-c | 심화: 비용/공정성 프론티어(가드 임계값 3개 이상)와 공유 모드 매트릭스(exclusive / time-slicing / MPS). M5-b 증거를 강화하며 새 기능은 없다 | 계획 |
-| M5-d | 측정 수치를 담은 기술 문서(M5-c 이후 공개) | 계획 |
-| M6 | 학습 입장 제어(스트레치에서 승격): `MLTrainingJob` → Job과 Kueue Workload, 2-테넌트 공정 공유, kind에서 preemption 증거 확보. 학습 쿼터는 Kueue가 소유한다 | 계획 |
-| M7 | 실패 시나리오 주입과 운영 증거 기록(`WorkloadRun`) | 스케치 |
+The control plane owns the CRDs and reconciles them into native cluster objects. The data plane is ordinary Kubernetes resources created and garbage-collected through owner references.
 
-## 기술 스택
+## Status
 
-- Go, controller-runtime, Kubebuilder
-- kind, envtest, Kubernetes CRD/RBAC/Kustomize
-- Kueue, KEDA, Prometheus 계열 관측성 도구
+The project is built milestone by milestone.
 
-## 로컬 개발
+Each finished milestone is tagged and released, so the code at any stage can be read or checked out
+directly from the [Releases](https://github.com/lkhun9311/gpu-platform-control-plane/releases) page.
+
+| Milestone | Scope | Status |
+|---|---|---|
+| [M1](https://github.com/lkhun9311/gpu-platform-control-plane/releases/tag/m1-skeleton) | Project skeleton and the four core CRDs, verified with envtest | Done |
+| [M2](https://github.com/lkhun9311/gpu-platform-control-plane/releases/tag/m2-reconcilers) | Idempotent reconciliation with finalizers and drift recovery (NodeHealth reference) | Done |
+| [M3](https://github.com/lkhun9311/gpu-platform-control-plane/releases/tag/m3-enforcement) | Taint unhealthy nodes (NodeHealth enforcement) and sync per-tenant quota into ResourceQuota | Done |
+| [M4-a](https://github.com/lkhun9311/gpu-platform-control-plane/releases/tag/m4-serving) | `InferenceDeployment` → Deployment/Service with a phase ladder | Done |
+| [M4-b](https://github.com/lkhun9311/gpu-platform-control-plane/releases/tag/m4-serving) | Tenant-aware serving gateway: API key → tenant, token bucket → 429, model routing, proxy, metrics | Done |
+| [M5-a](https://github.com/lkhun9311/gpu-platform-control-plane/releases/tag/m5-a-hosting) | AWS hosting: Terraform state bootstrap, EKS, OIDC CI → ECR, Argo CD GitOps, ephemeral apply/destroy with a TTL kill switch | Code done and offline-validated. **`bootstrap` is applied** (state bucket, KMS key, OIDC provider, CI roles, ECR, budget); `cluster` is planned at 89 resources (as last planned on 2026-08-27; `docs/09` carries the authoritative count) and not applied, so no VPC, EKS or GPU node exists |
+| [M5-b](https://github.com/lkhun9311/gpu-platform-control-plane/releases/tag/m5-b-admission-guard) | Three-arm KV-cache-aware admission guard measured on a paid GPU, with an open-loop harness whose pre-registered checks withheld the protection claim. The guard missed its 1.25x premium-tail target at **83.7x** over four repetitions and the run was declared invalid. Re-scoring the same evidence later, at no further spend, showed the arm that matched isolation's tail had admitted **none** of the contending tenant's work — because its bucket was configured smaller than the contender's prompt, which a tail-only reading would have reported as the best result in the study | **Run.** Four paid repetitions 2026-09-03, engine-level scheduler microtest 2026-09-04. A negative result with a measured mechanism ([pre-registration](docs/superpowers/specs/2026-09-05-the-price-of-protection.md)) |
+| M5-c | Cost/fairness frontier and sharing-mode matrix (exclusive / time-slicing / MPS) — hardens the M5-b evidence | Card chosen by arithmetic rather than by preference: `SharingPlan.Validate` refuses a T4, which leaves each engine 284 KV tokens against a 7,695-token prompt. All three arms' manifests and the run script are written. **Run on rented cards nine times from 2026-09-10, and "tested" was the wrong word for them before that** — this line said "written and tested" until 2026-09-10, when reading the runner, rehearsing it against a kind cluster, writing the code for its own readings, running the runner itself, and then attacking the result with a second engine and a mutation battery found 37 defects — among them that neither sharing arm could deploy at all (both overlays targeted a namespace nothing creates), that the control arm had no device plugin, that one pre-registered reading was unreachable because an earlier one subsumed it, and that a port-forward race left two of four arms completing nothing while the report called the result a censored tail. All 37 are fixed and each is pinned by a test that was deliberately broken to confirm it fires. That 37 counts this pass only — the pilots that followed found defects 41 through 56, sixteen more, fixed the same way. Three of the last thirteen were in the readings themselves, computing a quantity the pre-registration had not asked for while every unit test stayed green. Its deferral used to be justified by device attribution, which was never the obstacle — `hack/m5c-matrix.sh` deliberately runs no observer on the sharing node. The real reason was that its `shared` arm is M5-b's topology on an engine whose budget and policy were unsettled, and those are settled now. **Pre-registered 2026-09-10** against the same bars the previous study used, carried forward rather than chosen, with the outcome space the last one left uncovered closed in advance ([pre-registration](docs/superpowers/specs/2026-09-10-does-splitting-the-card-buy-protection.md), [sizing](hack/m5c-sharing-sizing.md)) |
+| M5-d | Technical write-up with the measured numbers | Reasoning, pre-registered checks and stated limits were written BEFORE the run so they could not be fitted to it, and the markers are filled from paid evidence. **Closed on a measured negative.** A successor study then took the same question to the engine's own scheduler — eight configurations, three repetitions, no timeouts — and the best of them holds the premium tail at **20.7x** an isolated baseline against a 2x bar, with its median missing by 2.8x. A contending prompt occupies the engine for about a second and the tail budget is a tenth of that, so dividing the work does not divide the machine ([write-up](hack/m5d-writeup.md), [result](docs/superpowers/specs/2026-09-08-the-load-needs-an-upper-gate.md)) |
+| [M6](https://github.com/lkhun9311/gpu-platform-control-plane/releases/tag/m6-training-admission) | Training admission: `MLTrainingJob` → Job + Kueue Workload; two-tenant cohort borrowing and quota-reclaim preemption, run end to end on kind | Done ([evidence](hack/m6-kind-e2e.md)) |
+| [queuelab](https://github.com/lkhun9311/gpu-platform-control-plane/releases/tag/queuelab) | Queue-policy measurement lab: censoring-aware list/watch lifecycle ledger replayed against real Kueue | Withdrawn once, re-measured, then observed on hardware. Twelve kind runs the runner's own gates accept ([result](hack/queuelab-reclaim-first-result.md)) carried the banner `device: NOT OBSERVED`, so every GPU-second in them is a second of reservation. A $3.90 session on four A10Gs then ran eight more, all accepted by `-require-device`, and **`queuelabrun -compare` prints its comparison without that line**. Owner wait separates by 28.8 s there against 29.0 s on kind, so the result survived its own instrument. A second study then separated **reservation from use**: two sets of runs reserved 51.084 and 50.802 GPU-seconds — the same to within a twentieth of their floor — while the card did 48.115 and 12.193 observed device-seconds, a factor of four with every reservation-based figure unchanged ([observation](docs/superpowers/specs/2026-09-05-the-device-was-never-observed.md), [idling](docs/superpowers/specs/2026-09-06-does-reservation-track-use.md), [runner](hack/queuelab-gpu-session.sh)) |
+| M7 | Inject failure scenarios and record an operational evidence trail (`WorkloadRun`) | CRD, controller and a single-controller driver, tested on envtest; the trail refuses rather than concludes when it has a hole. `hack/m7-evidence-trail.sh` **has been run**: a real Pod deletion produced Ready → Pending → Ready in a trail nobody wrote by hand, and the run exposed a defect envtest could not (recovery credited to the healthy state the run began in). **DegradedNode has now been recorded too**: a throwaway kind cluster with a worker is the machine whose disruption nobody minds, and stopping that worker's kubelet produced `Ready → Quarantine → Ready` at 0s, 46s and 48s with the verdict `Recovered` — every phase published by the operator rather than by the script. **BackendFallback** was removed from the type because its injection scales a backend to zero, which reports Ready |
+
+**What has not been exercised.** Every GPU in the kind clusters is simulated by a fake device plugin, and
+most of this repository has only ever met one of those. More than thirty paid EC2 sessions did not — 31 run
+directories under `hack/` carry an instance id and the earliest sessions predate that convention — across
+M5-b, M5-c, the capacity ladders, the price-of-protection sweep and queuelab. The State and Status columns
+above say per row which is which rather than leaving
+it to be inferred. This paragraph used to say nothing here had ever run against real hardware, which
+contradicted the two rows directly above it. Two distinctions worth stating plainly, because they are easy
+to blur:
+
+- The admission guard and its benchmark harness **have** seen a GPU: four paid repetitions on 2026-09-03,
+  which is where the numbers in the M5-b and M5-d rows come from. The sentence here used to say they never
+  had, and that was written before the run and not updated after it. What preceded the run still stands: the
+  metrics fixture is a real capture from the pinned vLLM image and replaced a synthetic one whose
+  assumptions it falsified; the guard has been driven through engage and release against a running vLLM; and
+  the whole chain — harness, gateway, engine — has carried a request and returned a `kv_cache_pressure`
+  rejection ([evidence](hack/m5b-chain-live-evidence.log)). That chain work was on a CPU build, where the
+  engine queues before its cache fills, so it exercised the WAITING arm of the engage condition and not the
+  KV-usage arm; the paid run is what exercised the second one.
+- The contention benchmark, the SQLite ledger and `platformctl` are **not coded at all**. They are design
+  documents. Earlier revisions of this README described them as if they existed; that was wrong.
+
+**Flagship benchmark:** KV-cache-aware noisy-neighbor p99 protection — a real-GPU benchmark that compares premium tenant latency under baseline, colocated long-context noisy-neighbor, and Gateway admission-guard modes. It **has** been run on a GPU, and the numbers are a negative result the pre-registered checks refused to call a win: premium TTFT p99 of 82.2 ms isolated against **6,882.0 ms** under the guard, missing the 1.25x target at 83.7x, and the run declared invalid ([write-up](hack/m5d-writeup.md)). This line used to say there were no numbers; there are, and they say the guard did not work.
+
+## The queuelab reclaim result: withdrawn once, and now re-measured
+
+On 2026-08-02 this repository published a live measurement of Kueue quota-reclaim preemption. **It was wrong
+and it was withdrawn.** The experiment has since produced a result the runner's own gates accept: twelve
+runs, two per cell across two dose regimes, two arms and two workers, carrying
+`verdict: admissible-under-implemented-gates` with no failed claims.
+
+Honouring SIGTERM under reclaim discards the work in flight; ignoring it discards none and converts the
+victim's remaining service into the quota owner's waiting time, with the preemption recorded as ineffective.
+Both arms reproduce across their two runs.
+
+The magnitudes are NOT restated here, deliberately: they were, and they drifted -- this paragraph claimed
+four runs after the set had grown to twelve. The result page carries them and is re-derivable from the
+records with `queuelabrun -compare`.
+
+What the result supports is a MODEL, `held = min(remaining service, grace)`, checked in both dose regimes
+and at the kink between them, rather than any single figure: the owner's wait responds to dose by twelve
+seconds across two levels, so it is not a property of the platform and must not be quoted as one. The
+honouring arm's own hold measures below the harness's resolution floor and is reported as unresolved rather
+than as a small number. Every ledger time is when a watch event ARRIVED, and the gap to the kubelet's own
+stamp bounds what is resolvable at all. The GPU is simulated, so these are seconds of RESERVATION and the
+records say so. Details, and what the result does not support, are in
+[hack/queuelab-reclaim-first-result.md](hack/queuelab-reclaim-first-result.md).
+
+Three of this platform's defences were broken the same way — each expressed a guarantee in terms of a field
+the tenant writes — and each was found by attacking it rather than reading it:
+[hack/tenant-writable-fields.md](hack/tenant-writable-fields.md).
+
+**The result that survived contact with review** is the other regime. An unresponsive workload defeats
+quota reclaim completely while its remaining service fits inside the Pod's termination grace period — it
+finishes, nothing is discarded, and the owner waits the whole of that service with the preemption recorded
+as ineffective. Once remaining service exceeds grace, it is killed at exactly the grace boundary. So
+`terminationGracePeriodSeconds`, set per Pod by the tenant being preempted, is the bound on how badly a
+quota-restoration promise can be broken:
+[hack/queuelab-grace-boundary.md](hack/queuelab-grace-boundary.md).
+
+What follows is the account of the withdrawn one, kept because the reason it was wrong is the reason the
+gates exist.
+
+Nothing was ever preempted: the lab's workload ran `sleep` as PID 1, and a container's PID 1 ignores
+`SIGTERM` without an explicit handler, so the jobs ran to completion and were re-executed. A later review
+found the experiment's design confounded as well, independently of that bug.
+
+`queuelabrun` **refuses by design to emit a countable result it cannot stand behind** — it exits non-zero and
+names the validity claims that failed. The earlier result counted because a run that looked fine was allowed
+to count; the runs above count because each one proves it held its worker exclusively for the whole window,
+qualified the node it ran on, and observed continuously, and says so in a record a reader can re-derive the
+verdict from.
+
+The full account — five mistakes, what each one's evidence was, and what changed — is in
+[docs/10_WHAT_I_GOT_WRONG.md](docs/10_WHAT_I_GOT_WRONG.md).
+
+## Tech stack
+
+- Go, controller-runtime, scaffolded with [kubebuilder](https://book.kubebuilder.io/)
+- kind for the local cluster, envtest for controller tests
+- Kueue (training admission), kube-prometheus-stack (metrics)
+
+## Local development
+
+Requires Docker, Go, kind, kubectl, and kubebuilder.
 
 ```bash
+# create the local 3-node cluster (control-plane + 2 workers)
 kind create cluster --config hack/kind-config.yaml
+
+# generate manifests and build the controller binary
+make manifests
 make build
+
+# run controller tests (envtest)
 make test
+
+# the shared Kueue fixtures — REQUIRED before any GPUQuotaPolicy with trainingQuota works
+kubectl apply -k config/kueue
 ```
 
-> **이 판본에서는 `make manifests`를 실행하지 마세요.**
->
-> controller-gen은 `api/v1/*_types.go`의 필드 doc 주석을 CRD 스키마의 `description`으로 그대로 복사합니다.
-> 이 판본의 주석에는 Go 문법 설명이 들어 있어서, 재생성하면 그 설명이 클러스터에 적용되는 CRD와 `kubectl explain` 출력에 그대로 실리고 CRD 크기도 약 1.5배(33KB → 53KB)가 됩니다.
-> 그래서 `config/crd/bases/`의 CRD는 영어판에서 생성한 것을 그대로 두어, 두 판본이 동일한 CRD를 배포하도록 유지합니다.
-> 스키마를 바꿔야 한다면 영어판에서 `make manifests`를 돌린 뒤 그 결과를 이 판본으로 복사하세요.
->
-> 같은 이유로 `api/v1/zz_generated.deepcopy.go`에는 한국어 주석을 달지 않습니다. `make generate`가 덮어쓰기 때문입니다.
+`config/kueue` is deliberately outside `config/default`. Its resources are cluster-scoped and referenced by
+name — the ClusterQueue the policy controller writes points at a ResourceFlavor called exactly `gpu` — and
+`config/default` applies a `namePrefix`, which would rename the flavor out from under that reference.
 
-kind 환경에서는 실제 GPU 없이도 스케줄링과 쿼터 enforcement 흐름을 검증할 수 있도록 노드 상태에 가짜 GPU capacity를 패치합니다.
+Applying it is easy to forget, and forgetting it used to fail silently: the ClusterQueue sits
+`Active=False FlavorNotFound`, every training Job submitted to it stays suspended, and the policy still read
+`Synced=True`. The policy now carries a second condition for exactly this, so the state is visible:
+
+```bash
+kubectl get gpuquotapolicy <name> -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'
+# Synced=True QuotaSynced
+# Admitting=False ClusterQueueInactive     <- the fixture is missing
+```
+
+Simulated GPU capacity on a **kind** worker node, only for end-to-end scheduling/quota-*enforcement* validation (the GPUQuotaPolicy controller itself needs no GPU capacity — it writes a `requests.nvidia.com/gpu` ResourceQuota; capacity matters only when sample pods actually request GPU):
 
 ```bash
 kubectl patch node platform-worker --subresource=status --type=json \
@@ -77,17 +177,23 @@ kubectl patch node platform-worker --subresource=status --type=json \
        {"op":"add","path":"/status/allocatable/nvidia.com~1gpu","value":"4"}]'
 ```
 
-## 디렉터리 구조
+> This node-status patch holds on kind because no device plugin reconciles GPU capacity there. On a real cluster (e.g. EKS) the kubelet/device plugin owns node status and would overwrite it, so advertise simulated capacity with a device-plugin-style DaemonSet instead.
 
-```text
-api/      CRD 타입 정의
-cmd/      컨트롤러와 게이트웨이 엔트리포인트
-config/   CRD, RBAC, manager, sample manifest
-docs/     설계 문서와 포트폴리오 설명
-internal/ 컨트롤러와 게이트웨이 구현
-test/     e2e 테스트 골격
+## Repository layout
+
+```
+api/            CRD types
+internal/       the substance: four reconcilers, the serving gateway,
+                the admission guard and benchmark harness, the queuelab
+                measurement layer
+cmd/            controller manager, gateway, benchmark harness, queuelab runner
+config/         kustomize manifests (CRD, RBAC, manager, Kueue fixtures)
+hack/           local cluster config and the M6 end-to-end script + evidence
+infra/          Terraform for the AWS hosting path (bootstrap applied; cluster planned only)
+docs/           design documents and specs
+test/           e2e test scaffolding
 ```
 
-## 라이선스
+## License
 
-Apache 2.0
+[Apache 2.0](LICENSE)

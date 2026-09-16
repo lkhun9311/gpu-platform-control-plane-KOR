@@ -1,0 +1,203 @@
+[
+  {
+    "Arm": "R1",
+    "Total": 1840,
+    "Completed": 1840,
+    "OfferedExactTokens": 0,
+    "AdmittedExactTokens": 0,
+    "ExactTokensMissing": 0,
+    "ExactTokensContradicted": 0,
+    "OutputTokens": 117760,
+    "ActiveSeconds": 2538.6881036160003,
+    "OutputTokensPerSecond": 46.38616292890317,
+    "TPOTMsP50": 15.217848492063492,
+    "TPOTMsP99": 15.971451174603175,
+    "OutputTokensByTenant": {
+      "premium-1": 117760
+    },
+    "OutputTokensFromFailedStreams": 0,
+    "TPOTMsP50ByTenant": {
+      "premium-1": 15.217848492063492
+    },
+    "TPOTMsP99ByTenant": {
+      "premium-1": 15.971451174603175
+    },
+    "AdmissionLost": 0,
+    "Rejected": 0,
+    "TimedOut": 0,
+    "Failed": 0,
+    "TTFTMsP50": 47.258372,
+    "TTFTMsP95": 65.702648,
+    "TTFTMsP99": 82.175929,
+    "E2EMsP99": 1079.297334,
+    "OfferedInputTokens": 0,
+    "AdmittedInputTokens": 0,
+    "ThresholdProbe": null,
+    "RepetitionCount": 4,
+    "MinRepetitionTail": 460,
+    "Censored": false,
+    "TailSampleSize": 1840
+  },
+  {
+    "Arm": "off",
+    "Total": 3996,
+    "Completed": 3628,
+    "OfferedExactTokens": 0,
+    "AdmittedExactTokens": 0,
+    "ExactTokensMissing": 1788,
+    "ExactTokensContradicted": 0,
+    "OutputTokens": 146368,
+    "ActiveSeconds": 2553.2592929519997,
+    "OutputTokensPerSecond": 57.32594429560416,
+    "TPOTMsP50": 74.7192822,
+    "TPOTMsP99": 266.84284406666666,
+    "OutputTokensByTenant": {
+      "premium-1": 117760,
+      "standard-noisy": 28608
+    },
+    "OutputTokensFromFailedStreams": 0,
+    "TPOTMsP50ByTenant": {
+      "premium-1": 31.845625158730158,
+      "standard-noisy": 197.31953866666666
+    },
+    "TPOTMsP99ByTenant": {
+      "premium-1": 266.0407362857143,
+      "standard-noisy": 267.29257146666663
+    },
+    "AdmissionLost": 0,
+    "Rejected": 0,
+    "TimedOut": 0,
+    "Failed": 368,
+    "TTFTMsP50": 940.624685,
+    "TTFTMsP95": 8112.642177,
+    "TTFTMsP99": 10595.328263,
+    "E2EMsP99": 27363.173826,
+    "OfferedInputTokens": 17880000,
+    "AdmittedInputTokens": 17880000,
+    "ThresholdProbe": {
+      "standard-probe-over": {
+        "Total": 180,
+        "Rejected": 0,
+        "EstInputTokens": 4096,
+        "Unevaluated": 180
+      },
+      "standard-probe-under": {
+        "Total": 188,
+        "Rejected": 0,
+        "EstInputTokens": 4095,
+        "Unevaluated": 188
+      }
+    },
+    "RepetitionCount": 4,
+    "MinRepetitionTail": 460,
+    "Censored": false,
+    "TailSampleSize": 1840
+  },
+  {
+    "Arm": "static-cap",
+    "Total": 3996,
+    "Completed": 1840,
+    "OfferedExactTokens": 0,
+    "AdmittedExactTokens": 0,
+    "ExactTokensMissing": 1788,
+    "ExactTokensContradicted": 0,
+    "OutputTokens": 117760,
+    "ActiveSeconds": 2542.347104738,
+    "OutputTokensPerSecond": 46.31940295663746,
+    "TPOTMsP50": 15.213294365079365,
+    "TPOTMsP99": 15.959863269841271,
+    "OutputTokensByTenant": {
+      "premium-1": 117760
+    },
+    "OutputTokensFromFailedStreams": 0,
+    "TPOTMsP50ByTenant": {
+      "premium-1": 15.213294365079365
+    },
+    "TPOTMsP99ByTenant": {
+      "premium-1": 15.959863269841271
+    },
+    "AdmissionLost": 0,
+    "Rejected": 1788,
+    "TimedOut": 0,
+    "Failed": 368,
+    "TTFTMsP50": 48.078923,
+    "TTFTMsP95": 65.221048,
+    "TTFTMsP99": 81.193769,
+    "E2EMsP99": 1070.764212,
+    "OfferedInputTokens": 17880000,
+    "AdmittedInputTokens": 0,
+    "ThresholdProbe": {
+      "standard-probe-over": {
+        "Total": 180,
+        "Rejected": 0,
+        "EstInputTokens": 4096,
+        "Unevaluated": 180
+      },
+      "standard-probe-under": {
+        "Total": 188,
+        "Rejected": 0,
+        "EstInputTokens": 4095,
+        "Unevaluated": 188
+      }
+    },
+    "RepetitionCount": 4,
+    "MinRepetitionTail": 460,
+    "Censored": false,
+    "TailSampleSize": 1840
+  },
+  {
+    "Arm": "kv-aware",
+    "Total": 3996,
+    "Completed": 3354,
+    "OfferedExactTokens": 0,
+    "AdmittedExactTokens": 0,
+    "ExactTokensMissing": 1788,
+    "ExactTokensContradicted": 0,
+    "OutputTokens": 141984,
+    "ActiveSeconds": 2549.217628629,
+    "OutputTokensPerSecond": 55.69708855197298,
+    "TPOTMsP50": 32.018495,
+    "TPOTMsP99": 265.13152553333333,
+    "OutputTokensByTenant": {
+      "premium-1": 117760,
+      "standard-noisy": 24224
+    },
+    "OutputTokensFromFailedStreams": 0,
+    "TPOTMsP50ByTenant": {
+      "premium-1": 18.299996904761905,
+      "standard-noisy": 134.24959733333333
+    },
+    "TPOTMsP99ByTenant": {
+      "premium-1": 209.36404661904763,
+      "standard-noisy": 265.52047533333337
+    },
+    "AdmissionLost": 0,
+    "Rejected": 274,
+    "TimedOut": 0,
+    "Failed": 368,
+    "TTFTMsP50": 499.787672,
+    "TTFTMsP95": 4594.350811,
+    "TTFTMsP99": 6881.976722,
+    "E2EMsP99": 15501.693053,
+    "OfferedInputTokens": 17880000,
+    "AdmittedInputTokens": 15140000,
+    "ThresholdProbe": {
+      "standard-probe-over": {
+        "Total": 180,
+        "Rejected": 0,
+        "EstInputTokens": 4096,
+        "Unevaluated": 180
+      },
+      "standard-probe-under": {
+        "Total": 188,
+        "Rejected": 0,
+        "EstInputTokens": 4095,
+        "Unevaluated": 188
+      }
+    },
+    "RepetitionCount": 4,
+    "MinRepetitionTail": 460,
+    "Censored": false,
+    "TailSampleSize": 1840
+  }
+]

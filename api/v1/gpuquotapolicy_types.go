@@ -133,6 +133,12 @@ type GPUQuotaPolicySpec struct {
 	//
 	// +optional
 	RateLimit *GPUQuotaRateLimit `json:"rateLimit,omitempty"`
+
+	// trainingQuota, when true, also publishes this tenant's GPU ceiling as a Kueue ClusterQueue for training admission.
+	//
+	// Training GPU quota then lives in Kueue rather than the namespace ResourceQuota, so the same GPUs are not counted twice.
+	// +optional
+	TrainingQuota bool `json:"trainingQuota,omitempty"`
 }
 
 // GPUQuotaRateLimit: 서빙 gateway가 사용하는 tenant별 token bucket 설정이다.

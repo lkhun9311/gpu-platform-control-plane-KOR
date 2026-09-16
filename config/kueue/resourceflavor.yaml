@@ -1,0 +1,14 @@
+# The gpu ResourceFlavor is the single flavor every tenant ClusterQueue references.
+#
+# An empty flavor spec matches any node that advertises nvidia.com/gpu, including the fake GPU simulator, so the two-tenant demo runs on kind with no real hardware.
+#
+# This flavor is shared across all tenants, so it is a static fixture here rather than an object the GPUQuotaPolicy controller creates or owns.
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: gpu
+  labels:
+    app.kubernetes.io/name: gpu-platform-control-plane
+    app.kubernetes.io/component: kueue
+    app.kubernetes.io/managed-by: kustomize
+spec: {}

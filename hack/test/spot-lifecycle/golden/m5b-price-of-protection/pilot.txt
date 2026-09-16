@@ -1,0 +1,57 @@
+aws sts get-caller-identity --query Account --output text
+aws s3api head-bucket --bucket stub-bucket
+aws iam get-instance-profile --instance-profile-name m5b-pop
+aws s3 cp <OUT>/benchharness s3://stub-bucket/run/bin/benchharness
+upload: <SIZE> bytes to stub-bucket/run/bin/benchharness
+aws ssm get-parameter --region ap-northeast-2 --name /aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-ubuntu-22.04/latest/ami-id --query Parameter.Value --output text
+aws ec2 describe-instance-type-offerings --region ap-northeast-2 --location-type availability-zone --filters Name=instance-type,Values=g5.xlarge --query InstanceTypeOfferings[].Location --output text
+aws ec2 describe-subnets --region ap-northeast-2 --filters Name=default-for-az,Values=true Name=map-public-ip-on-launch,Values=true Name=availability-zone,Values=ap-northeast-2a --query Subnets[0].SubnetId --output text
+aws ec2 run-instances --region ap-northeast-2 --image-id ami-0stubgpu --instance-type g5.xlarge --subnet-id subnet-ap-northeast-2a --iam-instance-profile Name=m5b-pop --instance-initiated-shutdown-behavior terminate --block-device-mappings [{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":200,"VolumeType":"gp3","DeleteOnTermination":true}}] --instance-market-options {"MarketType":"spot","SpotOptions":{"MaxPrice":"0.80","SpotInstanceType":"one-time"}} --user-data file://<USERDATA> --tag-specifications ResourceType=instance,Tags=[{Key=Name,Value=m5b-pop},{Key=purpose,Value=price-of-protection}] --query Instances[0].InstanceId --output text
+user-data: matches the copy saved in the run directory
+aws s3api head-object --bucket stub-bucket --key run/DONE
+aws ec2 describe-instances --region ap-northeast-2 --instance-ids i-0stub --query Reservations[0].Instances[0].State.Name --output text
+sleep 30
+aws s3api head-object --bucket stub-bucket --key run/DONE
+aws s3 cp s3://stub-bucket/run/evidence.tgz <OUT>/evidence.tgz
+aws s3 cp s3://stub-bucket/run/run.json <OUT>/run.json
+aws s3 cp s3://stub-bucket/run/log.txt <OUT>/log.txt
+aws s3 cp s3://stub-bucket/run/stderr.txt <OUT>/stderr.txt
+aws ec2 terminate-instances --region ap-northeast-2 --instance-ids i-0stub
+harness checksum: user-data matches the uploaded binary
+--- exit 0
+--- messages
+== credentials live for 720 min, this run needs about 79 min including margin
+== study  price-of-protection-2026-09-05
+== engine vllm/vllm-openai@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967
+== model  Qwen/Qwen2.5-3B-Instruct
+== arms   R1::,default-fcfs::,mbt-0512-fcfs:512:fcfs,mbt-0512-priority:512:priority
+== output <OUT>
+== building the harness for the instance
+== harness sha256 <SHA256>
+== uploading the harness
+== g5.xlarge is offered in: ap-northeast-2a ap-northeast-2c
+== launching g5.xlarge spot (max $0.80/h)
+== trying ap-northeast-2a (subnet-ap-northeast-2a)
+== instance i-0stub
+== waiting for results (the engine has an image and weights to pull first)
+== watching for up to 125 min against a 120 min backstop
+== results are up
+== evidence unpacked to <OUT>/evidence
+== resolved engine configuration per arm
+arm                             asked   resolved  reps  note
+R1                     engine default       2048     1  
+default-fcfs           engine default       2048     1  
+== the report is NOT run here: it needs every arm of the study and this may be a pilot
+== when the arms are complete:  benchharness report --raw '<OUT>/evidence/raw-*.jsonl' -json-out ...
+== terminating i-0stub
+--- files
+./benchharness
+./evidence.tgz
+./evidence/raw-stub-1.jsonl
+./instance-id
+./launch-errors.txt
+./log.txt
+./pop.py
+./run.json
+./stderr.txt
+./user-data.sh
