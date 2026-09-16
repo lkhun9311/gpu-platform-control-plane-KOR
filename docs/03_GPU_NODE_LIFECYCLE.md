@@ -4,12 +4,16 @@
 > and there is **no GPU-specific fault detection in the health path**: nothing DCGM, Xid or ECC reports
 > reaches `NodeHealth`. Xid and ECC have no code at all. DCGM does — a utilisation reader and an exporter
 > deployment the queuelab uses to tell a reserved GPU-second from an observed one — but it is a measurement
-> input, not a health signal, and it has never been pointed at a real card. The line below was written when
+> input, not a health signal. It has been pointed at real cards — the paid queuelab sessions carry device
+> scrapes and records naming `dcgm-exporter` as the observer — but nothing it reads reaches `NodeHealth`,
+> which is the claim this paragraph is making. The line below was written when
 > the first half of that was true of DCGM as well (verified:
 > zero occurrences). The reconciler observes the Kubernetes Node `Ready` condition and applies/removes a
 > taint on degradation, with finalizer cleanup. The richer intake pipeline, conditions, and metrics
-> described below (DCGM, fio, iperf3, NCCL) are target design only — not implemented. No GPU in this project
-> is real.
+> described below (DCGM, fio, iperf3, NCCL) are target design only — not implemented. No GPU this reconciler
+> has ever seen is real: every cluster it runs against is kind with a fake device plugin. Real cards have
+> been rented for the benchmarks — more than thirty paid sessions since 2026-09-02 — but none of them ran
+> this lifecycle.
 
 A GPU node is treated not as "a server" but as an asset with an intake, operating, isolation, and recovery lifecycle, tracked by `NodeHealth`.
 
