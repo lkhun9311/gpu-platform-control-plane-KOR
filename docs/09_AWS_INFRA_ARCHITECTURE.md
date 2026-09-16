@@ -487,7 +487,7 @@ the security it buys is already bought by the private subnets.
 | GitHub workflows              | **Written** (`ci.yml`, `infra.yml`, `destroy.yml`, `lint.yml`, `test.yml`, `test-e2e.yml`) — never run against real AWS credentials or infrastructure. `gpu.yml`, the GPU node-group switch this document describes, is **designed only and does not exist** |
 | Gateway image                 | **Built and pushed by `ci.yml`** to its own ECR repository, with the digest pinned into `config/gateway/kustomization.yaml` in the same PR as the operator's. Never yet run against a real cluster |
 | Operator custom metrics       | **Implemented** (`internal/controller/metrics.go` — taints, degraded transitions, quota drift)     |
-| Everything in this doc        | Code written per this design (v3.2) and offline-validated. **`bootstrap` is applied**; `cluster` is planned at 96 resources and never applied. The status line at the top of this document is the authority — this row contradicted it until 2026-08-29 |
+| Everything in this doc        | Code written per this design (v3.2) and offline-validated. **`bootstrap` is applied**; `cluster` is planned at 89 resources and never applied. The status line at the top of this document is the authority — this row contradicted it until 2026-08-29 |
 
 ## Build order (M5-a → M5-b)
 

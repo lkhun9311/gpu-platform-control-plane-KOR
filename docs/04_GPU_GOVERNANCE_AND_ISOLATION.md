@@ -6,8 +6,11 @@ This is the killer feature. Everything else (CRDs, gateway, node lifecycle) exis
 > admission guard (`internal/gateway/kvguard.go`, wired into the gateway) and the open-loop benchmark
 > harness. Neither has ever run on a GPU, and the guard's vLLM metrics fixture is synthetic — it says so in
 > the fixture — so its engage/release thresholds are unvalidated guesses. **Designed only, no code:** the
-> `GpuSharingBenchmark` CRD and the sharing-mode matrix. **Not measured:** everything numeric below. Every
-> figure in this document is a target or an example and is labeled as such; no real-GPU number exists.
+> `GpuSharingBenchmark` CRD and the sharing-mode matrix. **Not measured in this document:** everything numeric below. Every
+> figure here is a target or an example and is labeled as such. Real-GPU numbers now exist elsewhere — the
+> M5-b guard measured over four paid repetitions, the M5-c sharing matrix over nine paid pilots, and the
+> capacity ladders over six more sessions — and they live in `hack/m5d-writeup.md` and the pre-registrations
+> under `docs/superpowers/specs/`, not in the target figures below.
 
 ## The core question
 
@@ -122,7 +125,7 @@ The real-GPU run is **planned and required for M5's definition of done** — not
 
 Design-of-Record. The flagship benchmark **tests whether** a long-context noisy neighbor degrades a premium tenant's p99 latency on a **single shared vLLM instance**, and whether the gateway's KV-cache-aware admission guard protects the premium tenant — at what cost to the standard tenant. It does not claim perfect GPU isolation.
 
-This is an **M5 target**. Order: NodeHealth → GPUQuotaPolicy → InferenceDeployment → Gateway (M4-b) → admission guard + GpuSharingBenchmark → real-GPU run. As of 2026-09-05 everything through the admission guard is built and the real-GPU run has happened: four paid repetitions on 2026-09-03 and an engine-level scheduler microtest on 2026-09-04. The gateway is still unit-tested and never deployed. `GpuSharingBenchmark` has no CRD, though its sizing arithmetic and run script exist and the matrix has never run. The guard's own result is a negative one — it missed a pre-registered 1.25x premium-tail target at 83.7x, and the run was declared invalid rather than reported.
+This is an **M5 target**. Order: NodeHealth → GPUQuotaPolicy → InferenceDeployment → Gateway (M4-b) → admission guard + GpuSharingBenchmark → real-GPU run. As of 2026-09-05 everything through the admission guard is built and the real-GPU run has happened: four paid repetitions on 2026-09-03 and an engine-level scheduler microtest on 2026-09-04. The gateway is still unit-tested and never deployed. `GpuSharingBenchmark` has no CRD, though its sizing arithmetic and run script exist and the matrix has since run on rented cards nine times. The guard's own result is a negative one — it missed a pre-registered 1.25x premium-tail target at 83.7x, and the run was declared invalid rather than reported.
 
 ### Topology
 
