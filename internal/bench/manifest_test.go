@@ -187,6 +187,40 @@ var _ = Describe("RequireProvenance", func() {
 		Expect(m.RequireProvenance()).To(MatchError(ContainSubstring("no gatewaySHA")))
 	})
 
+	// The string the paid ladder actually recorded, seven times, past this guard.
+	//
+	// hack/m5c-matrix.sh derives SOURCE_COMMIT with `git rev-parse ... || echo unknown`, and on the rented
+	// instance the source arrives as a tarball with no .git. The guard refused an EMPTY gatewaySHA and
+	// "unknown" is not empty, so replay --require-provenance accepted evidence that names no build.
+	It("refuses a gateway SHA that names no build", func() {
+		for _, bad := range []string{"unknown", "none", "HEAD", "not-a-sha", "0f3c1a", strings.Repeat("a", 41)} {
+			m := full()
+			m.GatewaySHA = bad
+			Expect(m.RequireProvenance()).To(HaveOccurred(), "accepted %q", bad)
+		}
+	})
+
+	It("accepts a full-length commit as well as a short one", func() {
+		m := full()
+		m.GatewaySHA = "b1c18187650a5675d94acd1f379b7d495c400cba"
+		Expect(m.RequireProvenance()).To(Succeed())
+	})
+
+	// hack/m5b-arms.sh:440 appends this on purpose when the tree is not clean, and nothing on that path
+	// refuses a dirty tree before the card is rented. A commit plus "the tree was modified" still names a
+	// build, so refusing it would fail a paid run at its first replay rather than improve the record.
+	It("accepts a commit marked dirty, and nothing else wearing the suffix", func() {
+		m := full()
+		m.GatewaySHA = "0f3c1a9-dirty"
+		Expect(m.RequireProvenance()).To(Succeed())
+
+		for _, bad := range []string{"-dirty", "unknown-dirty", "0f3c1a9-dirtyx", "0f3c1a9-dirty-dirty"} {
+			m := full()
+			m.GatewaySHA = bad
+			Expect(m.RequireProvenance()).To(HaveOccurred(), "accepted %q", bad)
+		}
+	})
+
 	It("refuses a manifest missing a role the number depends on", func() {
 		m := full()
 		delete(m.ImageDigests, "engine")

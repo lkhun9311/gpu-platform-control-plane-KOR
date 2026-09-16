@@ -243,6 +243,31 @@ func digestPinned(ref string) bool {
 	return true
 }
 
+// commitShaped reports whether s could be a git commit: 7 to 40 lowercase hex characters, optionally
+// followed by "-dirty".
+//
+// Short and full-length both occur in this repository's records, so the range is deliberate rather than a
+// single length. It does not prove the commit exists -- nothing available here can -- but it does reject the
+// placeholders a shell fallback produces.
+//
+// The suffix is allowed because hack/m5b-arms.sh:440 appends it on purpose when the tree is not clean, and
+// nothing on that path refuses a dirty tree before the card is rented. Refusing it here would fail a paid
+// run at its first replay, after both engines are up -- the most expensive place to learn it. A commit plus
+// "the tree was modified" still names a build; "unknown" names nothing, and that is the difference this
+// check is drawing.
+func commitShaped(s string) bool {
+	s = strings.TrimSuffix(s, "-dirty")
+	if len(s) < 7 || len(s) > 40 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // RequireProvenance refuses a manifest that cannot name the builds its numbers came from.
 //
 // GatewaySHA and ImageDigests were declared on RunManifest for exactly this and nothing ever set them: no
@@ -253,8 +278,18 @@ func digestPinned(ref string) bool {
 // build worth pinning, and making every free run carry one would push operators toward inventing a value.
 // The paid path asks for it, because that is where the record has to outlive the cluster.
 func (m RunManifest) RequireProvenance() error {
-	if strings.TrimSpace(m.GatewaySHA) == "" {
+	sha := strings.TrimSpace(m.GatewaySHA)
+	if sha == "" {
 		return fmt.Errorf("manifest carries no gatewaySHA; a paid run's evidence must name the build that produced it")
+	}
+	// A value that is not a commit is refused, not just an empty one.
+	//
+	// hack/m5c-matrix.sh derives the commit with `git rev-parse ... || echo unknown`, and on a rented instance
+	// the source arrives as a tarball with no .git. The 2026-09-16 ladder therefore recorded "unknown" in all
+	// seven paid manifests and this guard passed them, because "unknown" is not empty. A check that cannot
+	// fail on the one value the scripts actually produce is worse than no check: it certifies the gap.
+	if !commitShaped(sha) {
+		return fmt.Errorf("manifest records gatewaySHA %q, which is not a commit; a paid run's evidence must name the build that produced it", sha)
 	}
 	for _, role := range ProvenanceRoles {
 		ref, ok := m.ImageDigests[role]
