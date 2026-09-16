@@ -106,6 +106,24 @@ ANSWER: L1 -- the topologies sustain different loads
 
 Seven cells, one repetition each, terminated by the wrapper's own exit path; no orphaned instance or volume.
 
+### The repetition the rules required
+
+Bought the same day, `LADDER="skip 2.31:0.289 4.61:0.289"` so the rung numbers hold their positions. Five cells, 68 minutes, **$0.77**.
+
+| cell | first run | repetition | difference |
+| --- | ---: | ---: | ---: |
+| rung02-`timeSlicing` | **130.3 ms met** | **130.8 ms met** | 0.5 ms |
+| rung03-`timeSlicing` | 142.4 ms **BREACH** | 142.2 ms **BREACH** | 0.2 ms |
+| rung02-`shared` | 1,744.9 ms BREACH | 1,730.6 ms BREACH | 14.3 ms |
+| rung03-`shared` | 1,727.2 ms BREACH | 1,746.9 ms BREACH | 19.7 ms |
+| rung03-R1 baseline | 62.9 ms met | 63.1 ms met | 0.2 ms |
+
+**No verdict moved.** The two cells that set the bracket sit 8.7 ms and 3.4 ms from the 139.0 ms target, and the repetition moved them by 0.5 ms and 0.2 ms — an order of magnitude less than the distance being judged. `ANSWER: L1` again, from an independent measurement. The contender completed 139 of 139 in every contended cell of both runs, with no shed and no timeout.
+
+**The instrument still prints `rungs the pre-registration requires a repetition of: [2 3]`**, and that is correct: the rule is about how close a cell lands to the target, not about how many times it has been measured. What has changed is that two independent runs now agree; the rule keeps pointing at these rungs because they remain the close ones.
+
+**The provenance fix is verified on a paid run.** All five manifests record `gatewaySHA: 334f1b3e90288c191b2bf1ee5dea9f536f66f54d`, matching the commit the wrapper shipped, where the first run wrote `unknown` seven times.
+
 ## What was decided before any data
 
 The arrival model, the contender rate and why 0.289 rather than another rate in the 139-offer range, that the premium rates are the down ladder's so the comparison changes one thing, the measured offer counts, that `PREMIUM_WEIGHT` and `PROBE_WEIGHT` are fixed at 1 and 0, and that this study does not stand in for the down ladder's owed repetition.
