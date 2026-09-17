@@ -197,11 +197,33 @@ jobs:
         if: always()
         run: |
           set +e
-          VPC=$(aws ec2 describe-vpcs \
+          # Every query's exit status is recorded, not just its output.
+          #
+          # This block read only the captured strings, so a call that FAILED -- expired credentials, a denied
+          # action, a throttle -- returned an empty string and was indistinguishable from "that resource does
+          # not exist". Replacing all seven aws calls with one that writes AccessDenied and returns 254 still
+          # printed "no residue" and exited 0. A teardown backstop that cannot tell "I looked and found
+          # nothing" from "I could not look" is the defect class this repository keeps finding, and it was
+          # sitting in the step that decides whether anything is still billing.
+          #
+          # The failures go to a file rather than a variable because each query runs in a command
+          # substitution, and a subshell's assignment does not reach this one.
+          FAILLOG="$(mktemp)"
+          q() {
+            label="$1"; shift
+            out=$("$@" 2>&1); rc=$?
+            if [ "$rc" -ne 0 ]; then
+              printf '%s\n' "$label" >>"$FAILLOG"
+              printf '::error::%s query failed (rc=%s): %s\n' "$label" "$rc" "$out" >&2
+              return 0
+            fi
+            printf '%s' "$out"
+          }
+          VPC=$(q vpc aws ec2 describe-vpcs \
             --filters "Name=tag:Name,Values=gpu-platform-vpc" \
             --query 'Vpcs[].VpcId' --output text)
-          EC2=$(aws ec2 describe-instances --filters 'Name=tag:project,Values=gpu-platform-control-plane' 'Name=instance-state-name,Values=pending,running,stopping,stopped' --query 'Reservations[].Instances[].InstanceId' --output text)
-          EBS=$(aws ec2 describe-volumes --filters 'Name=tag:project,Values=gpu-platform-control-plane' --query 'Volumes[].VolumeId' --output text)
+          EC2=$(q ec2 aws ec2 describe-instances --filters 'Name=tag:project,Values=gpu-platform-control-plane' 'Name=instance-state-name,Values=pending,running,stopping,stopped' --query 'Reservations[].Instances[].InstanceId' --output text)
+          EBS=$(q ebs aws ec2 describe-volumes --filters 'Name=tag:project,Values=gpu-platform-control-plane' --query 'Volumes[].VolumeId' --output text)
           # Scoped to this project's tag, for the reason the load-balancer query above was scoped to this VPC.
           #
           # Both queries used to look at the whole account. An unrelated NAT gateway or a single idle EIP
@@ -212,13 +234,13 @@ jobs:
           # The trade is a false negative if tagging ever lapses: an untagged NAT would go unseen. That is
           # the same assumption the EC2 and EBS lines above already make, and terraform applies
           # project=gpu-platform-control-plane to both resources (verified in the plan, not assumed).
-          NAT=$(aws ec2 describe-nat-gateways --filter 'Name=tag:project,Values=gpu-platform-control-plane' 'Name=state,Values=pending,available,deleting' --query 'NatGateways[].NatGatewayId' --output text)
-          EIP=$(aws ec2 describe-addresses --filters 'Name=tag:project,Values=gpu-platform-control-plane' --query 'Addresses[?AssociationId==null].AllocationId' --output text)
+          NAT=$(q nat aws ec2 describe-nat-gateways --filter 'Name=tag:project,Values=gpu-platform-control-plane' 'Name=state,Values=pending,available,deleting' --query 'NatGateways[].NatGatewayId' --output text)
+          EIP=$(q eip aws ec2 describe-addresses --filters 'Name=tag:project,Values=gpu-platform-control-plane' --query 'Addresses[?AssociationId==null].AllocationId' --output text)
           LB=""
           ENI=""
           if [ -n "$VPC" ]; then
-            LB=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?VpcId=='$VPC'].LoadBalancerArn" --output text)
-            ENI=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC" --query 'NetworkInterfaces[].NetworkInterfaceId' --output text)
+            LB=$(q elb aws elbv2 describe-load-balancers --query "LoadBalancers[?VpcId=='$VPC'].LoadBalancerArn" --output text)
+            ENI=$(q eni aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC" --query 'NetworkInterfaces[].NetworkInterfaceId' --output text)
           fi
 
           echo "VPC:               ${VPC:-<none>}"
@@ -228,6 +250,19 @@ jobs:
           echo "Unassociated EIPs: ${EIP:-<none>}"
           echo "Load balancers:    ${LB:-<none>}"
           echo "Network ifaces:    ${ENI:-<none>}"
+
+          # An empty answer from a query that FAILED is not an empty answer.
+          #
+          # This runs before the residue verdict below, because "nothing came back" is what a clean account
+          # and a broken credential both look like from here, and only one of them means the teardown is done.
+          FAILED="$(tr '\n' ' ' <"$FAILLOG")"
+          rm -f "$FAILLOG"
+          if [ -n "$FAILED" ]; then
+            echo "::error::residue verification did not complete: these queries failed:$FAILED"
+            echo "This is NOT a report of no residue -- nothing above says whether anything is still billing."
+            echo "Re-run once the credential or permission is fixed, or check by hand against the break-glass runbook in docs/09."
+            exit 1
+          fi
 
           # A check that cannot fail is not a check.
           #

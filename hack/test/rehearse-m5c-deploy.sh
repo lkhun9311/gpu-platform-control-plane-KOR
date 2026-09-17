@@ -16,6 +16,13 @@
 # a stub standing where vLLM would be. If a tenant's request comes back from the engine its policy points
 # at, the routing this matrix is built on works.
 #
+# It also rehearses what a DEPLOYED gateway owes its tenants, which routing alone does not answer: that an
+# unidentified request is refused, that one tenant exhausting its bucket does not take the other down, that a
+# backend dying and coming back is survivable, and that restarting the gateway restores routing. Each of
+# those is asserted from evidence the cluster produces -- a status code the pipeline only emits on that
+# branch, or a per-engine counter -- rather than from a 200, because a 200 is also what a broken split
+# returns.
+#
 # WHAT IT DOES NOT REHEARSE, stated so it is not mistaken for covered
 #
 #   * Anything about a card. No driver, no real device plugin, no time-slicing, no MPS, no vLLM. The fake
@@ -23,7 +30,8 @@
 #     the engine Pods schedule at all.
 #   * The `shared` vs split TOPOLOGY. Both stub engines are ordinary Pods; what is being checked is that the
 #     gateway routes each tenant to the engine its policy names, which is the mechanism the arms vary.
-#   * Any number. Nothing here measures latency, and nothing it prints belongs in a write-up.
+#   * Any number. Nothing here measures latency, and nothing it prints belongs in a write-up. The recovery
+#     check times a Pod coming back on kind, which is a fact about kind and not a service-level claim.
 #
 # It is the counterpart of hack/test/rehearse-bringup.sh, which covers the cluster bring-up of the device
 # session for the same reason and after the same kind of loss.
@@ -332,13 +340,147 @@ b_served=$(served "$NS_B" vllm-shared-b)
 say "  $NS_A/vllm-shared-a served $a_served"
 say "  $NS_B/vllm-shared-b served $b_served"
 
-case "$a_served:$b_served" in
-  1:1) say "each tenant reached its own engine" ;;
-  unknown:*|*:unknown)
+# One comparison, in one place, called twice: once on what the cluster reported and once on counters that
+# describe a broken split.
+#
+# The self-check used to RE-STATE the comparison against the literal "1:0" instead of calling it. That is a
+# different piece of code, so breaking the real arms left the self-check printing success -- the line whose
+# whole job is to prove the check can fail could not fail either. It is the defect it was written to catch.
+split_verdict() {
+  case "$1:$2" in
+    unknown:*|*:unknown) printf 'unreadable' ;;
+    1:1)                 printf 'separated' ;;
+    *)                   printf 'shared' ;;
+  esac
+}
+
+case "$(split_verdict "$a_served" "$b_served")" in
+  separated) say "each tenant reached its own engine" ;;
+  unreadable)
     fail "could not read one engine's request count, so this rehearsal cannot say the tenants were separated. Two 200s alone are also what a single shared engine returns." ;;
   *)
     fail "the two tenants did not land one per engine: $NS_A served $a_served and $NS_B served $b_served against one request each. If both landed on one engine the split arms would be the shared arm under another name, and every latency number would be attributed to a topology that was never deployed." ;;
 esac
 
-say "REHEARSAL PASSED: both tenants routed to the engine their policy names, on a real cluster."
+[ "$(split_verdict 1 0)" = "shared" ] \
+  || fail "the split verdict accepted 1:0, which is both tenants on one engine"
+[ "$(split_verdict unknown 1)" = "unreadable" ] \
+  || fail "the split verdict read an unreadable counter as a result"
+[ "$(split_verdict 1 1)" = "separated" ] \
+  || fail "the split verdict rejected 1:1, which is the case this rehearsal passes on"
+say "self-check: the split verdict rejects a broken split and an unreadable count"
+
+# 2. AN UNIDENTIFIED REQUEST IS REFUSED, AND ONE TENANT'S BUCKET IS NOT THE OTHER'S.
+#
+# Routing says which engine answers. It says nothing about who may ask, and the paid runs depend on both:
+# the replay carries per-tenant keys, and a run whose gateway served an unknown key would be measuring
+# traffic the study never authorised.
+say "credentials and rate-limit isolation"
+code=$(probe "not-a-real-key")
+[ "$code" = "401" ] || fail "an unknown API key got HTTP $code, not 401. The gateway's pipeline refuses an unidentified request before it reaches a policy, so anything else means auth is not in the path it is documented to be in."
+say "  unknown key -> HTTP 401"
+
+# A bucket small enough that the second request in a second cannot fit: rpm 6 refills one token every ten
+# seconds and burst 1 holds one. The policy is patched rather than created so the gateway sees a CHANGE,
+# which is the path a paid run takes when a tenant's limit is tightened mid-study.
+k patch gpuquotapolicy m5c-premium --type=merge -p '{"spec":{"rateLimit":{"requestsPerMinute":6,"burst":1}}}' >/dev/null \
+  || fail "could not patch a rate limit onto m5c-premium"
+
+# Polled, not slept. The gateway reads policies through a watch cache, so the propagation delay is whatever
+# the cache takes; a fixed sleep would either be slower than needed or would fail on a slow machine and read
+# as a rate-limiter defect.
+limited=0
+for _ in $(seq 1 30); do
+  if [ "$(probe premium-key)" = "429" ]; then limited=1; break; fi
+  sleep 1
+done
+[ "$limited" = "1" ] || fail "premium never hit 429 within 30s of its policy gaining requestsPerMinute=6, burst=1. Either the policy change never reached the gateway or the limiter is not consulted, and a paid run would have served a tenant far past the share its policy names."
+say "  premium over its bucket -> HTTP 429"
+
+# The point of the whole check: B must be unaffected while A is throttled.
+code=$(probe standard-key)
+[ "$code" = "200" ] || fail "standard got HTTP $code while premium was rate-limited. One tenant's exhausted bucket took the other down, which is the failure the per-tenant limiter exists to prevent."
+say "  standard, during premium's throttling -> HTTP 200"
+
+k patch gpuquotapolicy m5c-premium --type=merge -p '{"spec":{"rateLimit":null}}' >/dev/null \
+  || fail "could not remove the rate limit from m5c-premium"
+
+# 3. A BACKEND DIES AND COMES BACK, AND THE OTHER TENANT DOES NOT NOTICE.
+#
+# The stub counts requests in process memory, so a recreated Pod starts from zero. That is why recovery is
+# judged by the engine answering again rather than by a counter that survived -- a counter that survived
+# would mean the Pod never actually went.
+say "backend failure and recovery"
+old_uids=$(k get pod -n "$NS_A" -l engine=vllm-shared-a -o jsonpath='{.items[*].metadata.uid}' 2>/dev/null || true)
+[ -n "$old_uids" ] \
+  || fail "premium's engine had no Pod to delete, so this check would have timed the recovery of something that was never running."
+k delete pod -n "$NS_A" -l engine=vllm-shared-a --wait=false >/dev/null 2>&1 \
+  || fail "could not delete premium's engine Pod"
+# Recovery is the OLD Pod being gone and a NEW one Ready and answering -- not the first 200.
+#
+# The delete does not wait, so the terminating Pod keeps serving until it finishes, and this loop used to
+# accept that answer and break out on it: a Pod that had not yet left was recorded as "recovered in 0s".
+# Breaking early also ended the other tenant's observation, so "standard served throughout" could be a single
+# request rather than a window.
+b_failures=0
+b_checks=0
+after=0
+recovered=""
+t0=$(date +%s)
+for _ in $(seq 1 90); do
+  b_checks=$(( b_checks + 1 ))
+  [ "$(probe standard-key)" = "200" ] || b_failures=$(( b_failures + 1 ))
+  now_uids=$(k get pod -n "$NS_A" -l engine=vllm-shared-a -o jsonpath='{.items[*].metadata.uid}' 2>/dev/null || true)
+  gone=1
+  for u in $old_uids; do
+    case " $now_uids " in *" $u "*) gone=0 ;; esac
+  done
+  ready=$(k get pod -n "$NS_A" -l engine=vllm-shared-a \
+    -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null \
+    | grep -c '^True$' || true)
+  if [ -z "$recovered" ] && [ "$gone" = "1" ] && [ "${ready:-0}" -ge 1 ] && [ "$(probe premium-key)" = "200" ]; then
+    recovered=$(( $(date +%s) - t0 ))
+  fi
+  # Keep watching the other tenant past the replacement. What this checks for is one backend's churn reaching
+  # the other, and that does not have to land on the second the new Pod turns Ready.
+  if [ -n "$recovered" ]; then
+    after=$(( after + 1 ))
+    if [ "$after" -ge 5 ]; then break; fi
+  fi
+  sleep 1
+done
+[ -n "$recovered" ] \
+  || fail "premium's engine did not come back within 90s of its Pod being deleted: either the old Pod was still there, or no replacement reported Ready, or it did not answer. On a rented card this is a cell that reports a censored tail for a backend that was simply gone."
+say "  premium recovered in ${recovered}s (old Pod gone, replacement Ready, engine answering)"
+[ "$b_failures" = "0" ] \
+  || fail "standard saw $b_failures failed request(s) across $b_checks probes while premium's engine was being replaced. The two tenants are meant to be separated by namespace and policy, so one backend's restart must not reach the other."
+say "  standard served throughout: $b_checks probes, 0 failures"
+
+# 4. THE GATEWAY ITSELF RESTARTS.
+#
+# Every paid run restarts it at least once -- the api-keys Secret is applied after the Deployment -- so
+# "routing works after a restart" is load-bearing rather than hypothetical.
+say "gateway restart"
+k rollout restart deploy/gateway -n "$NS_A" >/dev/null || fail "could not restart the gateway"
+k rollout status deploy/gateway -n "$NS_A" --timeout=180s >/dev/null \
+  || fail "the gateway did not come back after a restart: $(k logs -n "$NS_A" deploy/gateway --tail=20 2>&1)"
+
+# The old tunnel died with the old Pod. Rebuilding it before probing is what keeps this check about routing
+# instead of about a stale port-forward.
+kill "$PF_PID" 2>/dev/null || true
+k port-forward -n "$NS_A" deploy/gateway 18080:8080 >/dev/null 2>&1 &
+PF_PID=$!
+# shellcheck disable=SC2064
+trap "kill $PF_PID 2>/dev/null; cleanup" EXIT
+sleep 3
+
+for key in premium-key standard-key; do
+  code=$(probe "$key")
+  [ "$code" = "200" ] || fail "$key got HTTP $code after the gateway restarted. Routing did not resume, and a paid run applies its keys and restarts the gateway before the first cell."
+done
+say "  both tenants routed again after the restart"
+
+say "REHEARSAL PASSED: both tenants routed to the engine their policy names, unidentified requests were"
+say "refused, one tenant's exhausted bucket left the other serving, a deleted backend came back, and routing"
+say "resumed after a gateway restart -- on a real cluster."
 say "What this did NOT cover: the card, the sharing plugins, vLLM, and every number."
