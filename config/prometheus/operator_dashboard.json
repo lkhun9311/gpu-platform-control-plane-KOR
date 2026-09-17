@@ -64,13 +64,12 @@
        }
       ]
      },
-     "decimals": 0,
-     "noValue": "0"
+     "decimals": 0
     }
    },
    "targets": [
     {
-     "expr": "sum(controller_runtime_reconcile_errors_total{job=~\".*controller-manager.*\"})",
+     "expr": "(sum(controller_runtime_reconcile_errors_total{job=~\".*controller-manager.*\"})) or (0 * sum(up{job=~\".*controller-manager.*\"}))",
      "legendFormat": "errors",
      "refId": "A"
     }
@@ -136,13 +135,12 @@
    },
    "fieldConfig": {
     "defaults": {
-     "unit": "reqps",
-     "noValue": "0"
+     "unit": "reqps"
     }
    },
    "targets": [
     {
-     "expr": "sum by (controller) (rate(controller_runtime_reconcile_errors_total{job=~\".*controller-manager.*\"}[5m]))",
+     "expr": "(sum by (controller) (rate(controller_runtime_reconcile_errors_total{job=~\".*controller-manager.*\"}[5m]))) or (0 * sum(up{job=~\".*controller-manager.*\"}))",
      "legendFormat": "{{controller}}",
      "refId": "A"
     }
@@ -196,14 +194,13 @@
    },
    "targets": [
     {
-     "expr": "sum by (action) (gpuplatform_nodehealth_taint_total)",
+     "expr": "(sum by (action) (gpuplatform_nodehealth_taint_total)) or (0 * sum(up{job=~\".*controller-manager.*\"}))",
      "legendFormat": "{{action}}",
      "refId": "A"
     }
    ],
    "fieldConfig": {
     "defaults": {
-     "noValue": "0",
      "decimals": 0
     }
    }
@@ -224,14 +221,13 @@
    },
    "targets": [
     {
-     "expr": "sum(gpuplatform_gpuquotapolicy_drift_corrected_total)",
+     "expr": "(sum(gpuplatform_gpuquotapolicy_drift_corrected_total)) or (0 * sum(up{job=~\".*controller-manager.*\"}))",
      "legendFormat": "corrected",
      "refId": "A"
     }
    ],
    "fieldConfig": {
     "defaults": {
-     "noValue": "0",
      "decimals": 0
     }
    }
@@ -283,14 +279,13 @@
    },
    "targets": [
     {
-     "expr": "sum by (phase) (gpuplatform_mltrainingjob_phase_total)",
+     "expr": "(sum by (phase) (gpuplatform_mltrainingjob_phase_total)) or (0 * sum(up{job=~\".*controller-manager.*\"}))",
      "legendFormat": "{{phase}}",
      "refId": "A"
     }
    ],
    "fieldConfig": {
     "defaults": {
-     "noValue": "0",
      "decimals": 0
     }
    }
@@ -324,13 +319,12 @@
        }
       ]
      },
-     "noValue": "0",
      "decimals": 0
     }
    },
    "targets": [
     {
-     "expr": "sum by (reason) (gpuplatform_mltrainingjob_failed_total)",
+     "expr": "(sum by (reason) (gpuplatform_mltrainingjob_failed_total)) or (0 * sum(up{job=~\".*controller-manager.*\"}))",
      "legendFormat": "{{reason}}",
      "refId": "A"
     }
@@ -385,13 +379,12 @@
    },
    "fieldConfig": {
     "defaults": {
-     "unit": "short",
-     "noValue": "0"
+     "unit": "short"
     }
    },
    "targets": [
     {
-     "expr": "sum by (reason) (increase(gpuplatform_mltrainingjob_admit_to_running_unobserved_total[10m]))",
+     "expr": "(sum by (reason) (increase(gpuplatform_mltrainingjob_admit_to_running_unobserved_total[10m]))) or (0 * sum(up{job=~\".*controller-manager.*\"}))",
      "legendFormat": "{{reason}}",
      "refId": "A"
     }
@@ -460,8 +453,7 @@
    },
    "fieldConfig": {
     "defaults": {
-     "unit": "reqps",
-     "noValue": "0"
+     "unit": "reqps"
     }
    },
    "targets": [
@@ -488,8 +480,7 @@
    },
    "fieldConfig": {
     "defaults": {
-     "unit": "s",
-     "noValue": "0"
+     "unit": "s"
     }
    },
    "targets": [
@@ -521,8 +512,7 @@
    },
    "fieldConfig": {
     "defaults": {
-     "unit": "reqps",
-     "noValue": "0"
+     "unit": "reqps"
     }
    },
    "targets": [
@@ -554,8 +544,7 @@
    },
    "fieldConfig": {
     "defaults": {
-     "unit": "reqps",
-     "noValue": "0"
+     "unit": "reqps"
     }
    },
    "targets": [
