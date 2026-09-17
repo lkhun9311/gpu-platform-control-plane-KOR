@@ -2,8 +2,13 @@ name: Destroy
 
 on:
   schedule:
-    # Nightly at 03:00 UTC so ephemeral clusters do not survive overnight.
-    - cron: "0 3 * * *"
+    # 18:00 UTC, which is 03:00 in Asia/Seoul, so ephemeral clusters do not survive overnight.
+    #
+    # This ran at 03:00 UTC until 2026-09-17, and the line above it claimed "overnight" the whole time. That
+    # is 12:00 in Asia/Seoul -- the middle of the working day this account is used from. The backstop's most
+    # likely victim was therefore a cluster someone was still working in, and a teardown that destroys what
+    # you are using teaches you to disarm it, which is the one outcome a cost backstop cannot afford.
+    - cron: "0 18 * * *"
   workflow_dispatch:
 
 permissions: {}
