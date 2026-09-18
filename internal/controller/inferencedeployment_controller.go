@@ -34,7 +34,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	platformv1 "github.com/lkhun9311/gpu-mlops-platform-control-plane/api/v1"
 )
@@ -337,6 +339,46 @@ func (r *InferenceDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error
 		For(&platformv1.InferenceDeployment{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
+		// The queue label this controller writes comes from a GPUQuotaPolicy, so a policy change is a change
+		// to the Deployment — and nothing here was listening for one. For and the two Owns watches fire on the
+		// serving objects alone.
+		Watches(&platformv1.GPUQuotaPolicy{}, handler.EnqueueRequestsFromMapFunc(r.mapPolicyToInferenceDeployments)).
 		Named("inferencedeployment").
 		Complete(r)
+}
+
+// mapPolicyToInferenceDeployments enqueues every InferenceDeployment whose queue label this policy decides.
+//
+// servingQueue reads the namespace's policies on every reconcile, but until this watch existed nothing
+// re-reconciled when one of them changed. Creating a policy after the serving workload, or turning
+// trainingQuota off, left the Deployment carrying a queue label the policy no longer justifies — or missing
+// one it now grants — until an unrelated event happened to requeue it. The reconciler was correct and simply
+// never ran.
+//
+// The namespace is the policy's TARGET rather than the policy's own: a GPUQuotaPolicy governs
+// spec.targetNamespace and may live somewhere else entirely.
+func (r *InferenceDeploymentReconciler) mapPolicyToInferenceDeployments(ctx context.Context, obj client.Object) []reconcile.Request {
+	policy, ok := obj.(*platformv1.GPUQuotaPolicy)
+	if !ok {
+		// Another type reaching this mapper means the watch was wired to the wrong object, and guessing a
+		// namespace from it would enqueue work for resources this policy does not govern.
+		return nil
+	}
+	var list platformv1.InferenceDeploymentList
+	if err := r.List(ctx, &list, client.InNamespace(policy.Spec.TargetNamespace)); err != nil {
+		// A map function has no error return, so the only alternative to logging is dropping the failure on
+		// the floor — and the symptom of that is a queue label that stays wrong with nothing anywhere saying
+		// which policy stopped being watched.
+		logf.FromContext(ctx).Error(err, "Could not list InferenceDeployments for GPUQuotaPolicy event",
+			"policy", policy.Name, "targetNamespace", policy.Spec.TargetNamespace)
+		return nil
+	}
+	reqs := make([]reconcile.Request, 0, len(list.Items))
+	for i := range list.Items {
+		reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{
+			Name:      list.Items[i].Name,
+			Namespace: list.Items[i].Namespace,
+		}})
+	}
+	return reqs
 }

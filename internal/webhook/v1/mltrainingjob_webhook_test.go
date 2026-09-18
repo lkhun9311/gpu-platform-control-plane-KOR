@@ -172,6 +172,14 @@ func (erroringClient) Get(_ context.Context, _ client.ObjectKey, _ client.Object
 	return errors.New("apiserver unreachable")
 }
 
+// List fails the same way, because the GPU guards reach the apiserver through it.
+//
+// Without this the embedded nil client.Client answers the call and the test passes for the wrong reason —
+// or panics — which is the shape of a fail-closed test that never exercised the path it names.
+func (erroringClient) List(_ context.Context, _ client.ObjectList, _ ...client.ListOption) error {
+	return errors.New("apiserver unreachable")
+}
+
 func TestValidateUpdateFailsClosedWhenTheJobLookupFails(t *testing.T) {
 	// A rule that quietly stopped applying whenever the lookup failed would let through exactly the edits it
 	// exists to catch, and it would do so at the least visible moment.
