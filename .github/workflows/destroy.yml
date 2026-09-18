@@ -118,7 +118,15 @@ jobs:
             echo "reachable=true" >> "$GITHUB_OUTPUT"
           else
             echo "reachable=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Kubernetes API is not reachable from this runner. The cluster endpoint is private and this runner is outside the VPC."
+            # Report the symptom, not a cause.
+            #
+            # This said "the cluster endpoint is private and this runner is outside the VPC", which was wrong
+            # on 2026-09-18: the endpoint's public half was open, to one /32 that does not include a
+            # GitHub-hosted runner. The probe turns every non-zero exit of `kubectl get --raw /readyz` into
+            # reachable=false and discards the error, so it cannot tell a CIDR refusal from an auth failure,
+            # a DNS failure or a readiness failure. Naming one of them in the warning sends the reader after
+            # the wrong thing.
+            echo "::warning::The Kubernetes API probe failed from this runner (kubectl get --raw /readyz). Possible causes include a private-only endpoint, a public endpoint restricted to CIDRs that exclude this runner, authentication or authorization failure, or the API not being ready."
             echo "::warning::Skipping the ordered Argo teardown. terraform destroy still runs; the residue check at the end is the backstop."
             echo "::warning::To restore ordered teardown, run this workflow from a VPC-attached runner or open the endpoint to a known CIDR first."
           fi
