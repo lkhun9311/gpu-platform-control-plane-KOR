@@ -217,9 +217,25 @@ func (v *GPUPodValidator) Handle(ctx context.Context, req admission.Request) adm
 			"establish whether pod %s/%s passes through a queue: %w", pod.Namespace, pod.Name, err))
 	}
 	if !queued {
-		return admission.Denied(fmt.Sprintf(
-			"the Job that created this Pod carries no %s, so the %d %s it asks for would be charged to no "+
-				"tenant's budget", kueueQueueLabel, devices, gpuResource))
+		// "Charged to no tenant's budget" is true only where Kueue holds the budget.
+		//
+		// Where the policy leaves trainingQuota off, the namespace ResourceQuota still caps
+		// requests.nvidia.com/gpu, and this Pod is counted against it the moment it is created. The Job guard
+		// admits such a Job for the same reason; refusing its Pod here would move the refusal rather than
+		// remove it, and the tenant would have no queue to name in either place.
+		//
+		// This is reached only by the Job controller — the requester check above admits nothing else — so it
+		// widens nothing for a bare Pod or a serving Pod, both of which are still refused further up.
+		metered, err := meteredByResourceQuota(ctx, v.Reader, pod.Namespace)
+		if err != nil {
+			return admission.Errored(http.StatusInternalServerError, fmt.Errorf(
+				"establish how namespace %q meters GPUs: %w", pod.Namespace, err))
+		}
+		if !metered {
+			return admission.Denied(fmt.Sprintf(
+				"the Job that created this Pod carries no %s, so the %d %s it asks for would be charged to no "+
+					"tenant's budget", kueueQueueLabel, devices, gpuResource))
+		}
 	}
 	return admission.Allowed("")
 }
