@@ -5,7 +5,12 @@ lives here. After install, Argo CD owns in-cluster resources via the app-of-apps
 in `config/argocd`, and this state is left alone so routine cluster plan/apply
 does not fight Argo CD's drift.
 
-Nothing here is provisioned yet. This is the documented procedure for when it is.
+This root **has been applied**: its state carries one `helm_release.argocd` and the outputs
+`argocd_chart_version` and `argocd_namespace`. The cluster it was installed into is gone, so what the state
+describes no longer exists — `destroy.yml` skips the Helm teardown whenever the Kubernetes API is
+unreachable from the runner, which is how a state outlives its cluster. Reusing this state against a new
+cluster would compare an old Helm record with a new API; it has not been cleaned up, and doing so is a
+separate decision from the procedure below.
 
 ## Run once
 

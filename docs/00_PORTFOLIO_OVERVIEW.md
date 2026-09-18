@@ -12,9 +12,12 @@
 > **Built, and run for real on kind:** failure & recovery (M7) — a `WorkloadRun` CRD, a controller and a
 > driver, with a recorded run in which deleting a serving Pod produced a recovery trail nobody wrote by
 > hand. **Designed only — no CRD, no code:** `GpuSharingBenchmark` / performance isolation (though its
-> sizing arithmetic and run script exist), the SQLite ledger, the `platformctl` CLI. **Applied before, not applied
-> now:** the `cluster` half of the AWS hosting path — its first apply failed on all four node groups against
-> an SCP deny, and its state was emptied on 2026-09-03 (`docs/09`). **Withdrawn once,
+> sizing arithmetic and run script exist), the SQLite ledger, the `platformctl` CLI. **Applied and destroyed in one cycle, not
+> applied now:** the `cluster` half of the AWS hosting path — its first apply, on 2026-08-31, failed on all
+> four node groups against an SCP deny; on 2026-09-18 a full apply of 96 resources succeeded and a
+> hand-dispatched teardown removed all 96, verified by resource ID
+> (`hack/eks-cluster-cycle-20260918.md`). That cluster carried no GPU node, no load balancer and no Argo CD,
+> so the teardown's hard cases are still untested. **Withdrawn once,
 > then re-measured, then observed on hardware:** the queuelab reclaim result. Twelve runs on a kind cluster
 > carried the banner `device: NOT OBSERVED`; a $3.90 session then reproduced it on four A10Gs, eight runs
 > accepted by `-require-device`, and the banner is gone. Owner wait separates by 28.8 s there against 29.0 s
