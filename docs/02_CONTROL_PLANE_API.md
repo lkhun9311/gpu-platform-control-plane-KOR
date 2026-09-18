@@ -7,7 +7,7 @@
 > `GpuSharingBenchmark` is **designed only — no CRD**, though its sizing arithmetic and run script exist.
 > `WorkloadRun` is **built and has been run for real on kind** (M7): a CRD, a controller, a driver, and a
 > recorded run in which deleting a serving Pod produced a recovery trail nobody wrote by hand. The gateway
-> (Layer 4, M4-b) is **built and unit-tested but never deployed**. The M5 KV-cache-aware admission guard is
+> (Layer 4, M4-b) is **built, unit-tested and deployed on kind but never on EKS**. The M5 KV-cache-aware admission guard is
 > **built, and MEASURED on a paid GPU**: four repetitions on 2026-09-03 and an engine-level scheduler microtest on 2026-09-04. The guard failed — 83.7x against a pre-registered 1.25x premium-tail target — and the harness declared the run invalid rather than reporting a protection claim. Every GPU in the kind clusters is simulated by a fake device plugin. The GPUs in the paid EC2 sessions —
 > more than thirty of them since 2026-09-02 — were real.
 
@@ -18,7 +18,7 @@ The control plane is a set of CRDs in API group `platform.lkhun9311.github.io/v1
 | CRD                   | Role                                                               | Tier                                       | Implemented today (2026-07)                                                                                                      |
 |-----------------------|--------------------------------------------------------------------|--------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------|
 | `InferenceDeployment` | model-serving intent → Deployment/Service/KEDA                     | Core                                       | type + serving reconciler (Deployment/Service, phase ladder) — M4-a merged                                                       |
-| `GPUQuotaPolicy`      | per-tenant GPU quota / rate limit → ResourceQuota + gateway config | Core                                       | type + reconciler (ResourceQuota sync, drift recovery) — M3 merged; `rateLimit` field consumed by the M4-b gateway — **M4-b merged, gateway built and unit-tested, never deployed** |
+| `GPUQuotaPolicy`      | per-tenant GPU quota / rate limit → ResourceQuota + gateway config | Core                                       | type + reconciler (ResourceQuota sync, drift recovery) — M3 merged; `rateLimit` field consumed by the M4-b gateway — **M4-b merged, gateway built, unit-tested and deployed on kind, never on EKS** |
 | `NodeHealth`          | GPU node intake & operational state                                | Core                                       | type + reconciler (observe + taint, finalizer, drift recovery) — M2/M3 merged                                                    |
 | `GpuSharingBenchmark` | declarative noisy-neighbor / sharing benchmark                     | Core (killer feature)                      | designed — spec `2026-07-04-gpusharingbenchmark-crd-design.md`; no code yet (M5)                                                 |
 | `WorkloadRun`         | record a workload execution as evidence                            | Evidence / CRD-lite                        | sketched below only — no spec or code yet (M7)                                                                                   |

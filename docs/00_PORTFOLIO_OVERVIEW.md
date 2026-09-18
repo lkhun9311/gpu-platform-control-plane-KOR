@@ -5,7 +5,7 @@
 > **Built:** `NodeHealth` (node readiness — but the CR is hand-created and no GPU fault signal reaches it:
 > nothing Xid or ECC exists at all, and the DCGM code that does exist is a utilisation reader the queuelab
 > uses, not a health input), `GPUQuotaPolicy` (quota), `InferenceDeployment` (serving), `MLTrainingJob` +
-> Kueue (training admission). **Built and unit-tested, never deployed:** the gateway. **Built and MEASURED
+> Kueue (training admission). **Built, unit-tested and deployed on kind, never on EKS:** the gateway. **Built and MEASURED
 > on a paid GPU:** the M5-b admission guard and benchmark harness — four repetitions on 2026-09-03 and an
 > engine-level scheduler microtest on 2026-09-04. The guard failed: 83.7x against a pre-registered 1.25x
 > premium-tail target, and the harness declared the run invalid rather than reporting a protection claim.
@@ -59,7 +59,7 @@ A multi-tenant GPUaaS control plane that:
 | CRD                   | Role                                         | Status (2026-07)                                                                                                     |
 |-----------------------|----------------------------------------------|----------------------------------------------------------------------------------------------------------------------|
 | `InferenceDeployment` | declare a model-serving intent               | type + serving reconciler (Deployment/Service, phase ladder) — M4-a merged                                           |
-| `GPUQuotaPolicy`      | per-tenant GPU quota / rate limit            | type + reconciler (ResourceQuota sync, drift recovery) — M3 merged; `rateLimit` feeds the M4-b gateway — **M4-b merged, gateway built and unit-tested, never deployed** |
+| `GPUQuotaPolicy`      | per-tenant GPU quota / rate limit            | type + reconciler (ResourceQuota sync, drift recovery) — M3 merged; `rateLimit` feeds the M4-b gateway — **M4-b merged, gateway built, unit-tested and deployed on kind, never on EKS** |
 | `NodeHealth`          | GPU node intake and operational state        | type + reconciler (observe + taint, finalizer, drift recovery) — M2/M3 merged; **no GPU fault signal reaches it** — nothing Xid or ECC exists, and the DCGM code that does exist reads utilisation for the queuelab rather than health for this controller |
 | `GpuSharingBenchmark` | declare a noisy-neighbor / sharing benchmark | designed — spec `2026-07-04-gpusharingbenchmark-crd-design.md`; no code yet (M5)                                     |
 | `WorkloadRun`         | record a workload execution                  | sketched (doc 02) only; no spec or code yet (M7)                                                                     |
