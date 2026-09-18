@@ -1,8 +1,8 @@
 # AWS Infrastructure Architecture (M5-a / M5-b)
 
-> **Status (2026-09-18): `bootstrap` is applied; `cluster` is not applied now but has been; `argo-bootstrap` holds one applied release.** The state bucket, its KMS key, the GitHub OIDC provider, the three CI roles, the ECR repository and the budget exist in the project's AWS account (`ap-northeast-2`). No VPC, EKS cluster, node or NAT gateway exists today, and nothing is billing beyond a few cents of S3 and KMS.
+> **Status (2026-09-18): `bootstrap` is applied; `cluster` is not applied now but has been; `argo-bootstrap` holds one applied release.** The state bucket, its KMS key, the GitHub OIDC provider, the three CI roles, the ECR repository and the budget exist in the project's AWS account (`ap-northeast-2`). As verified at 03:37Z on 2026-09-18, immediately after that day's teardown, no EKS cluster, VPC, node, NAT gateway or EIP from this root existed — each checked by resource ID and exit code rather than by tag. What remains is `bootstrap`: one state bucket (3 objects), the KMS key, and two ECR repositories. This document does not state a dollar figure, because none has been read from billing data.
 >
-> This paragraph said "planned and never applied" until 2026-09-18, and the repository contradicted it in two places. `infra/aws/org/scp/README.md` records that **the first `terraform apply` on the cluster root failed on all four node groups** against an SCP that denied every `ec2:CreateLaunchTemplate` in the account (fixed in `63a625c`, 2026-08-31). The remote `cluster` state then held resources until 2026-09-03, when it was emptied; its object history shows 132,126 → 1,360 bytes across ten minutes that morning. **No record of a complete successful apply was found**, so what is established is that resources existed and were removed, not that a full apply ever finished. Today's plan is **96 resources**, not the 89 counted on 2026-08-27.
+> This paragraph said "planned and never applied" until 2026-09-18, and the repository contradicted it in two places. `infra/aws/org/scp/README.md` records that **the first `terraform apply` on the cluster root failed on all four node groups** against an SCP that denied every `ec2:CreateLaunchTemplate` in the account (fixed in `63a625c`, 2026-08-31). The remote `cluster` state then held resources until 2026-09-03, when it was emptied; its object history shows 132,126 → 1,360 bytes across ten minutes that morning. No record of a complete successful apply was found **at the time that search was made**. One exists now: on 2026-09-18 the root applied 96 resources without error and a hand-dispatched teardown destroyed all 96, with the before-and-after checked by resource ID ([record](../hack/eks-cluster-cycle-20260918.md)). The plan is **96 resources**, not the 89 counted on 2026-08-27. What the 2026-09-03 history shows is still only that resources existed and were removed — today's run demonstrates that a destroy produces that shrinking-state shape, which is not evidence about what produced it that morning.
 >
 > `argo-bootstrap` has been initialised **and applied**: its state carries `serial 5`, one `helm_release.argocd`, and the outputs `argocd_chart_version` and `argocd_namespace`, last written 2026-09-02. `destroy.yml` explains how a state can outlive its cluster — it skips the Helm teardown when the Kubernetes API is unreachable — but which run left this one behind is not established.
 >
@@ -18,14 +18,14 @@ GitHub repo (public — Argo CD reads it anonymously; source of truth)
   ├── infra.yml   ──(OIDC: plan role on PR / apply role on merge, manual gate)──> Terraform
   ├── gpu.yml     ──(workflow_dispatch: apply role, gpu_desired=0|1)──> GPU node group switch   [NOT WRITTEN]
   └── destroy.yml ──(nightly cron + workflow_dispatch: apply role)──>
-        delete Argo apps -> destroy argo-bootstrap state -> residue check -> destroy cluster state
+        [if API reachable] delete Argo apps -> destroy argo-bootstrap state -> destroy cluster state -> residue check
 
 Terraform (3 separate states; bootstrap starts on LOCAL state, then migrates into its own bucket)
   ├── bootstrap:      S3 state bucket (locks on <key>.tflock) + GitHub OIDC provider + ECR
   ├── cluster:        VPC + EKS (pinned recent version) + managed add-ons + node groups + IAM + access entries
   └── argo-bootstrap: initial Argo CD install only (run once, never on routine applies)
 
-VPC (3 AZ; nodes hold no public address)
+VPC (one subnet pair per AZ the instance types share; 8 subnets on 2026-09-18. Nodes hold no public address)
   ├── public subnet x3 (ELB-tagged, NO instances):
   │     NAT gateway (ONE, in AZ-a) + internet gateway route
   └── private subnet x3 (no auto public IP, default route -> NAT):
@@ -46,7 +46,7 @@ EKS (private endpoint always; public endpoint only for explicitly named CIDRs --
 Guardrails
   ├── TTL/owner tags on everything
   ├── budget alarm $10/day -> escalation; hard review at $30 cumulative
-  └── destroy failure = retry once -> residue inventory (EC2/ELB/EBS/ECR/CloudWatch/TF state) -> break-glass manual runbook
+  └── destroy failure = no retry; the residue check still runs and fails the job (it inspects EC2/EBS/NAT/EIP/ELB/ENI/VPC only — not ECR, CloudWatch or TF state)
 ```
 
 ## Terraform state layout
@@ -340,10 +340,10 @@ reviewer-free, so the reviewer gate can go back on `infra-apply` without costing
 
 | Workflow      | Trigger                            | Steps                                                                                                                                                                                   |                                                                                                                           |
 |---------------|------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------|
-| `ci.yml`      | push / PR                          | `go test` (envtest) → build **operator** image → push to ECR. The gateway now has a Dockerfile (`Dockerfile.gateway`) and manifests (`config/gateway/`), but `ci.yml` does not yet build or push a gateway image — that CI wiring has not been added.                                                      |                                                                                                                           |
+| `ci.yml`      | push / PR                          | `go test` (envtest) → build **operator** and **gateway** images → push both to ECR → open one digest-bump PR pinning both. This row said the gateway wiring "has not been added" until 2026-09-18, while `ci.yml` has had a `Build and push the gateway image` step and the row below said so.                                                      |                                                                                                                           |
 | `infra.yml`   | PR (plan) / merge (apply)          | `terraform plan` with plan role on PR; `apply` behind a manual-approval environment with apply role                                                                                     |                                                                                                                           |
 | `gpu.yml`     | `workflow_dispatch` only           | Gated apply of `gpu_desired=0\                                                                                                                                                          | 1` — the **only** actor that scales the GPU node group (no autoscaler by design: one auditable switch, ephemeral windows) |
-| `destroy.yml` | nightly cron + `workflow_dispatch` | Delete Argo apps → destroy `argo-bootstrap` state → residue check → destroy `cluster` state; on failure: retry once → residue inventory → break-glass runbook + budget-alarm escalation |                                                                                                                           |
+| `destroy.yml` | nightly cron + `workflow_dispatch` | The two Argo steps run **only if the Kubernetes API is reachable from the runner**, then destroy `cluster` state, then the residue check — which runs on `always()` and fails the job on any surviving resource. There is **no retry loop**: the workflow attempts each destroy once |                                                                                                                           |
 
 Deployment is **by digest**: CI pushes the image, then opens a PR bumping the digest in `config/`; Argo CD deploys what Git says. The ECR lifecycle policy expires only untagged/PR images — never a digest referenced from the default branch (lifecycle vs Git-pin conflict resolved by construction).
 
@@ -376,7 +376,7 @@ The repo is public, so Argo CD reads it anonymously — no deploy credential to 
 | Idle cost         | $0.263/hr — EKS control plane $0.100 + `t3.large` $0.104 + NAT gateway $0.059. All figures `ap-northeast-2`, AWS Pricing API, 2026-08-27                                                                          |
 | GPU cost          | `g5.xlarge` **Spot $0.357–0.424** (On-Demand $1.237) for M5-b/M5-c; `g4dn.12xlarge` **On-Demand $4.812** for queuelab. Existing only during a session — see the Spot split below                                  |
 | Budget alarm      | $10/day with escalation; hard review at $30 cumulative                                                                                                                                                           |
-| Scheduled destroy | `destroy.yml` nightly cron; failure path is operational, not just an alert: retry once → residue inventory (EC2, ELB, EBS, ECR, CloudWatch, orphaned TF state) → break-glass manual runbook                      |
+| Scheduled destroy | `destroy.yml` nightly cron at `0 18 * * *` (03:00 Asia/Seoul), with observed drift of hours. Failure path: **no retry**; the residue check runs regardless and fails the job on anything surviving. It looks at EC2, EBS, NAT, unassociated EIPs, ELBv2 and ENIs — **not** ECR, CloudWatch or orphaned TF state |
 | Residue controls  | TTL/owner tags, PVC/PV + LoadBalancer audit, ECR lifecycle (untagged/PR images only), CloudWatch log retention, snapshot cleanup                                                                                 |
 
 ### Why Spot for two GPU groups and not the third
@@ -488,8 +488,8 @@ the security it buys is already bought by the private subnets.
 | Layer                         | Status                                                                                             |
 |-------------------------------|----------------------------------------------------------------------------------------------------|
 | Terraform code (`infra/aws/`) | **Written** (`bootstrap`, `cluster`, `argo-bootstrap` states) and offline-validated. All three have been applied: `bootstrap` still is, `argo-bootstrap` holds one `helm_release.argocd`, and `cluster` held resources until 2026-09-03. This row said "never `terraform apply`'d" until 2026-09-18 |
-| GitHub workflows              | **Written** (`ci.yml`, `infra.yml`, `destroy.yml`, `lint.yml`, `test.yml`, `test-e2e.yml`) — never run against real AWS credentials or infrastructure. `gpu.yml`, the GPU node-group switch this document describes, is **designed only and does not exist** |
-| Gateway image                 | **Built and pushed by `ci.yml`** to its own ECR repository, with the digest pinned into `config/gateway/kustomization.yaml` in the same PR as the operator's. Never yet run against a real cluster |
+| GitHub workflows              | **Three of the six use real AWS credentials, and have for weeks.** `ci.yml` (637 runs) authenticates by OIDC, logs in to ECR and pushes both images — its only failing step is the digest-bump PR, which this repository's settings forbid. `infra.yml` (46 runs) has run `terraform plan` against the real account on pull requests since at least 2026-09-03; its **apply** job has never run, and is deliberately left unarmed. `destroy.yml` destroyed 96 real resources on 2026-09-18. `lint.yml`, `test.yml` and `test-e2e.yml` configure no AWS credentials at all. This row said "never run against real AWS credentials or infrastructure" until 2026-09-18, and a first correction that day replaced it with a claim that only `destroy.yml` had run — also wrong, and written from inference rather than from the run records. `gpu.yml`, the GPU node-group switch this document describes, is **designed only and does not exist** |
+| Gateway image                 | **Built and pushed by `ci.yml`** to its own ECR repository, with the digest pinned into `config/gateway/kustomization.yaml` in the same PR as the operator's. The gateway itself has run **on kind**, never on EKS — see `README.md` and `docs/05` |
 | Operator custom metrics       | **Implemented** (`internal/controller/metrics.go` — taints, degraded transitions, quota drift)     |
 | Everything in this doc        | Code written per this design (v3.2) and offline-validated. **`bootstrap` is applied**; `cluster` is planned at 96 resources (2026-09-18) and is not applied now, having held resources until 2026-09-03. The status line at the top of this document is the authority — this row contradicted it until 2026-08-29 on one point and until 2026-09-18 on another |
 
@@ -497,7 +497,7 @@ the security it buys is already bought by the private subnets.
 
 ```
 M5-a  0. bootstrap state (local -> migrate): S3 + GitHub OIDC + ECR            <- start here
-      1. cluster state: VPC (3 AZ, public + private) + NAT + EKS + add-ons + CPU node group + access entries
+      1. cluster state: VPC (one public + one private subnet per shared AZ; 8 on 2026-09-18) + NAT + EKS + add-ons + CPU node group + access entries
       2. ci.yml builds + pushes the operator image to ECR (gateway joins after M4-b)
       3. operator via Kustomize (plain apply first, then Argo CD)
       4. argo-bootstrap state + app-of-apps (crds/operator; profiles off)

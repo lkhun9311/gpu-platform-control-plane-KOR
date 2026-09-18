@@ -43,6 +43,7 @@ docs/superpowers/*
 !/hack/grace-holds-the-device.md
 !/hack/tenant-writable-fields.md
 !/hack/gpu-session-preregistration.md
+!/hack/eks-cluster-cycle-20260918.md
 !/docs/0[0-7]*.md
 !/docs/09*.md
 !/docs/10_WHAT_I_GOT_WRONG.md

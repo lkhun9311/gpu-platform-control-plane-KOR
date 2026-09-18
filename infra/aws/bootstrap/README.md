@@ -4,7 +4,10 @@ Creates the Terraform state backend (S3, locking on a state-adjacent object), th
 the CI IAM roles, and the ECR repository. This root is the chicken-and-egg base:
 it begins on local state, then migrates into the bucket it just created.
 
-Nothing here is provisioned yet. This is the documented procedure for when it is.
+This root **is applied**, and is the one piece of AWS that stays applied between sessions: the state bucket,
+its KMS key, the GitHub OIDC provider, the three CI roles, the ECR repositories and the budget. Everything
+else in `infra/aws/` is built ephemeral and torn down. The procedure below is how it was created and how it
+would be recreated, not a description of something that has yet to happen.
 
 ## One-time bootstrap
 
