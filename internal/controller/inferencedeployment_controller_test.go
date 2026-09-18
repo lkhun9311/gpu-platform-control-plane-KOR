@@ -18,7 +18,9 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -27,10 +29,88 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	platformv1 "github.com/lkhun9311/gpu-mlops-platform-control-plane/api/v1"
 )
+
+var _ = Describe("mapPolicyToInferenceDeployments", func() {
+	ctx := context.Background()
+
+	// The queue label this controller writes is decided by a GPUQuotaPolicy, and until the watch existed
+	// nothing re-reconciled when one changed. These specs pin the mapper; the Watches wiring itself is not
+	// covered, because the suite runs reconcilers directly rather than through a manager — the same limit the
+	// NodeHealth mapper's specs work within.
+	infd := func(name, ns string) *platformv1.InferenceDeployment {
+		return &platformv1.InferenceDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec: platformv1.InferenceDeploymentSpec{
+				Model: platformv1.InferenceModel{Name: "m", StorageURI: "s3://m"},
+				Image: "vllm/vllm-openai:test", Replicas: 1, Port: 8080,
+			},
+		}
+	}
+	policyFor := func(target string) *platformv1.GPUQuotaPolicy {
+		return &platformv1.GPUQuotaPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "p1", Namespace: "policy-home"},
+			Spec:       platformv1.GPUQuotaPolicySpec{TargetNamespace: target, Tenant: "team-a"},
+		}
+	}
+	mapper := func(objs ...client.Object) *InferenceDeploymentReconciler {
+		c := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).WithObjects(objs...).Build()
+		return &InferenceDeploymentReconciler{Client: c, Scheme: c.Scheme()}
+	}
+
+	// The policy lives in one namespace and governs another, so reading the policy's own namespace would
+	// enqueue nothing and leave every label stale.
+	//
+	// Mutation that turns this red: list without client.InNamespace, or use policy.Namespace as the filter.
+	It("enqueues only the InferenceDeployments in the policy's target namespace", func() {
+		r := mapper(infd("served", "team-a"), infd("elsewhere", "team-b"))
+		reqs := r.mapPolicyToInferenceDeployments(ctx, policyFor("team-a"))
+		Expect(reqs).To(HaveLen(1))
+		Expect(reqs[0].Name).To(Equal("served"))
+		Expect(reqs[0].Namespace).To(Equal("team-a"))
+	})
+
+	// A mapper wired to the wrong type would otherwise guess a namespace from an object that governs nothing.
+	//
+	// Mutation that turns this red: drop the type assertion and read GetNamespace() instead.
+	It("enqueues nothing for an object that is not a GPUQuotaPolicy", func() {
+		r := mapper(infd("served", "team-a"))
+		Expect(r.mapPolicyToInferenceDeployments(ctx, infd("served", "team-a"))).To(BeEmpty())
+	})
+
+	// A dropped failure shows up as a queue label that silently stays wrong, with nothing naming the policy
+	// that stopped being watched.
+	//
+	// Mutation that turns this red: return nil without logging when the List fails.
+	It("reports a failed list rather than dropping it", func() {
+		var logged []string
+		recorder := funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{})
+		c := fake.NewClientBuilder().
+			WithScheme(k8sClient.Scheme()).
+			WithInterceptorFuncs(interceptor.Funcs{
+				List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+					return fmt.Errorf("cache read failed")
+				},
+			}).
+			Build()
+		r := &InferenceDeploymentReconciler{Client: c, Scheme: c.Scheme()}
+
+		reqs := r.mapPolicyToInferenceDeployments(logf.IntoContext(ctx, recorder), policyFor("team-a"))
+
+		// Nothing to enqueue is still the right return; the point is that it is no longer the only thing that happens.
+		Expect(reqs).To(BeEmpty())
+		Expect(logged).To(HaveLen(1))
+		// The target namespace is what makes the line actionable, so it is asserted rather than just the message.
+		Expect(logged[0]).To(ContainSubstring("team-a"))
+		Expect(logged[0]).To(ContainSubstring("cache read failed"))
+	})
+})
 
 var _ = Describe("InferenceDeployment Controller", func() {
 	Context("When reconciling a resource", func() {

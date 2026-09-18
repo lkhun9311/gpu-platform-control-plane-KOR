@@ -54,7 +54,11 @@ func ownedBy(name string) func(*corev1.Pod) {
 func gpuValidator(t *testing.T, objs ...client.Object) *GPUPodValidator {
 	t.Helper()
 	return &GPUPodValidator{
-		Reader:  fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(objs...).Build(),
+		// testScheme rather than scheme.Scheme: the guard reads GPUQuotaPolicy to decide whether this
+		// namespace is metered by Kueue or by a ResourceQuota, and a fake client whose scheme does not know
+		// the type cannot hold one. Widening the scheme changes nothing for the tests that pass only
+		// built-ins.
+		Reader:  fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build(),
 		decoder: admission.NewDecoder(scheme.Scheme),
 	}
 }

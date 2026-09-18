@@ -13,7 +13,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	platformv1 "github.com/lkhun9311/gpu-mlops-platform-control-plane/api/v1"
 )
 
 func gpuJob(devices int64, mutate func(*batchv1.Job)) *batchv1.Job {
@@ -32,15 +36,36 @@ func gpuJob(devices int64, mutate func(*batchv1.Job)) *batchv1.Job {
 	return j
 }
 
-func askJob(t *testing.T, j *batchv1.Job) admission.Response {
+// askJob puts a Job through the handler against a cluster holding `objs` and nothing else.
+//
+// The empty default is the Kueue-authority case: no GPUQuotaPolicy targets the namespace, so nothing says
+// the work is metered by a ceiling and the queue requirement stands. Tests that want the ResourceQuota mode
+// pass the policy and the quota explicitly, which is the only way to reach the branch that admits.
+func askJob(t *testing.T, j *batchv1.Job, objs ...client.Object) admission.Response {
 	t.Helper()
 	raw, err := json.Marshal(j)
 	if err != nil {
 		t.Fatalf("marshal job: %v", err)
 	}
-	v := &GPUJobValidator{decoder: admission.NewDecoder(scheme.Scheme)}
+	v := &GPUJobValidator{
+		Reader:  fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build(),
+		decoder: admission.NewDecoder(scheme.Scheme),
+	}
 	return v.Handle(context.Background(), admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
-		Operation: admissionv1.Create, Object: runtime.RawExtension{Raw: raw}}})
+		Operation: admissionv1.Create, Namespace: j.Namespace, Object: runtime.RawExtension{Raw: raw}}})
+}
+
+// testScheme carries the platform types as well as the built-ins, because the guards now read GPUQuotaPolicy.
+func testScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	s := runtime.NewScheme()
+	if err := scheme.AddToScheme(s); err != nil {
+		t.Fatalf("add built-in scheme: %v", err)
+	}
+	if err := platformv1.AddToScheme(s); err != nil {
+		t.Fatalf("add platform scheme: %v", err)
+	}
+	return s
 }
 
 // Refusing the Pod is too late. Measured before this guard existed: a Job with grace 600 took the
