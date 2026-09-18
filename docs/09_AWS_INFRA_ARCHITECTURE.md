@@ -1,6 +1,10 @@
 # AWS Infrastructure Architecture (M5-a / M5-b)
 
-> **Status (2026-08-27): `bootstrap` is applied; `cluster` is planned and not applied.** The state bucket, its KMS key, the GitHub OIDC provider, the three CI roles, the ECR repository and the budget alarms exist in the project's AWS account (`ap-northeast-2`). The `cluster` state has been planned against that account — 89 resources — and never applied, so no VPC, EKS cluster, node or NAT gateway exists and nothing is currently billing beyond a few cents of S3 and KMS. `argo-bootstrap` has never been initialised.
+> **Status (2026-09-18): `bootstrap` is applied; `cluster` is not applied now but has been; `argo-bootstrap` holds one applied release.** The state bucket, its KMS key, the GitHub OIDC provider, the three CI roles, the ECR repository and the budget exist in the project's AWS account (`ap-northeast-2`). No VPC, EKS cluster, node or NAT gateway exists today, and nothing is billing beyond a few cents of S3 and KMS.
+>
+> This paragraph said "planned and never applied" until 2026-09-18, and the repository contradicted it in two places. `infra/aws/org/scp/README.md` records that **the first `terraform apply` on the cluster root failed on all four node groups** against an SCP that denied every `ec2:CreateLaunchTemplate` in the account (fixed in `63a625c`, 2026-08-31). The remote `cluster` state then held resources until 2026-09-03, when it was emptied; its object history shows 132,126 → 1,360 bytes across ten minutes that morning. **No record of a complete successful apply was found**, so what is established is that resources existed and were removed, not that a full apply ever finished. Today's plan is **96 resources**, not the 89 counted on 2026-08-27.
+>
+> `argo-bootstrap` has been initialised **and applied**: its state carries `serial 5`, one `helm_release.argocd`, and the outputs `argocd_chart_version` and `argocd_namespace`, last written 2026-09-02. `destroy.yml` explains how a state can outlive its cluster — it skips the Helm teardown when the Kubernetes API is unreachable — but which run left this one behind is not established.
 >
 > Design of record: an internal integration design (v3.2) reconciled from two independent AI reviews that raised 20 findings between them; that working document is not published. The network design in this document supersedes v3.2's public-subnet topology — see *What is deliberately absent*.
 
@@ -483,11 +487,11 @@ the security it buys is already bought by the private subnets.
 
 | Layer                         | Status                                                                                             |
 |-------------------------------|----------------------------------------------------------------------------------------------------|
-| Terraform code (`infra/aws/`) | **Written** (`bootstrap`, `cluster`, `argo-bootstrap` states) and offline-validated — never `terraform apply`'d |
+| Terraform code (`infra/aws/`) | **Written** (`bootstrap`, `cluster`, `argo-bootstrap` states) and offline-validated. All three have been applied: `bootstrap` still is, `argo-bootstrap` holds one `helm_release.argocd`, and `cluster` held resources until 2026-09-03. This row said "never `terraform apply`'d" until 2026-09-18 |
 | GitHub workflows              | **Written** (`ci.yml`, `infra.yml`, `destroy.yml`, `lint.yml`, `test.yml`, `test-e2e.yml`) — never run against real AWS credentials or infrastructure. `gpu.yml`, the GPU node-group switch this document describes, is **designed only and does not exist** |
 | Gateway image                 | **Built and pushed by `ci.yml`** to its own ECR repository, with the digest pinned into `config/gateway/kustomization.yaml` in the same PR as the operator's. Never yet run against a real cluster |
 | Operator custom metrics       | **Implemented** (`internal/controller/metrics.go` — taints, degraded transitions, quota drift)     |
-| Everything in this doc        | Code written per this design (v3.2) and offline-validated. **`bootstrap` is applied**; `cluster` is planned at 89 resources and never applied. The status line at the top of this document is the authority — this row contradicted it until 2026-08-29 |
+| Everything in this doc        | Code written per this design (v3.2) and offline-validated. **`bootstrap` is applied**; `cluster` is planned at 96 resources (2026-09-18) and is not applied now, having held resources until 2026-09-03. The status line at the top of this document is the authority — this row contradicted it until 2026-08-29 on one point and until 2026-09-18 on another |
 
 ## Build order (M5-a → M5-b)
 
