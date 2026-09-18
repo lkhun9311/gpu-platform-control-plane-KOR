@@ -286,7 +286,7 @@ note "deadline registered for $CLUSTER/$NODEGROUP before anything was started"
 
 # The nightly teardown is a second clock, and it is not the deadline this session just armed.
 #
-# .github/workflows/destroy.yml runs at 03:00 UTC, which is noon in KST. It terraform-destroys the whole
+# .github/workflows/destroy.yml runs at 18:00 UTC, which is 03:00 in KST. It terraform-destroys the whole
 # cluster, not just the node group, so a session started on a Korean morning is deleted underneath itself --
 # node, engine, records in flight and all -- by a workflow that has nothing to do with this run and cannot
 # see it. The TTL deadline does not protect against this: it scales a node group down, while this removes
@@ -294,12 +294,12 @@ note "deadline registered for $CLUSTER/$NODEGROUP before anything was started"
 #
 # Cron drift is real here (this workflow has been observed firing between 03:53 and 14:57 UTC), so the check
 # is a warning band rather than a precise boundary, and it refuses only when the collision is certain.
-destroy_utc_hour=3
+destroy_utc_hour=18
 now_min=$(( $(date -u '+%H') * 60 + $(date -u '+%M') ))
 destroy_min=$(( destroy_utc_hour * 60 ))
 [ "$destroy_min" -le "$now_min" ] && destroy_min=$(( destroy_min + 1440 ))
 until_destroy=$(( destroy_min - now_min ))
-note "the nightly destroy fires in about ${until_destroy} min (03:00 UTC, noon KST)"
+note "the nightly destroy fires in about ${until_destroy} min (18:00 UTC, 03:00 KST)"
 if [ "$until_destroy" -lt 120 ]; then
   [ "${IGNORE_NIGHTLY_DESTROY:-}" = "1" ] \
     || fail "the nightly destroy workflow fires in about ${until_destroy} min and removes this whole cluster, not just the node group -- the TTL deadline does not cover that. Start after it has run, disable the schedule for today, or set IGNORE_NIGHTLY_DESTROY=1 if you have confirmed it will not fire."
