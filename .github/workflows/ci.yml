@@ -47,7 +47,6 @@ jobs:
     permissions:
       contents: write
       id-token: write
-      pull-requests: write
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -127,38 +126,55 @@ jobs:
           fi
           echo "digest_ref=$DIGEST_REF" >> "$GITHUB_OUTPUT"
 
-      - name: Open an operator image digest-bump PR
+      - name: Pin the images this build produced
         env:
           GH_TOKEN: ${{ github.token }}
           DIGEST_REF: ${{ steps.build.outputs.digest_ref }}
           GATEWAY_DIGEST_REF: ${{ steps.build_gateway.outputs.digest_ref }}
         run: |
           set -euo pipefail
-          # Pin the operator image to the digest just pushed, so Argo CD deploys exactly this build.
+          # Pin both images to the digests just pushed, so Argo CD deploys exactly this build.
           #
-          # The bump lands via a PR rather than a direct push, keeping Git the source of truth.
+          # This used to open a pull request, and that is what made the pipeline non-terminating. Merging the
+          # PR created a new commit on main, which ran this job again, which built images with new digests --
+          # every build produced a distinct digest, so the bump was never empty -- which opened the next PR.
+          # On 2026-09-19 the chain ran six times: #174 through #179, ten of that day's thirteen commits on
+          # main, each one costing a human a merge click. Nothing in it was reviewable; the PR body said the
+          # same sentence every time and the diff was two digest lines a person cannot verify by reading.
+          #
+          # So the commit now lands directly on main with [skip ci], which GitHub honours by creating no
+          # workflow runs for that push. The chain stops after one pass, Git stays the source of truth, and
+          # the images Argo CD deploys are still pinned by digest rather than by a mutable tag.
           make kustomize
           ( cd config/manager && "$GITHUB_WORKSPACE/bin/kustomize" edit set image "controller=${DIGEST_REF}" )
-          # The gateway is pinned in the same PR as the operator.
+          # The gateway is pinned in the same commit as the operator.
           #
-          # Two PRs would let the cluster run a gateway from one commit against an operator from another, and
-          # nothing downstream records which pair was live.
+          # Two commits would let the cluster run a gateway from one build against an operator from another,
+          # and nothing downstream records which pair was live.
           ( cd config/gateway && "$GITHUB_WORKSPACE/bin/kustomize" edit set image "gateway=${GATEWAY_DIGEST_REF}" )
-          BRANCH="bot/operator-digest-${GITHUB_SHA:0:12}"
           git config user.name "gpu-platform-ci"
           git config user.email "ci@users.noreply.github.com"
-          git checkout -b "$BRANCH"
           git add config/manager/kustomization.yaml config/gateway/kustomization.yaml
-          git commit -m "chore: pin operator and gateway images to digest ${GITHUB_SHA:0:12}"
+          # A re-run of this job pins digests that are already pinned, and committing nothing fails under
+          # set -e. That is a success, not a failure: the tree already says what this step wants it to say.
+          if git diff --cached --quiet; then
+            echo "::notice::config already pins ${DIGEST_REF} and ${GATEWAY_DIGEST_REF}; nothing to commit."
+            exit 0
+          fi
+          git commit -m "chore: pin operator and gateway images to digest ${GITHUB_SHA:0:12} [skip ci]"
           # Embed the token in the remote URL, since persist-credentials is false above.
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          # Use force-with-lease so a re-run of this job for the same commit does not fail on a non-fast-forward push.
-          git push --force-with-lease origin "$BRANCH"
-          # Skip PR creation if a re-run already opened one for this branch.
-          if [ -z "$(gh pr list --head "$BRANCH" --json number --jq '.[].number')" ]; then
-            gh pr create --base main --head "$BRANCH" \
-              --title "chore: bump operator and gateway image digests" \
-              --body "Automated digest pin from commit ${GITHUB_SHA}. Argo CD will deploy this exact build once merged."
-          else
-            echo "A digest-bump PR for $BRANCH already exists; skipping create."
-          fi
+          # Rebase rather than force: main is the branch everything deploys from, and a forced push here
+          # would discard whatever landed while this job was building. Three attempts, then fail loudly --
+          # a pin that silently did not land would leave Argo CD on the previous image with nothing saying so.
+          for attempt in 1 2 3; do
+            if git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"; then
+              echo "pinned on attempt ${attempt}"
+              exit 0
+            fi
+            echo "push rejected; rebasing onto ${GITHUB_REF_NAME} and retrying"
+            git fetch origin "${GITHUB_REF_NAME}"
+            git rebase "origin/${GITHUB_REF_NAME}"
+          done
+          echo "::error::could not pin the image digests onto ${GITHUB_REF_NAME} after 3 attempts"
+          exit 1
