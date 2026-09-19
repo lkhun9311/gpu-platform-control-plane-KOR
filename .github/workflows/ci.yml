@@ -69,16 +69,33 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2.1.6
 
+      # Reuse the image when this commit was already built, rather than pushing the same tag twice.
+      #
+      # Both ECR repositories are IMMUTABLE and the tag is $GITHUB_SHA, so a re-run of this job for a commit
+      # that already published dies here with `tag invalid: ... cannot be overwritten`. That is not a build
+      # failure, but it reads as one, and it takes the digest-bump step down with it: on 2026-09-18 that step
+      # was `skipped` in a re-run and could not be exercised at all. The step below is written to survive
+      # re-runs -- force-with-lease, skip PR creation if one exists -- and none of that could ever run.
+      #
+      # So the tag is checked first. If ECR already has it, the digest comes from ECR rather than from a
+      # second push, and the rest of the job proceeds exactly as it would on a first run.
       - name: Build and push the operator image
         id: build
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
           IMG="$REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA"
-          make docker-build IMG="$IMG"
-          make docker-push IMG="$IMG"
-          # Capture the pushed image's digest reference so the next step can pin it exactly.
-          DIGEST_REF=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMG")
+          EXISTING=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" \
+            --image-ids imageTag="$GITHUB_SHA" --query 'imageDetails[0].imageDigest' --output text 2>/dev/null || true)
+          if [ -n "$EXISTING" ] && [ "$EXISTING" != "None" ]; then
+            echo "::notice::$ECR_REPOSITORY already holds $GITHUB_SHA ($EXISTING); reusing it instead of pushing the immutable tag again."
+            DIGEST_REF="$REGISTRY/$ECR_REPOSITORY@$EXISTING"
+          else
+            make docker-build IMG="$IMG"
+            make docker-push IMG="$IMG"
+            # Capture the pushed image's digest reference so the next step can pin it exactly.
+            DIGEST_REF=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMG")
+          fi
           echo "digest_ref=$DIGEST_REF" >> "$GITHUB_OUTPUT"
 
       # The gateway image, which CI did not build.
@@ -90,15 +107,24 @@ jobs:
       #
       # Built from Dockerfile.gateway rather than through make, because the Makefile's docker targets are the
       # operator's and this repository does not run make targets that invoke controller-gen.
+      #
+      # The immutable-tag reuse below is the operator step's, for the same reason given there.
       - name: Build and push the gateway image
         id: build_gateway
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
           IMG="$REGISTRY/$ECR_GATEWAY_REPOSITORY:$GITHUB_SHA"
-          docker build -f Dockerfile.gateway -t "$IMG" .
-          docker push "$IMG"
-          DIGEST_REF=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMG")
+          EXISTING=$(aws ecr describe-images --repository-name "$ECR_GATEWAY_REPOSITORY" \
+            --image-ids imageTag="$GITHUB_SHA" --query 'imageDetails[0].imageDigest' --output text 2>/dev/null || true)
+          if [ -n "$EXISTING" ] && [ "$EXISTING" != "None" ]; then
+            echo "::notice::$ECR_GATEWAY_REPOSITORY already holds $GITHUB_SHA ($EXISTING); reusing it instead of pushing the immutable tag again."
+            DIGEST_REF="$REGISTRY/$ECR_GATEWAY_REPOSITORY@$EXISTING"
+          else
+            docker build -f Dockerfile.gateway -t "$IMG" .
+            docker push "$IMG"
+            DIGEST_REF=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMG")
+          fi
           echo "digest_ref=$DIGEST_REF" >> "$GITHUB_OUTPUT"
 
       - name: Open an operator image digest-bump PR
