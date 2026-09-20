@@ -3,7 +3,8 @@
 > **Status (2026-08-07).** This architecture diagram and boundary table mix built and designed-only pieces
 > in one picture; the execution-boundary table below is the accurate breakdown. In short: CRDs/controllers
 > for `InferenceDeployment`, `GPUQuotaPolicy`, and `NodeHealth` are **built**; `MLTrainingJob` + Kueue is
-> **built** (M6, the only milestone with live end-to-end evidence); the gateway (routing, auth, rate limit,
+> **built** (M6, run end-to-end on kind — and not the only milestone with a live run record: M7, the gateway
+> chain and the chaos scenarios have theirs under `hack/`); the gateway (routing, auth, rate limit,
 > proxy, metrics) is **built, unit-tested and deployed on kind but never on EKS**; the M5-b admission guard and benchmark
 > harness are **built, and MEASURED on a paid GPU**: four repetitions on 2026-09-03 and an engine-level scheduler microtest on 2026-09-04. The guard failed — 83.7x against a pre-registered 1.25x premium-tail target — and the harness declared the run invalid rather than reporting a protection claim; `GpuSharingBenchmark` and its "thin status
 > writer" are **designed only — no CRD, no code**. eBPF and Nsight are **not implemented at all**, and

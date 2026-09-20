@@ -167,14 +167,66 @@ jobs:
           # Rebase rather than force: main is the branch everything deploys from, and a forced push here
           # would discard whatever landed while this job was building. Three attempts, then fail loudly --
           # a pin that silently did not land would leave Argo CD on the previous image with nothing saying so.
+          pinned=""
           for attempt in 1 2 3; do
             if git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"; then
               echo "pinned on attempt ${attempt}"
-              exit 0
+              pinned=yes
+              break
             fi
             echo "push rejected; rebasing onto ${GITHUB_REF_NAME} and retrying"
             git fetch origin "${GITHUB_REF_NAME}"
             git rebase "origin/${GITHUB_REF_NAME}"
           done
-          echo "::error::could not pin the image digests onto ${GITHUB_REF_NAME} after 3 attempts"
-          exit 1
+          if [ -z "$pinned" ]; then
+            echo "::error::could not pin the image digests onto ${GITHUB_REF_NAME} after 3 attempts"
+            exit 1
+          fi
+
+          # Offer the same commit to dev, because otherwise only main ever sees it.
+          #
+          # This job runs on main, so the pin lands on main alone and dev keeps whatever digests it had. The
+          # next dev -> main promotion then carries those older digests over the newer ones and the cluster
+          # silently drops one build behind. That happened four times on 2026-09-19/20 -- PRs #185, #188,
+          # #192 and #196 exist only to undo it -- and it never failed anything, which is why it needed
+          # measuring before every promotion rather than noticing after one.
+          #
+          # Fast-forward ONLY. dev holding commits main does not have is the ordinary mid-development state,
+          # and forcing here would delete them -- a worse failure than the drift this is fixing.
+          #
+          # dev has to be fetched first. `actions/checkout` clones at fetch-depth 1, so this repository knows
+          # nothing about dev and `git push HEAD:refs/heads/dev` is refused with "fetch first" whatever dev
+          # actually contains. The first version of this block skipped the fetch and then reported the
+          # rejection as "dev has commits main does not" -- a guess printed as a diagnosis, for a run where
+          # `git rev-list origin/main..origin/dev` was empty. Each branch below now says only what was
+          # established, because a notice that names the wrong cause sends its reader to the wrong place.
+          if [ "${GITHUB_REF_NAME}" = "main" ]; then
+            # The history has to be complete before any of this means anything.
+            #
+            # `--depth=1` was the second version of this block and it failed for a subtler reason than the
+            # first: the fetch succeeded, and `merge-base --is-ancestor` then answered FALSE for a dev that
+            # really was an ancestor. With both sides truncated to one commit there is no common ancestor
+            # left to find, so the check reports "dev is ahead" for a dev that is behind. Reproduced against
+            # a real shallow clone: false on the shallow pair, true on the same commits with full history.
+            #
+            # Pushing without the check does not work either -- git refuses a push from a shallow repository
+            # locally, before the server ever gets to apply its own fast-forward rule.
+            #
+            # `--unshallow` is asked for only when the clone IS shallow, because on a complete repository it
+            # prints `fatal: --unshallow on a complete repository does not make sense` and still exits 0. An
+            # `if ! git fetch --unshallow` would read that fatal as success, which is the failure mode this
+            # repository keeps finding: a command whose exit code is not its verdict.
+            if [ "$(git rev-parse --is-shallow-repository)" = "true" ] && ! git fetch --unshallow origin; then
+              echo "::notice::could not deepen the history, so the pin was left on main alone. Merge main into dev before the next promotion."
+            elif ! git fetch origin dev; then
+              echo "::notice::could not fetch dev, so the pin was left on main alone. Merge main into dev before the next promotion."
+            elif git merge-base --is-ancestor FETCH_HEAD HEAD; then
+              if git push origin "HEAD:refs/heads/dev"; then
+                echo "::notice::dev fast-forwarded to the same pin, so the next promotion cannot roll the deployment back."
+              else
+                echo "::notice::dev was a fast-forward but the push was refused; see the git output above. Merge main into dev before the next promotion."
+              fi
+            else
+              echo "::notice::dev holds commits main does not, so it was left alone. Merge main into dev before the next promotion or it will carry older digests."
+            fi
+          fi
