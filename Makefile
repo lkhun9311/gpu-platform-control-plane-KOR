@@ -374,3 +374,7 @@ infra-validate: terraform kustomize actionlint ## Validate Terraform (offline), 
 		fi; \
 	done
 	"$(ACTIONLINT)" -color
+
+.PHONY: docs-check
+docs-check: ## Check that every name the published docs put in backticks exists in this repository.
+	./hack/check-doc-symbols.sh

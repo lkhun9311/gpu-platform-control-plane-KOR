@@ -65,8 +65,8 @@ A multi-tenant GPUaaS control plane that:
 | `GPUQuotaPolicy`      | per-tenant GPU quota / rate limit            | type + reconciler (ResourceQuota sync, drift recovery) — M3 merged; `rateLimit` feeds the M4-b gateway — **M4-b merged, gateway built, unit-tested and deployed on kind, never on EKS** |
 | `NodeHealth`          | GPU node intake and operational state        | type + reconciler (observe + taint, finalizer, drift recovery) — M2/M3 merged; **no GPU fault signal reaches it** — nothing Xid or ECC exists, and the DCGM code that does exist reads utilisation for the queuelab rather than health for this controller |
 | `GpuSharingBenchmark` | declare a noisy-neighbor / sharing benchmark | designed — spec `2026-07-04-gpusharingbenchmark-crd-design.md`; no code yet (M5)                                     |
-| `WorkloadRun`         | record a workload execution                  | sketched (doc 02) only; no spec or code yet (M7)                                                                     |
-| `MLTrainingJob`       | Kueue-admitted training job                  | type + full reconciler — translates to a `batch/v1` Job admitted through Kueue, two-tenant cohort borrowing/reclaim preemption, run end-to-end on kind (`hack/m6-kind-e2e.md`) — **M6 merged, built, only milestone with live end-to-end evidence** |
+| `WorkloadRun`         | record a workload execution                  | type + reconciler + driver — `internal/controller/workloadrun_controller.go` (320 lines). A Pod kill was recorded automatically as `Ready → Pending → Ready` with recovery at 20 s on kind (`hack/m7-evidence-trail.log`). It is not a general-purpose ledger |
+| `MLTrainingJob`       | Kueue-admitted training job                  | type + full reconciler — translates to a `batch/v1` Job admitted through Kueue, two-tenant cohort borrowing/reclaim preemption, run end-to-end on kind (`hack/m6-kind-e2e.md`) — **M6 merged and built**. It is not the only milestone with a live run record: M7 (`hack/m7-evidence-trail.log`), the gateway chain and the three chaos scenarios have theirs |
 
 Milestone numbering is unified across all docs and the README: M1 skeleton/CRDs · M2 NodeHealth reconciliation contract · M3 enforcement (taint + ResourceQuota) · M4 serving (M4-a InferenceDeployment, M4-b gateway) · M5-a AWS hosting (Terraform/CI/GitOps, operator on EKS) · M5-b real-GPU flagship (benchmark + admission guard) · M5-c depth (cost/fairness frontier + sharing-mode matrix) · M5-d technical write-up · M6 training admission (Kueue — promoted from stretch 2026-07-04) · M7 failure/evidence (`WorkloadRun`). Older drafts that used other numberings defer to this.
 
@@ -85,7 +85,7 @@ The control-plane logic (CRDs, controllers, admission, quota, gateway routing) r
 | `05_LLM_SERVING_GATEWAY.md`             | tenant-aware gateway, Open WebUI boundary                                          |
 | `06_OBSERVABILITY_BENCHMARK_FAILURE.md` | observability layers, failure reports                                              |
 | `07_OPERATIONS_LEDGER_AND_EVIDENCE.md`  | ledger schema, evidence matrix                                                     |
-| `08_INTERVIEW_DEFENSE.md`               | interview Q&A (internal/public)                                                    |
+| `08_INTERVIEW_DEFENSE.md` — **not in this repository** | interview Q&A. `.gitignore` publishes `docs/00`–`07` and `09` only, so this file is untracked and exists on the author's machine alone. This row promised a reader a document they cannot open |
 | `09_AWS_INFRA_ARCHITECTURE.md`          | M5-a/M5-b AWS architecture: Terraform states, network, OIDC, GitOps, cost/teardown |
 
 ## README vs this doc

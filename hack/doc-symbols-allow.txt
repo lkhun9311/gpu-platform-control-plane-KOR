@@ -1,0 +1,36 @@
+# Names the published docs spell out that this repository deliberately does not contain.
+#
+# Format: TOKEN<TAB>reason. The reason is mandatory and is enforced by hack/check-doc-symbols.sh, because an
+# allowlist whose entries carry no reason is where a failing check goes to be taught to pass.
+#
+# A name belongs here only when the document is ALREADY honest about it -- it says the thing is designed,
+# deferred, or absent. A name that the document asserts as working belongs in the document's correction, not
+# in this file.
+#
+# Known limitation: an entry here is global, not scoped to the line that earned it. Once a name is listed,
+# a LATER document could assert it as working and this check would stay silent. The check buys the half that
+# is mechanical -- a name nothing in the repository spells -- and buys nothing about whether a name that
+# exists is described correctly. Scoping entries per file would close the first gap and is not built.
+
+# --- named precisely because they do not exist ----------------------------------------------------------
+ValidatingAdmissionPolicy	docs/02 names it to record that no VAP is shipped; the admission layer is a ValidatingWebhookConfiguration
+ValidatingAdmissionPolicyBinding	same correction in docs/02: neither VAP resource exists under config/
+QuotaSatisfied	docs/02 names it to record that the controller writes no such condition; it writes Available plus a phase
+NodeClassHealthy	as QuotaSatisfied -- named in docs/02 only to say it was deferred and never built
+WarmCacheReady	as QuotaSatisfied -- named in docs/02 only to say it was deferred and never built
+TrainingQuotaSynced	docs/02 names it to record that no such condition is written; the controller writes Synced and, in training mode, Admitting
+admission_guard_decisions_total	docs/05 names it to record the wrong name it carried; the real series is gpuaas_gateway_admission_decisions_total
+unknown_api_key	docs/05 names it to record the wrong 401 code it carried; errorCode returns unauthorized
+tenant_not_provisioned	docs/05 names it to record the wrong 403 code it carried; errorCode returns no_policy
+gpu.yml	docs/09 names it three times to record that the GPU node-group workflow was designed and never written; scaling is done by hack/m5b-gpu-session.sh and hack/lib/gpu-ttl.sh
+08_INTERVIEW_DEFENSE.md	docs/00's document map names it to record that .gitignore publishes docs/00-07 and 09 only, so this file is untracked
+
+# --- designed, stated as designed -----------------------------------------------------------------------
+GpuSharingBenchmark	the CRD is designed in docs/superpowers/specs/2026-07-04-gpusharingbenchmark-crd-design.md and every mention says no code exists; the sharing harness that DOES exist is internal/bench/sharing_matrix.go
+cost_per_1k_tokens_estimated	a column of the operations-ledger schema in docs/04; the ledger is unimplemented and doc 07 says so
+node_health_history	a table of the operations-ledger schema in docs/07; the ledger is unimplemented and the same doc says so
+
+# --- the intended artifact set of a run whose outputs were never committed ------------------------------
+analysis.md	docs/04 lists the artifact set a noisy-neighbor run would commit under evidence/benchmark-reports/; that directory holds only .gitkeep
+gateway-429.log	same list in docs/04 -- an intended artifact, and the document says so on the same line
+scripts/demo-06-failure-injection.sh	docs/06 lists it under "To fill" as work not yet done, not as a script a reader can run
