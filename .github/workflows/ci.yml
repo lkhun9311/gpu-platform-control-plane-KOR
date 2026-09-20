@@ -191,14 +191,25 @@ jobs:
           # #192 and #196 exist only to undo it -- and it never failed anything, which is why it needed
           # measuring before every promotion rather than noticing after one.
           #
-          # Fast-forward ONLY, and a rejection is a normal outcome rather than an error. dev holding commits
-          # main does not have is the ordinary mid-development state, and forcing here would delete them --
-          # the one failure mode worse than the drift this is fixing. When it is refused, the manual
-          # carry-back PR is still the answer and the notice says so.
+          # Fast-forward ONLY. dev holding commits main does not have is the ordinary mid-development state,
+          # and forcing here would delete them -- a worse failure than the drift this is fixing.
+          #
+          # dev has to be fetched first. `actions/checkout` clones at fetch-depth 1, so this repository knows
+          # nothing about dev and `git push HEAD:refs/heads/dev` is refused with "fetch first" whatever dev
+          # actually contains. The first version of this block skipped the fetch and then reported the
+          # rejection as "dev has commits main does not" -- a guess printed as a diagnosis, for a run where
+          # `git rev-list origin/main..origin/dev` was empty. Each branch below now says only what was
+          # established, because a notice that names the wrong cause sends its reader to the wrong place.
           if [ "${GITHUB_REF_NAME}" = "main" ]; then
-            if git push origin "HEAD:refs/heads/dev"; then
-              echo "::notice::dev fast-forwarded to the same pin, so the next promotion cannot roll the deployment back."
+            if ! git fetch --depth=1 origin dev; then
+              echo "::notice::could not fetch dev, so the pin was left on main alone. Merge main into dev before the next promotion."
+            elif git merge-base --is-ancestor FETCH_HEAD HEAD; then
+              if git push origin "HEAD:refs/heads/dev"; then
+                echo "::notice::dev fast-forwarded to the same pin, so the next promotion cannot roll the deployment back."
+              else
+                echo "::notice::dev was a fast-forward but the push was refused; see the git output above. Merge main into dev before the next promotion."
+              fi
             else
-              echo "::notice::dev has commits main does not, so it was left alone. Merge main into dev before the next promotion or it will carry older digests."
+              echo "::notice::dev holds commits main does not, so it was left alone. Merge main into dev before the next promotion or it will carry older digests."
             fi
           fi
