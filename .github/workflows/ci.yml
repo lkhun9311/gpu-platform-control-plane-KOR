@@ -167,14 +167,49 @@ jobs:
           # Rebase rather than force: main is the branch everything deploys from, and a forced push here
           # would discard whatever landed while this job was building. Three attempts, then fail loudly --
           # a pin that silently did not land would leave Argo CD on the previous image with nothing saying so.
+          pinned=""
           for attempt in 1 2 3; do
             if git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"; then
               echo "pinned on attempt ${attempt}"
-              exit 0
+              pinned=yes
+              break
             fi
             echo "push rejected; rebasing onto ${GITHUB_REF_NAME} and retrying"
             git fetch origin "${GITHUB_REF_NAME}"
             git rebase "origin/${GITHUB_REF_NAME}"
           done
-          echo "::error::could not pin the image digests onto ${GITHUB_REF_NAME} after 3 attempts"
-          exit 1
+          if [ -z "$pinned" ]; then
+            echo "::error::could not pin the image digests onto ${GITHUB_REF_NAME} after 3 attempts"
+            exit 1
+          fi
+
+          # Offer the same commit to dev, because otherwise only main ever sees it.
+          #
+          # This job runs on main, so the pin lands on main alone and dev keeps whatever digests it had. The
+          # next dev -> main promotion then carries those older digests over the newer ones and the cluster
+          # silently drops one build behind. That happened four times on 2026-09-19/20 -- PRs #185, #188,
+          # #192 and #196 exist only to undo it -- and it never failed anything, which is why it needed
+          # measuring before every promotion rather than noticing after one.
+          #
+          # Fast-forward ONLY. dev holding commits main does not have is the ordinary mid-development state,
+          # and forcing here would delete them -- a worse failure than the drift this is fixing.
+          #
+          # dev has to be fetched first. `actions/checkout` clones at fetch-depth 1, so this repository knows
+          # nothing about dev and `git push HEAD:refs/heads/dev` is refused with "fetch first" whatever dev
+          # actually contains. The first version of this block skipped the fetch and then reported the
+          # rejection as "dev has commits main does not" -- a guess printed as a diagnosis, for a run where
+          # `git rev-list origin/main..origin/dev` was empty. Each branch below now says only what was
+          # established, because a notice that names the wrong cause sends its reader to the wrong place.
+          if [ "${GITHUB_REF_NAME}" = "main" ]; then
+            if ! git fetch --depth=1 origin dev; then
+              echo "::notice::could not fetch dev, so the pin was left on main alone. Merge main into dev before the next promotion."
+            elif git merge-base --is-ancestor FETCH_HEAD HEAD; then
+              if git push origin "HEAD:refs/heads/dev"; then
+                echo "::notice::dev fast-forwarded to the same pin, so the next promotion cannot roll the deployment back."
+              else
+                echo "::notice::dev was a fast-forward but the push was refused; see the git output above. Merge main into dev before the next promotion."
+              fi
+            else
+              echo "::notice::dev holds commits main does not, so it was left alone. Merge main into dev before the next promotion or it will carry older digests."
+            fi
+          fi
