@@ -167,14 +167,38 @@ jobs:
           # Rebase rather than force: main is the branch everything deploys from, and a forced push here
           # would discard whatever landed while this job was building. Three attempts, then fail loudly --
           # a pin that silently did not land would leave Argo CD on the previous image with nothing saying so.
+          pinned=""
           for attempt in 1 2 3; do
             if git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"; then
               echo "pinned on attempt ${attempt}"
-              exit 0
+              pinned=yes
+              break
             fi
             echo "push rejected; rebasing onto ${GITHUB_REF_NAME} and retrying"
             git fetch origin "${GITHUB_REF_NAME}"
             git rebase "origin/${GITHUB_REF_NAME}"
           done
-          echo "::error::could not pin the image digests onto ${GITHUB_REF_NAME} after 3 attempts"
-          exit 1
+          if [ -z "$pinned" ]; then
+            echo "::error::could not pin the image digests onto ${GITHUB_REF_NAME} after 3 attempts"
+            exit 1
+          fi
+
+          # Offer the same commit to dev, because otherwise only main ever sees it.
+          #
+          # This job runs on main, so the pin lands on main alone and dev keeps whatever digests it had. The
+          # next dev -> main promotion then carries those older digests over the newer ones and the cluster
+          # silently drops one build behind. That happened four times on 2026-09-19/20 -- PRs #185, #188,
+          # #192 and #196 exist only to undo it -- and it never failed anything, which is why it needed
+          # measuring before every promotion rather than noticing after one.
+          #
+          # Fast-forward ONLY, and a rejection is a normal outcome rather than an error. dev holding commits
+          # main does not have is the ordinary mid-development state, and forcing here would delete them --
+          # the one failure mode worse than the drift this is fixing. When it is refused, the manual
+          # carry-back PR is still the answer and the notice says so.
+          if [ "${GITHUB_REF_NAME}" = "main" ]; then
+            if git push origin "HEAD:refs/heads/dev"; then
+              echo "::notice::dev fast-forwarded to the same pin, so the next promotion cannot roll the deployment back."
+            else
+              echo "::notice::dev has commits main does not, so it was left alone. Merge main into dev before the next promotion or it will carry older digests."
+            fi
+          fi
