@@ -31,13 +31,21 @@ policy.spec.rateLimit       --> token-bucket config (nil → unlimited, logged +
 | Condition                                       | Status      | canonical `error.code`      |
 |-------------------------------------------------|-------------|-----------------------------|
 | wrong method/path                               | 405 / 404   | —                           |
-| missing/unknown API key                         | 401         | `unknown_api_key`           |
-| tenant has no GPUQuotaPolicy                    | 403         | `tenant_not_provisioned`    |
+| missing/unknown API key                         | 401         | `unauthorized`              |
+| tenant has no GPUQuotaPolicy                    | 403         | `no_policy`                 |
 | token bucket exhausted                          | 429         | `rate_limited`              |
 | guard engaged, standard-tier long-context (M5)  | 429         | `kv_cache_pressure`         |
-| malformed JSON / missing model / body too large | 400         | `invalid_request`           |
+| malformed JSON / missing model                  | 400         | `bad_request`               |
+| body too large                                  | 413         | `payload_too_large`         |
 | no InferenceDeployment for model                | 404         | `model_not_found`           |
-| upstream connect/refused/DNS                    | 502         | `upstream_unreachable`      |
+| upstream connect/refused/DNS                    | 502         | `bad_gateway`               |
+
+> ⚠️ Four of these codes were wrong until 2026-09-19, and the oversized-body row named the wrong status as
+> well. The document said `unknown_api_key`, `tenant_not_provisioned`, `invalid_request` and
+> `upstream_unreachable`; `errorCode` in `internal/gateway/proxy.go` has always returned `unauthorized`,
+> `no_policy`, `bad_request` and `bad_gateway`, and an oversized body is refused with 413, not 400. Every one
+> of them reads as a plausible name, which is why nobody caught them by reading. `hack/check-doc-symbols.sh`
+> now fails on a name the repository never mentions.
 | upstream timeout/deadline                       | 504         | `upstream_timeout`          |
 | upstream HTTP 5xx                               | passthrough | (upstream body, unmodified) |
 
@@ -62,7 +70,9 @@ gpuaas_gateway_rate_limited_total{tenant}
 gpuaas_gateway_upstream_errors_total{tenant,model}
 ```
 
-M5 adds the guard series (`admission_guard_decisions_total`, backend pressure gauges — guard spec).
+M5 adds the guard series (`gpuaas_gateway_admission_decisions_total`, backend pressure gauges — guard spec).
+Every series this component exposes carries the `gpuaas_gateway_` prefix (`internal/gateway/metrics.go`); this
+line named it `admission_guard_decisions_total`, which matches nothing a scrape would return.
 
 ## Deployment
 
